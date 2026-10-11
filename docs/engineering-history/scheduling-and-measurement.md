@@ -1520,3 +1520,50 @@ block in, and `tensorBytes` read `len(t.data)` -- zero for a weight whose page i
 out, which priced every block at nothing and made a PLACEMENT think the whole
 model was free. A gate that has been red since a refactor is not noise; it is
 that refactor's unfinished half.
+
+## Fused runs: a decode token's resident host blocks as one pool region
+
+`TestFusionCeiling` priced whole-layer fusion as regions removed times a round
+trip, and the round trip is mostly the region's door, not its barrier: a
+sequence bump, a gate every worker CASes to join and the caller closes, and a
+wait for every joined worker to leave. `sched.Pool.Fuse` keeps the door open.
+The workers join once; every region the caller issues until `Unfuse` is a
+PHASE: one store of a word carrying the phase's tag, its chunk count and the
+next chunk, claimed by CAS on the whole word, and finished when the chunks done
+reach the count. Completion is counted in chunks rather than workers, so a
+worker the OS keeps off a CPU holds nothing up unless it claimed a chunk -- the
+property the gate exists for -- and a worker reads the job only after a claim
+succeeded, so a straggler can never run a chunk of the next phase with the last
+phase's body.
+
+What the model fuses is a RUN, not a block: consecutive resident host blocks
+and the host head are one region (`engine/model/fuse.go`). A device run, a block
+whose page has to be read, or the end of the token closes it. Nothing is
+compiled, so a relocation, an eviction or a seam move needs no re-link: the next
+token's runs follow its placement as it is.
+
+    Llama-3.2-1B Q4_K_M, 16 blocks   per op 218 regions/token   fused 1 region + 218 phases
+    olmoe-1b-7b Q4_K_M,  16 blocks   per op 234                 fused 1 + 234
+    Qwen3.5-0.8B Q4_K_M, 24 blocks   per op 354                 fused 1 + 354
+    gemma-3-1b Q4_K_M,   26 blocks   per op 353                 fused 1 + 353
+    the same with a two-frame page budget: one run per block read (15-25 a token)
+
+The kernels, chunks and order are the per-op path's, so the logits are the same
+bits (`TestFusedBlocksMatchPerOp`, every principle fixture, resident and paged).
+Run against violations: a phase published before its predecessor finished
+(`TestFusedPhaseOrder` fails; the model gate crashes), and workers that drop a
+third of their chunks (the model gate fails at token 0). The first version also
+caught its own bug: a worker that joined late read `p.j` after the first phase
+had replaced the fused job and drained the phase as an ordinary region, running
+chunks twice. Whether a worker is fused is now asked of the region, not the job.
+
+Not fused, by choice: a crew another session or crew shares the turn with (a
+fused caller holding the cores while it waits on a lock another session's
+region holds would deadlock), a NUMA pool (a phase drains flat, and DoNodes'
+placement is what that pool is for), and a run with pprof region labels on (a
+phase carries no label, so a profile is the per-op run). Prefill and the batched
+step are not fused; their regions carry far more work each.
+
+On the laptop an empty phase cost 489 ns against an empty region's 1.06 us
+(`JITLLM_FUSE_BENCH=1 go test ./engine/sched -run Cheaper`, wide IQR: indicative).
+The Xeon rows are in docs/perf/current.md's evidence trail and the PR.
