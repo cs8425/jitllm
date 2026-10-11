@@ -122,6 +122,12 @@ type State struct {
 	// rg is the pool regions a decode token runs, with their functions built
 	// once (see regions).
 	rg regions
+	// fuseOff runs this State's decode one pool region per op
+	// (WithBlockFusion, SetBlockFusion); fused is whether a fused run of host
+	// blocks is open (fuse.go), and FusedRuns counts the runs opened.
+	fuseOff   bool
+	fused     bool
+	FusedRuns int64
 
 	// kv is the paged KV history (see engine/model/kvpage.go). Pages are committed as
 	// the sequence reaches them rather than reserved for the whole context.
@@ -612,7 +618,8 @@ func (m *Model) newStateRange(nseq, maxSeq, lo, hi int) *State {
 		maxSeq = c.NCtx
 	}
 	s := &State{m: m, c: m.Cfg, lo: lo, hi: hi, gpuLayers: lo, maxSeq: maxSeq, reqSeq: req, nseq: nseq,
-		devFallback: true, relocate: true, prof: m.opt.profile, outNorm: m.outNorm, outW: &m.output}
+		devFallback: true, relocate: true, prof: m.opt.profile, outNorm: m.outNorm, outW: &m.output,
+		fuseOff: m.opt.noFuse}
 	s.holdHostRuns()
 	// A State over a prediction block projects through that block's head.
 	if lo < len(m.layers) {
@@ -3373,12 +3380,15 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 	// token an allocation whenever the runtime's per-P pool runs dry.
 	var unhide func()
 	defer func() {
+		s.unfuse()
 		if unhide != nil {
 			unhide()
 		}
 	}()
 	for li := s.lo; li < s.hi; li++ {
 		if s.devAt(li) {
+			// A device run ends the fused host run (fuse.go).
+			s.unfuse()
 			hi := li + 1
 			for hi < s.hi && s.devAt(hi) {
 				hi++
@@ -3445,10 +3455,15 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			continue
 		}
 		// The block is faulted in at first touch; with a budget that holds the
-		// model this is one nil compare.
+		// model this is one nil compare. A block that has to be read ends the
+		// fused run before the read, and the run reopens after it.
+		if s.fused && !m.blockResident(li) {
+			s.unfuse()
+		}
 		if err := m.pageIn(li); err != nil {
 			return nil, err
 		}
+		s.fuseRun()
 		l := &m.layers[li]
 		if c.DSV4() {
 			s.ds.rslot[0], s.ds.rpos[0], s.ds.rid[0] = 0, s.pos, s.tok
@@ -3801,6 +3816,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 	// which has the norm and the weights either way.
 	done := false
 	if s.head != nil && !folded {
+		s.unfuse()
 		defer s.rows.hiddenOf(s.head)()
 		if s.ld.Layers(s.gpuLayers, s.gpuLayers, s.pos, 1, s.resid(), s.cs[:c.RopeW()], s.swaTable(c.NRotSWA), s.head) {
 			done = true
@@ -3819,6 +3835,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			copy(s.rows.hidden, s.h)
 		}
 	}
+	s.unfuse()
 	// After both arms: when the tier ran the head it also applied the final
 	// softcap, so that arm takes only the scale.
 	if done {

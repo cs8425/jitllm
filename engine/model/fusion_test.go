@@ -64,6 +64,9 @@ func fusionCeiling(t *testing.T, path string) {
 	defer m.Close()
 	s := m.NewState(256)
 	defer s.Close()
+	// The ceiling is of the per-op path: a fused run (fuse.go) is what it
+	// prices, and with it on the counters below would read one region a token.
+	s.SetBlockFusion(false)
 
 	// Warm: codegen, tuning and first-touch page faults are not per-token costs.
 	for i := 0; i < 8; i++ {

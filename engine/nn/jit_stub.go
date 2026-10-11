@@ -163,6 +163,11 @@ func (f *JIT) TokenEnd()   {}
 // DiscardToken has no duel to tell.
 func (f *JIT) DiscardToken() {}
 
+// Fuse, Unfuse and Phases: no pool here, so nothing fuses.
+func (f *JIT) Fuse() bool    { return false }
+func (f *JIT) Unfuse()       {}
+func (f *JIT) Phases() int64 { return 0 }
+
 // Shapes is how many shape-specialized kernels were generated.
 func (f *JIT) Shapes() int { return 0 }
 

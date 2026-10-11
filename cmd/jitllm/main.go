@@ -1533,6 +1533,10 @@ func loadOpts(t []tok.Option, budget uint64) []model.Option {
 	if os.Getenv("JITLLM_STREAM_TRIAL") == "0" {
 		o = append(o, model.WithStreamTrial(false))
 	}
+	// JITLLM_FUSE=0 runs decode one pool region per op (model.WithBlockFusion).
+	if os.Getenv("JITLLM_FUSE") == "0" {
+		o = append(o, model.WithBlockFusion(false))
+	}
 	if os.Getenv("JITLLM_SH_OVERLAP") == "0" {
 		o = append(o, model.WithSharedOverlap(false))
 	}

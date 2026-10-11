@@ -24,6 +24,9 @@ type modelOpts struct {
 	// profile arms the per-op nanosecond counters OpProfile reports. The
 	// counters stay process-wide; only the gate is per model.
 	profile bool
+	// noFuse runs a decode token's host blocks one pool region per op rather
+	// than as fused runs; see WithBlockFusion.
+	noFuse bool
 	// noShOverlap runs a mixture's shared expert after its routed read
 	// rather than behind it; see WithSharedOverlap.
 	noShOverlap bool
@@ -99,6 +102,13 @@ func defaultOpts() modelOpts {
 		attnPair:       attnPairShipped,
 	}
 }
+
+// WithBlockFusion sets whether a decode token runs each run of consecutive
+// resident host blocks as one fused pool region (sched.Pool.Fuse), its ops
+// phases of that region, instead of one region per op. On by default: the
+// kernels, their chunks and their order are the same, so the answer is the
+// same bits (TestFusedBlocksMatchPerOp); off is the other arm.
+func WithBlockFusion(on bool) Option { return func(l *loadOpts) { l.opt.noFuse = !on } }
 
 // WithSharedOverlap sets whether a latent mixture's shared experts run while
 // its routed experts are read from the container, instead of after. On by

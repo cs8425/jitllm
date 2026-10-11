@@ -1056,6 +1056,24 @@ func (f *JIT) KSliced() int64 {
 	return f.ksliced
 }
 
+// Fuse opens a fused region on the pool (sched.Pool.Fuse): until Unfuse, every
+// region this JIT dispatches is a phase of one region. It reports whether it
+// opened one; a pool another user shares, a NUMA pool and a one-core pool do
+// not fuse, and their regions run as they always do.
+func (f *JIT) Fuse() bool { return f != nil && f.pool.Fuse() }
+
+// Unfuse closes the region a true Fuse opened.
+func (f *JIT) Unfuse() { f.pool.Unfuse() }
+
+// Phases is how many phases fused regions have run on this JIT's workers: the
+// regions fusion folded into one, which Regions does not count.
+func (f *JIT) Phases() int64 {
+	if f == nil {
+		return 0
+	}
+	return f.pool.Phases()
+}
+
 func (f *JIT) ResetRegions() {
 	if f != nil {
 		f.pool.ResetRegions()
