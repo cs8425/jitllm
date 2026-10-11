@@ -1,5 +1,7 @@
 package model
 
+import "sync/atomic"
+
 // A decode token runs each run of consecutive resident host blocks as ONE pool
 // region (sched.Pool.Fuse): the workers join once and every op of every block
 // in the run -- the norms, the projections, the rotary and cache write,
@@ -22,6 +24,7 @@ func (s *State) fuseRun() {
 	if s.jit.Fuse() {
 		s.fused = true
 		s.FusedRuns++
+		fusedRunsTotal.Add(1)
 	}
 }
 
@@ -44,3 +47,7 @@ func (m *Model) blockResident(li int) bool {
 	c := m.container
 	return c == nil || li >= c.NPages() || c.Resident(li)
 }
+
+// fusedRunsTotal counts fused runs across every State, for the gates that must
+// show a fused run happened inside them.
+var fusedRunsTotal atomic.Int64

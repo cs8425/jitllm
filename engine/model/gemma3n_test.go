@@ -151,6 +151,7 @@ func TestGemma3nOnEveryDevice(t *testing.T) {
 // in a chunk and in a device's residual alike, beside a KV-sharing pair whose
 // source and reader must move together.
 func TestBatchSeamMovesCarryEveryRowAltUp(t *testing.T) {
+	defer fusedRunsCheck(t, false)()
 	p, ok := existingModel(testmodels.Path("synth-gemma3n.gguf"))
 	if !ok {
 		testmodels.Missing(t, "%s", "MODEL MISSING: "+testmodels.Path("synth-gemma3n.gguf")+

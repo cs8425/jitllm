@@ -135,3 +135,22 @@ func TestFusedBlocksMatchPerOp(t *testing.T) {
 		})
 	}
 }
+
+// fusedRunsCheck logs how many fused runs (fuse.go) a test's decode tokens
+// opened, and with must fails a test that ran yet opened none: a relocation
+// gate that never ran a fused run says nothing about fusion. A batched step
+// and a crew shared by several sessions run per op by design, so their gates
+// log the count instead.
+func fusedRunsCheck(t *testing.T, must bool) func() {
+	r0 := fusedRunsTotal.Load()
+	return func() {
+		if t.Skipped() || t.Failed() {
+			return
+		}
+		n := fusedRunsTotal.Load() - r0
+		t.Logf("fused runs opened: %d", n)
+		if must && n == 0 {
+			t.Fatalf("%s opened no fused run: it gated the per-op path only", t.Name())
+		}
+	}
+}
