@@ -166,13 +166,17 @@ func TestFusedBlocksMatchPerOp(t *testing.T) {
 // and a crew shared by several sessions run per op by design, so their gates
 // log the count instead.
 func fusedRunsCheck(t *testing.T, must bool) func() {
-	r0 := fusedRunsTotal.Load()
+	r0, a0 := fusedRunsTotal.Load(), fuseTriesTotal.Load()
 	return func() {
 		if t.Skipped() || t.Failed() {
 			return
 		}
-		n := fusedRunsTotal.Load() - r0
-		t.Logf("fused runs opened: %d", n)
+		n, asked := fusedRunsTotal.Load()-r0, fuseTriesTotal.Load()-a0
+		t.Logf("fused runs opened: %d of %d asked for", n, asked)
+		if must && asked == 0 {
+			t.Logf("%s decoded no host token that could fuse (every model it names skipped, or every block ran on a device)", t.Name())
+			return
+		}
 		// sched.Pool.Fuse opens no region on a pool of one worker: with no
 		// one else to join there is no round trip to remove, and the per-op
 		// path is what such a host runs (a one-physical-core runner).

@@ -29,6 +29,7 @@ func (s *State) fuseRun() {
 	// run is the State's to refill now, and no worker may be reading it.
 	s.jit.SetAhead(nil)
 	s.jit.SetLookahead(!s.lookOff)
+	fuseTriesTotal.Add(1)
 	if s.jit.Fuse() {
 		s.fused = true
 		s.FusedRuns++
@@ -59,6 +60,11 @@ func (m *Model) blockResident(li int) bool {
 // fusedRunsTotal counts fused runs across every State, for the gates that must
 // show a fused run happened inside them.
 var fusedRunsTotal atomic.Int64
+
+// fuseTriesTotal counts the fused runs asked for, opened or not: a gate whose
+// subtests all skipped (no model on a model-free runner) asked for none, and
+// has nothing to say about fusion either way.
+var fuseTriesTotal atomic.Int64
 
 // groupOf runs n matvecs of ws that read x as one region
 // (nn.MatVecPackedGroup) when a fused run is open, and reports whether it did;
