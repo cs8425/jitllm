@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jitllm/jitllm/common/config"
 	"github.com/jitllm/jitllm/common/engine"
+	"github.com/jitllm/jitllm/internal/localserver"
 )
 
 // screen is which page fills the body.
@@ -47,7 +48,7 @@ type page interface {
 // the frame clock and the spinner.
 type env struct {
 	f    *front
-	e    *engine.Engine
+	e    engine.Driver
 	cfg  *config.Config
 	dirs []string
 	keys *globalKeys
@@ -58,19 +59,48 @@ type env struct {
 	spin  spinner.Model
 	// api is the API this app serves, nil when it is off.
 	api *api.Server
+	// where is which engine this app drives, for the badge.
+	where engine.Where
+	// hub is the Hub downloads read from; "" is huggingface.co.
+	hub string
 }
 
 // syncAPI starts, restarts or stops the API to match the settings, and
 // returns its status line. The API serves the terminal's own engine, and its
 // model folder is the first of the terminal's.
 func (env *env) syncAPI() string {
-	srv := env.e.Server()
+	emb, ok := env.e.(*engine.Engine)
+	if !ok {
+		// Connected: the service serves the API; this app runs no engine to
+		// serve one from.
+		if env.cfg.API {
+			return "the API is the service's, at " + env.where.Addr
+		}
+		return ""
+	}
+	srv := emb.Server()
 	if len(env.dirs) > 0 {
 		srv.SetModelDir(env.dirs[0])
 	}
 	var msg string
-	env.api, msg = api.Toggle(env.api, env.cfg.API, env.cfg.APIAddr, srv)
+	var held localserver.Info
+	env.api, msg, held = api.Toggle(env.api, env.cfg.API, env.cfg.APIAddr, srv)
+	if held.Addr != "" {
+		// Refused: a jitllmd holds the address. The setting goes back off
+		// rather than claiming an API this app does not serve.
+		env.cfg.API = false
+		msg += " (tui --connect " + held.Addr + ")"
+	}
 	return msg
+}
+
+// badge is the engine line the status bar always shows (engine.Badge).
+func (env *env) badge() string {
+	a := ""
+	if env.api != nil {
+		a = env.api.Addr()
+	}
+	return engine.Badge(env.where, a)
 }
 
 // Messages a page sends the root.

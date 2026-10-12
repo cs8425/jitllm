@@ -67,6 +67,13 @@ type Shell struct {
 	// drop is the registered dnd target, kept so its bounds can follow the
 	// window instead of registering a second one on every resize.
 	drop dnd.DropTarget
+
+	// ConnectTo switches the window to the jitllmd at addr; nil where it
+	// cannot (the mock), and OfferService then only says what is running.
+	ConnectTo func(addr string)
+	// ApplyEngine switches to what the engine setting (Store.EngineMode,
+	// ServiceAddr) now chooses; nil where there is one engine only.
+	ApplyEngine func()
 }
 
 // NewShell builds the shell around an already-created gogpu app.
@@ -97,6 +104,8 @@ func NewShell(gpuApp *gogpu.App, cfg *Config) *Shell {
 	s.Store.KVCache.Set(!cfg.NoKVCache)
 	s.Store.API.Set(cfg.API)
 	s.Store.APIAddr.Set(cfg.APIAddr)
+	s.Store.EngineMode.Set(cfg.Engine)
+	s.Store.ServiceAddr.Set(cfg.ServiceAddr)
 	s.Store.ModelDirs.Set(append([]string(nil), cfg.ModelDirs...))
 	if p := cfg.ChatsPath(); p != "" {
 		s.Store.LoadChats(p)
@@ -199,7 +208,10 @@ func (s *Shell) sidebar() widget.Widget {
 
 	return newRail(primitives.Box(primitives.VBox(
 		mark,
-		primitives.Box().Height(12),
+		primitives.Box().Height(6),
+		// Which engine the window drives, always in view; it opens the setting.
+		widgets.NewChatRow(s.Badge(), nil, s.GoSettings, colors, s.P.Type.LabelSmall.FontSize),
+		primitives.Box().Height(6),
 		primitives.VBox(items...).Gap(2),
 		primitives.Box().Height(16),
 		widgets.NewNavItem(widgets.IconPlus, "New chat", nil, func() { s.chatAction(s.Store.NewChat) }, colors, size),
@@ -358,6 +370,8 @@ func (s *Shell) SaveSettings() {
 	s.Cfg.NoKVCache = !st.KVCache.Get()
 	s.Cfg.API = st.API.Get()
 	s.Cfg.APIAddr = st.APIAddr.Get()
+	s.Cfg.Engine = st.EngineMode.Get()
+	s.Cfg.ServiceAddr = st.ServiceAddr.Get()
 	s.Cfg.ModelDirs = append([]string(nil), st.ModelDirs.Get()...)
 	s.Cfg.LastModel = st.ModelPath.Get()
 	if err := s.Cfg.Save(); err != nil {
@@ -400,6 +414,8 @@ func (s *Shell) autosave() {
 	on(st.KVCache, save)
 	on(st.API, save)
 	on(st.APIAddr, save)
+	on(st.EngineMode, save)
+	on(st.ServiceAddr, save)
 	on(st.ModelDirs, save)
 	on(st.ModelPath, save)
 	on(st.Chats, save)

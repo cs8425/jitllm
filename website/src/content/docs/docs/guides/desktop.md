@@ -28,14 +28,14 @@ Drop a `.jlm` or a `.gguf` anywhere on the window to open or convert it, or drop
 <img class="shot-dark" src="/shots/chat-dark.png" width="1440" height="900" alt="The Chat screen, dark theme" />
 <img class="shot-light" src="/shots/chat-light.png" width="1440" height="900" alt="The Chat screen, light theme" />
 
-Conversations use the model's own chat template, with reasoning, chat and completion modes. The sampling panel has llama.cpp's knobs, applied in llama.cpp's order, and the context window. Under each reply are the prompt and reply rates and the read bandwidth as a share of what the machine measured, and the header says where the model's blocks run. Several models can be open at once, one tab each. Above, Qwen3-30B-A3B, a 30B mixture of experts, answers on a laptop with a 4 GB GPU: one block on the card, the other 47 on the CPU, its experts paged from disk as tokens route to them.
+Conversations use the model's own chat template, with reasoning, chat and completion modes. The sampling panel has llama.cpp's knobs, applied in llama.cpp's order, and the context window. Under each reply are the prompt and reply rates and the read bandwidth as a share of what the machine measured, and the header says where the model's blocks run. Several models can be loaded at once, one tab each, and switching chats while a reply is still streaming is fine: the reply keeps writing into the chat that asked for it, and going back shows it still streaming or finished. Above, Qwen3-30B-A3B, a 30B mixture of experts, answers on a laptop with a 4 GB GPU: one block on the card, the other 47 on the CPU, its experts paged from disk as tokens route to them.
 
 ## Models
 
 <img class="shot-dark" src="/shots/models-dark.png" width="1440" height="900" alt="The Models screen, dark theme" />
 <img class="shot-light" src="/shots/models-light.png" width="1440" height="900" alt="The Models screen, light theme" />
 
-The `.jlm` files in your model folders, each with its architecture, size and whether it fits in memory, fits on the GPU or pages from disk. Selecting one shows what the engine will do with it, its experts, its pages and its dense region, before it is loaded.
+The `.jlm` files in your model folders, each with its architecture, size and whether it fits in memory, fits on the GPU or pages from disk. Selecting one shows what the engine will do with it, its experts, its pages and its dense region, before it is loaded. Every loaded model reads **Loaded**, whichever one the chat is talking to: loading another leaves those already loaded where they are, and a loaded model's button reads **Chat with it** rather than loading it again. The Machine screen lists the loaded models and marks the one in the chat.
 
 ## Discover
 
@@ -57,6 +57,22 @@ Where the model is: which blocks run on each GPU and which on the host, the seam
 <img class="shot-light" src="/shots/convert-picked-light.png" width="1440" height="900" alt="The Convert screen, light theme" />
 
 GGUF and safetensors files in your model folders are listed with whether they fit. Pick one, add a vision tower's `mmproj` if it has one, and it becomes a `.jlm` that appears under Models. See [Convert models](/docs/guides/convert/) for what conversion does.
+
+## Which engine
+
+The window drives one engine, and Settings > Engine chooses it:
+
+- **Auto** (the default) connects to a `jitllmd` that answers at the service address (the login service's `127.0.0.1:8080` unless you set another) and runs the window's own engine only when none does.
+- **Embedded** always runs the window's own engine, in its process.
+- **Service** connects to the address and nothing else.
+
+Apply switches at once, closing the models the engine in use holds. Connected, the model list, the memory map, block placement and chat run on the service: models load there by path, and the window is one more client of it. Two things stay the service's own: how memory is divided between its models (the priority toggle says so), and its API, which it already serves.
+
+The line under the logo always says which engine runs: `Service · 127.0.0.1:8080 (jitllmd 0.9.0)`, `Embedded · API off` or `Embedded · API on :8080`. Click it to open Settings. A service that stops answering is shown as a problem with a Reconnect button and the line says `not answering`; the window never switches to an engine of its own mid-session, and reconnects by itself when the service is back.
+
+Turning the API on where a `jitllmd` already answers is refused: the window says which `jitllmd` holds the address and offers to connect to it, rather than starting a second engine beside it. Running Embedded while a `jitllmd` runs says so too, since the two engines share the GPU's memory and each loads its own copy of a model. A `jitllmd` from a release with another API version is refused by name.
+
+Each open model on the Machine screen has an Unload button: unloading is how a model gives its memory back.
 
 ## Mock mode
 

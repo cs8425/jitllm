@@ -11,7 +11,19 @@
 | OpenAI-compatible | `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/models`, `POST /v1/embeddings` (floats or base64), `/v1/files`, `/v1/batches` |
 | Anthropic-compatible | `POST /v1/messages` (named SSE events) |
 | Connect RPC | `ModelService`, `InferenceService` (`Generate`, `Complete`, `Cancel`, `Embed`), `SessionService`, `PlacementService`, `DeviceService`, `TelemetryService` |
-| Health | `GET /healthz` |
+| jitllm | `POST /v1/systemone` (a decision model's answers), `GET /v1/capabilities` (the manifest, [capabilities.md](capabilities.md)), `GET /metrics` (Prometheus) |
+| Health | `GET /healthz`, `GET /health` |
+
+A client checks what it is talking to before it relies on it:
+`TelemetryService.GetServerInfo` returns the version and revision, the
+control plane's compatibility version (`api_version`), the OS and
+architecture, the models folder, every device, the capability manifest that
+`GET /v1/capabilities` serves (`capabilities_json`, which also carries
+`server_api`) and a list of named `features`. The API version changes only
+when a field changes meaning or goes away; a client built for another number
+refuses with a message naming both. `server/client.Discover` is that check
+for a Go front end, and `internal/localserver.Probe` the same check over
+`/v1/capabilities` for the root module's CLI.
 
 Both compatible APIs stream and take `tools`: the tool list is rendered by the
 model's own chat template, and calls come back as OpenAI `tool_calls` or
@@ -158,5 +170,52 @@ prompt store a Speculator does not use).
 | `sessions` | create, list, describe, reset and close sessions |
 | `place` | read and move the CPU/device seam and the pager budget |
 | `stats` | engine counters, once or streamed (`-watch`) |
+| `service` | `install`, `uninstall`, `start`, `stop`, `status`: jitllmd as this person's background service |
+
+## Models by name, loaded on demand
+
+Every `.jlm` in the models folder (`-models`) is available by name: its file
+name, with or without `.jlm`, or an alias. A request naming one that is not
+loaded loads it, under its file name as its id, with `-devices` (auto by
+default), `-gpu-layers` and `-sessions`; the folder is read at each lookup,
+so a container converted into it is there for the next request. A model that
+does not fit pages (that is the design); a load that fails answers with the
+model, its size and the host budget it was opened against. `-on-demand=false`
+turns this off. `GET /v1/models` lists the loaded models and then the
+available ones (`"loaded": false`), each alias as an entry of its own.
+
+Aliases and enable/disable live in the folder's `jitllm-models.json`, so they
+survive a restart and move with the models:
+
+```sh
+jitllmd models -alias Qwen3-0.6B-Q8_0=qwen3,small   # several names, unique across the folder
+jitllmd models -unalias Qwen3-0.6B-Q8_0=small
+jitllmd models -disable qwen3   # listed, never loaded on demand; `models -load` still loads it
+jitllmd models -enable qwen3
+jitllmd models                  # loaded, then on disk with their aliases and state
+```
+
+The same is `ModelService.SetModelOptions` on the Connect API, and
+`ListModels` carries each file's `aliases`, `disabled` and loaded `model_id`.
+`jitllmd models -load` and `-unload` work as before.
+
+## The service
+
+`jitllmd service install` runs `jitllmd serve -addr 127.0.0.1:8080 -models
+<the models folder>` in the background, now and at every login, restarted
+after a crash and not after a clean stop. Loopback only: nothing is opened to
+the network unless `-addr` says so.
+
+| System | What runs it | Log |
+|---|---|---|
+| Linux | systemd user unit `~/.config/systemd/user/jitllm.service` | `journalctl --user -u jitllm` |
+| macOS | launchd agent `~/Library/LaunchAgents/org.jitllm.service.plist` (the app's "start the server at login" writes the same one) | `~/Library/Logs/jitllm/jitllmd.log` |
+| Windows | `%LOCALAPPDATA%\jitllm\jitllmd-login.vbs` under the user Run key (the installer's "start the server at login" calls `jitllmd service install`) | `%LOCALAPPDATA%\jitllm\jitllmd.log` |
+
+`install.sh` installs the service on Linux when it installs jitllmd
+(`--no-service` or `JITLLM_NO_SERVICE=1` skips it). `jitllmd service status`
+shows whether it is installed, the address, the version, the models folder
+and the loaded models. On Linux, `loginctl enable-linger` keeps it running
+without a login session.
 
 The Connect API is defined in [`proto/jitllm/v1`](../proto/jitllm/v1/).

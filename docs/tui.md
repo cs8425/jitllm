@@ -11,7 +11,7 @@ or build it:
 
 ```sh
 (cd tui && go build -o ../jitllm-tui .)
-./jitllm-tui [-chat=true|false] [-device auto] [-ctx 8192] [-models DIR] [-mouse] [model.jlm]
+./jitllm-tui [-chat=true|false] [-device auto] [-ctx 8192] [-models DIR] [-mouse] [--connect ADDR | --embedded] [model.jlm]
 ```
 
 With no model it opens on the Models screen. Each flag overrides its setting
@@ -26,7 +26,7 @@ terminal with 24-bit colour.
 | Key | Screen | What it does |
 |---|---|---|
 | `F1` | Chat | saved chats, the transcript and the prompt, with the engine at the right: decode rate, where each block runs, memory |
-| `F2` | Models | the `.jlm` files in your folders and the GGUF and safetensors sources beside them; `enter` loads a container, converts a source or rebuilds an outdated container, `ctrl+x` closes it |
+| `F2` | Models | the `.jlm` files in your folders and the GGUF and safetensors sources beside them; `enter` loads a container, converts a source or rebuilds an outdated container, `ctrl+x` unloads it; several stay loaded at once, each tagged loaded |
 | `F3` | Discover | the catalog ranked for this machine, fastest to smartest (`<` `>`), with whether each model fits; `enter` downloads and converts, or loads one already on disk |
 | `F4` | Engine | every block and where it runs, the rate over time, memory and the pager; `→` `←` move one block to the device or home, `home` and `end` all of them |
 | `F5` | Settings | the desktop app's settings file as a form; `enter` on the last field saves, `esc` discards |
@@ -37,12 +37,27 @@ the keys the current screen takes.
 
 ![The Engine screen: 1 of 48 blocks on the GPU, the decode rate over time, memory and the pager](../website/public/shots/tui-engine.png)
 
+## Which engine
+
+The app uses a `jitllmd` that answers at the service address first (the
+settings file's `service_addr`, the login service's `127.0.0.1:8080` by
+default) and runs its own engine only when none does. `--connect addr`
+connects to that address and nothing else; `--embedded` always runs its own.
+
+The right end of the bottom line always says which:
+`Service · 127.0.0.1:8080 (jitllmd 0.9.0)`, `Embedded · API off` or
+`Embedded · API on :8080`. A service that stops answering turns it red with
+`not answering` and the palette offers to reconnect; the app never switches to
+an engine of its own. Turning the API on where a `jitllmd` already answers is
+refused, naming the address to connect to, and running embedded beside a
+running `jitllmd` says that the two share the GPU's memory.
+
 ## Chat
 
 `enter` sends, `ctrl+j` or `alt+enter` adds a line, `↑` `↓` walk the prompt
 history, `esc` stops the reply or clears the prompt, `ctrl+t` folds the
 reasoning, `ctrl+y` copies the last reply, `ctrl+n` starts a chat and
-`ctrl+↑` `ctrl+↓` move between chats.
+`ctrl+↑` `ctrl+↓` (or `⌥↑` `⌥↓`, alt, which macOS leaves free) move between chats.
 
 A prompt that starts with `/` is a command, completed with `tab`: `/new`,
 `/delete`, `/chat`, `/completion`, `/system <text>`, `/temp <value>`,

@@ -5483,6 +5483,264 @@ the time sits, not a rate:
 - **The KV prewarm** moves the pool's growth into placement: 100-200 ms more
   placement on the laptop, and the first prompt reads as warm.
 
+### sm_75's prompt attention on m16n8k8
+
+FlashPrefill80 is m16n8k16, which sm_75 does not have, so a T4's prompt
+attention ran FlashPrefill70 on sm_70's m8n8k4, which Turing executes well
+under its m16n8 rate. The m16n8k16 fragments are the m16n8k8 ones side by
+side: A's four registers are rows g and g+8 at k pair q, then at k pair q+4,
+and B's two are k pair q, then q+4. So each k16 product is two k8 ones, and
+nothing is staged or loaded differently (kernels.FlashPrefill80K8, `_k8` in
+the name). The tier takes it where f16GemmK is 8 and the row block divides
+the chunk. Otherwise sm_70's pair still serves.
+
+On a T4, per-kernel device time of a warm 512-token prompt:
+
+    Llama-3.1-8B Q4_K_M   flashprefill70paged_d128  20.1 ms  ->  flashprefill80paged_d128_k8  13.9 ms
+    Llama-3.2-1B Q4_K_M   flashprefill70paged_d64    4.1 ms  ->  flashprefill80paged_d64_k8    2.7 ms
+
+The prompt's wall rate did not resolve it. The pairs read 0.98-1.04 on the
+8B and 0.91-1.07 on the 1B, with the card going from 1590 to 945 MHz within
+the job; the A/A pairs drifted as far. llama.cpp's flash attention on the
+same card ran 13.5 ms for the 8B prompt. The kernel gate
+(TestPagedFlashPrefill80) runs the k8 form on every card with m16n8k8,
+sm_75 and sm_86 alike, and fails with B's two registers swapped.
+
+### A warm 514-token prompt, kernel by kernel, against llama.cpp on a T4
+
+`jitllm speed` prints JITLLM_CUDA_KERNEL_TIMING's split for the timed prompt
+(an event pair around each launch: a prompt chunk is not captured), and
+`scripts/kshim.c` under KSHIM_DIRECT=1 takes the same of llama.cpp b10825
+CUDA, which runs a batch past one row without a graph. Both are per-launch
+device time with the events' own cost inside it, so the sums run above the
+wall; they say where the time sits, not a rate. One T4 (sm_75), one sitting,
+llama.cpp's totals halved for its warm-up prompt:
+
+    Meta-Llama-3.1-8B Q4_K_M, us a prompt       jitllm      llama.cpp
+    GEMMs over the 512-row chunk               525,100     442,900 (mmq q4_k, q6_k)
+      + operand quantize / stream-k fixup            --      21,700
+    the 2-row tail's matvecs                    58,400      19,600 (mmvq)
+    attention (flash, + the tail's staged)      34,100      13,500
+    norms, SiLU, rotary, adds, conversions      35,100      29,700
+    head                                         1,700       1,800
+
+    Llama-3.2-1B Q4_K_M                          jitllm      llama.cpp
+    GEMMs over the 512-row chunk                56,100      90,800
+      + operand quantize / stream-k fixup            --       8,600
+    the 2-row tail's matvecs                    10,700       5,100
+    attention                                    7,400       5,300
+    norms, SiLU, rotary, adds, conversions       9,000      11,700
+
+Rates beside it (`jitllm speed -p 514 -n 0`, llama-bench `-p 514`): 8B
+705-887 against 1056-1085 tok/s, the card slowing between passes; 1B
+4.5-7.2k against 4.2-5.9k. The three gaps on the 8B, largest first: the
+staged GEMM against MMQ's int8 (about 60 ms net of llama.cpp's operand
+passes), the 2-row tail (39 ms: a GEMM at the grain over 30 rows of padding
+where llama.cpp runs a matvec), and the attention (20 ms: FlashPrefill70's
+m8n8k4, which sm_75 runs well under its m16n8 rate, and the tail's staged
+three kernels). The tail is the one the prompt length decides: on a V100 a
+514-token prompt took 30% longer than a 512-token one (1B, 12.9k against
+16.8k tok/s), and on the A100 board `jitllm speed -p 512` read 28.8k where the
+harness's 514-token row read 14.4k.
+
+## llama.cpp's MMQ against the staged GEMMs, and the int8 instruction on sm_75
+
+The T4 split above put the largest prompt gap on the 8B's GEMMs (525 ms
+against MMQ's 443 plus 22 of operand passes). What follows is what
+llama.cpp b10825's CUDA prompt GEMM does (read from
+`ggml/src/ggml-cuda`: `ggml-cuda.cu`, `mmq.cu`, `mmq.cuh`,
+`mmq-config-ampere.cuh`, `mmq-load-tiles.cuh`, `mmq-vec-dot.cuh`,
+`mma.cuh`, `quantize.cu`), set beside jitllm's generated kernels, and then
+the one lever it suggested first, built and measured.
+
+### What llama.cpp does
+
+- **Dispatch** (`ggml_cuda_mul_mat`): an f32 activation into a quantized
+  weight takes MMVF / MMF / MMVQ for a few columns, then
+  `ggml_cuda_should_use_mmq`, then cuBLAS. MMQ is taken for every k-quant
+  and legacy quant whenever the card has 48 KiB of shared memory a block
+  and `turing_mma_available` (sm_75 on) -- unconditionally there, whatever
+  the batch. On an NVIDIA card without int8 mma it is taken below 64
+  columns or where there are no binary16 tensor cores; elsewhere cuBLAS.
+  So a T4, an A100 and an L4 all run every Q4_K/Q6_K prompt GEMM on MMQ;
+  a V100 runs it through cuBLAS above 64 columns (sm_70 has no integer mma).
+- **The tile** (`mmq-config-ampere.cuh`, used from sm_70 to Ada): 256
+  threads (8 warps), occupancy target 1, I = 128 weight rows by J columns,
+  J chosen per call as the multiple of 8 up to 128 that gives the fewest
+  column tiles (512 tokens: J = 128, four column tiles; 514: J = 128 and a
+  fifth tile with two live columns -- no padding to a grain). A rows count
+  not a multiple of 128 takes the `fallback` variant that clamps the row.
+- **K per stage**: one VRAM tile is 256 elements (`MMQ_ITER_K`, a whole
+  k-quant super-block) a trip; the shared tile holds it as two 128-element
+  halves of the activations, so a trip is load A (256 k), load B half,
+  sync, mma, sync, load B half, sync, mma, sync. **No double buffering**
+  and no cp.async: latency is hidden by eight warps, not by a pipeline.
+- **The weights in shared memory** (mma layout): Q4_K's nibbles are stored
+  unsigned (`qs & 0x0F0F0F0F`, `qs >> 4 & ...`), the row stride padded to
+  4 mod 8 words against bank conflicts; beside them a half2 per 32 values,
+  `(d*sc, -dmin*m)`. Q6_K keeps signed bytes with an int8 scale per 16.
+  The minimum is never applied per element: it multiplies the activation
+  block's precomputed sum (`dmA.y * dsB.y`).
+- **The activations**: `quantize_mmq_q8_1` runs once per GEMM call, in its
+  own launch, over the whole src1, into `block_q8_1_mmq` (128 int8 values
+  plus four half2 (d, sum) -- 144 bytes, laid out so a tile copy to shared
+  memory is a straight memcpy). The layout of d/sum differs per weight type
+  (D4, DS4, D2S6).
+- **The product**: `mma.sync m16n8k32 s8` on sm_80, and on sm_75 the same
+  tile as **four `m8n8k16`** (`mma.cuh`): A's fragment via `ldmatrix`
+  (`x2`/`x4`), B's by plain loads ("faster than load_ldmatrix"). Each
+  32-element product is folded to float at once with the A and B scales
+  (`sum += dmA.x*dsB.x*C + dmA.y*dsB.y`); a warp holds 16 or 32 rows
+  (`rows_per_warp`) of the 128.
+- **Stream-K**: every Q4_K/Q6_K config sets `stream_k`. The grid is one
+  block an SM, each walking a contiguous range of (tile, k-trip) space; a
+  block that ends mid-tile writes a partial to a scratch, and
+  `mul_mat_q_stream_k_fixup` adds them. Where whole tiles already fill the
+  waves to 90% the grid is the tile count and no fixup runs. The 21.7 ms of
+  "quantize / fixup" on the T4 8B prompt is these two passes.
+
+### Against jitllm's generated kernels
+
+| | llama.cpp MMQ (sm_75, sm_80+) | jitllm GemmVolta F16K (default from sm_75) | jitllm GemmInt8 (knob) |
+|---|---|---|---|
+| operands | int8 x int8 -> int32 | binary16 x binary16 -> float32 | int8 x int8 -> int32 |
+| instruction | m16n8k32 / 4x m8n8k16 on sm_75 | m16n8k16 (k8 on sm_75) | m16n8k32, m16n8k16 |
+| workgroup | 8 warps, 128 rows x up to 128 tokens | 4 warps (2x2), 128 x 64 (MT4 NT4) | as F16K's tiles |
+| k a stage | 256 (a super-block) | 32 | 32 |
+| syncs a 256 of k | 4 | 16 | 16 |
+| pipelining | none; occupancy | next trip's globals in registers | the same |
+| fragment loads | ldmatrix for A | 8/16-byte shared loads | 8-byte loads (`int8Pos`) |
+| weight decode | nibbles unsigned, scale and minimum as half2 per 32 | dequantized to binary16, scales folded | signed bytes, f32 scale and minimum a sub-block |
+| activation operand | its own launch per GEMM (q8_1_mmq) | written by the norm / activation (fused) | quantized in the activation's launch |
+| grid | stream-K over SMs + fixup | tile per (128 x 64) block, k-split + Reduce to about one per SM | the same |
+| ragged columns | J per call, a partial last tile | padded to the grain | the same |
+
+The two engines agree on the arithmetic and differ in shape: MMQ amortises
+a sync and a scale fold over 256 elements of k and 8 warps, jitllm over 32
+and 4 and pays it back with register double-buffering.
+
+### The int8 instruction on sm_75, built and measured
+
+MMQ's T4 path is int8 on m8n8k16, which jitllm did not lower (the IR's
+`MMAS8` shapes were m16n8, sm_80's), so on a T4 every prompt GEMM was the
+binary16 GEMM at k8 and `mmaOff` was set. The m16n8 int8 fragments are
+m8n8k16's registers side by side (A's word r is row g+8(r&1), k 16(r>>1)+4q;
+D's pair p is row g+8p), so the lowering is two or four m8n8k16 per op.
+It was built (branch `gemm-int8-sm75`: `ptx/lower.go`, a ptxas gate at
+sm_75 and sm_86, a device gate that runs the sm_75 lowering on an sm_86
+card through the driver's PTX JIT and holds MatVecMMA and GemmInt8 bit for
+bit to the dp4a arm -- a swapped fragment index fails it) and passed every
+gate on a T4. It is not shipped. On a Tesla T4 (sm_75, 1590 MHz, a round at
+1410-1500 MHz in two of the passes, ratios unchanged), pp512 and tg64 a
+call, median of 5, six rounds rotating the order, two passes, A/A first
+(1B 0.994 / 1.017, 8B 1.012 / 0.996):
+
+    against origin/main                     Llama-3.2-1B Q4_K_M     Llama-3.1-8B Q4_K_M
+    lowering on (default config)  pp512     0.658 / 0.662           0.864 / 0.868
+                                  tg64      1.009 / 1.014           1.001 / 1.001
+    + JITLLM_GPU_GEMM_INT8        pp512     0.500 / 0.501           0.753 / 0.754
+    origin/main absolute                    9450 pp, 238 tg tok/s   1013 pp, 48.1 tg tok/s
+
+The per-kernel split of one warm prompt says why, in two parts:
+
+- **A device with an integer mma is a different tier.** With the lowering
+  in, MatVecMMA compiles, `mmaOff` stays false, and that moves more than
+  the GEMMs: the prompt's attention left FlashPrefill70 (8B: 23.8 ms) for
+  the three staged kernels (scores 62.9, accumulate 48.4, softmax 6.8 ms),
+  and the chunk grain went from 8 to 32 rows. That is the 0.66 / 0.87.
+- **The instruction is not the gap.** The GEMMs alone: 1B 61.2 ms binary16
+  against 68.1 ms int8; 8B 426.5 against 532.3 ms int8, plus its operands
+  (`quantizeact` 16.0 + `rmsnormquantw` 10.5 against the binary16 arm's
+  21.3 of norms and activations). GemmInt8 at k = 32 a stage on m8n8k16 is
+  slower than the binary16 GEMM at k8, while MMQ on the same instruction is
+  at 443 ms. What MMQ has and both jitllm GEMMs lack is its shape: a
+  256-deep stage, 8 warps a block, ldmatrix, and the scale folded once per
+  32 against a stage's worth of products.
+
+On a V100 (sm_70, 1312 MHz locked; no integer mma, so the lowering is not
+reached and the knob is inert) the same three arms read pp 0.985-1.018 and
+tg 0.999-1.002 on the 8B; the 1B's tg read 1.016-1.024 on both branch arms
+against A/A 0.997-0.998 -- the PTX the V100 runs is identical by
+construction, so that is a binary or placement effect, unresolved.
+
+On an A100-40GB (Modal, one job, 597 s), `scripts/vs-llamacpp.sh` prefill
+514 rows, 6 rounds (n = 12), llama.cpp b10825 CUDA: the A/A self-control
+read 0.997 and was REJECTED (IQR/median 0.136), so these are indicative:
+
+    Llama-3.1-8B Q4_K_M   binary16 GEMM 0.981 (IQR 0.072)   GemmInt8 0.680 (0.068)
+    Llama-3.2-1B Q4_K_M   binary16 GEMM 0.903 (IQR 0.033)   GemmInt8 0.669 (0.029)
+
+The binary16 default stands on every card measured. The work list the
+study leaves, largest expected first: a 256-deep k stage with 8 warps a
+block for the staged GEMMs (both operand types), ldmatrix fragment loads,
+stream-K in place of the k-split's Reduce, and J chosen per call so a
+514-row prompt is not padded. Only after those does the int8 instruction
+have a kernel worth putting it in; and putting it in on sm_75 must not
+flip `mmaOff`'s other consequences (the attention and the grain) with it.
+
+### `run` against `speed` on the A100
+
+The same job timed `jitllm run -n 128` token by token (a stamp on every
+stdout chunk) beside `jitllm speed -p 16 -n 128`, two passes each:
+
+    Llama-3.2-1B   speed tg128 630-644 tok/s (1.55-1.59 ms)   run gaps p50 1.80 / 1.58 ms, mean 2.58 / 1.73, max 92.9 / 10.7 ms
+    Llama-3.1-8B   speed tg128 169-172 tok/s (5.82-5.92 ms)   run gaps p50 5.89 / 5.82 ms, mean 7.15 / 6.11, max 153 / 24 ms
+
+`run`'s steady token is `speed`'s; its lower rate is a few long stalls
+(10-150 ms, larger on the first pass), which a mean over 128 tokens spreads
+to 0.2-1.3 ms a token. Where the stalls come from (a capture, the
+collector, stdout) is not yet known.
+
+### A prompt's few-row tail is a ragged step, not a padded chunk
+
+The device runs a prompt chunk at its grain (32 rows, 64 where
+FlashPrefill80 runs), so the 2 rows a 514-token prompt leaves after its
+512-row chunk ran every batched kernel at 32 or 64 rows: GEMMs dequantizing
+all their weights for 2 live rows, the staged attention over the padding.
+On a V100 that tail ran 6.7 ms of kernels for Llama-3.2-1B, against about
+1.6 ms for a decode token, and the 514-token prompt took 30% longer than a
+512-token one. llama.cpp runs a batch that small through its matvec.
+
+A chunk of 2 to 4 rows over the whole model, every block and the head on a
+device that runs ragged rows, now goes as one ragged step of its rows
+(engine/model/tailrows.go): nn.RowsDevice with the rows' positions as their
+slots, which the tier runs on decode's matvec carrying every live row in one
+pass over the weights (groupMV, `_t2of8` in a kernel name), each row
+attending to its own history. The head is the prompt's tail call, as for any
+chunk that did not fold it. The same 2 rows then run 2.2 ms of kernels on the
+V100. Not taken for a hybrid, a speculation step, a bidirectional run or a
+split placement, which keep the chunk; a refusal falls back to it.
+`model.WithTailRows(false)` (`JITLLM_TAIL_ROWS=0`) is the control arm.
+
+A first form chose by measurement: the fastest decode call, a short chunk and
+the ragged step, each kept on the Model. A first run includes its compiles
+and captures, so it could not tell the shapes apart. On the V100 the step's
+first run (75 ms, compiling) left it measured slower than the chunk for the
+rest of the process. The step reads every weight once where the chunk reads
+them at the grain, so it is the rule.
+
+Rows, same binary with the step on and off (`JITLLM_TAIL_ROWS=0`),
+interleaved, medians of 7-prompt `jitllm speed -n 0` runs, A/A first:
+
+    T4, Llama-3.1-8B Q4_K_M   A/A 0.97-1.03    pp514 off 847-870, on 913-922 tok/s (+6.4%)
+                                               pp516 off 856-874, on 891-920 (+4.5%)
+                                               pp2   off 27.2-30.0, on 60.5-60.9 (2.06x)
+    T4, Llama-3.2-1B Q4_K_M   A/A 0.72-1.05    pp514 off 6.07-6.50k, on 6.14-6.64k (unresolved)
+                                               pp516 off 5.98-6.19k, on 6.25-6.69k (+4%)
+                                               pp2   off 103-106, on 205-224 (2.07x)
+    V100, Llama-3.2-1B        (host loaded)    pp514 off 11.3-12.6k, on 13.1-13.9k (+7%)
+                                               pp2   off 223-245, on 280-309 (+25%)
+
+llama-bench on the same T4: 8B pp514 974, pp2 46; 1B pp514 5.6k, pp2 364.
+A 512-token prompt and decode are unchanged by construction (no chunk of 2-4
+rows) and read so: T4 tg128 230-232 against 230-232 tok/s on the 1B, 45.6-47.8
+against 45.9-47.1 on the 8B.
+
+What is left of the tail's cost is the host's: the step is recorded and
+replayed like a decode step, and a recording is the session's, so each new
+session captures it once (about 1 ms on the V100), and the head runs as its
+own call.
+
 ## Measurements once cited in jit/gpu/tier's comments
 
 The tier's comments state the engineering reason and the class of card; the
@@ -5697,3 +5955,48 @@ range and so the key -- the run is re-captured, not patched.
 queue: the event nodes were armed only on the legacy stream's capture, and the
 settle only on its replay. Both now run on a queue's capture too.
 
+
+## The register report, and the tile that spilled on sm_70
+
+`jitllm verify -registers [-json]` runs decode and the batched prefill and
+prints, for every kernel each CUDA device compiled, what the driver says ptxas
+allocated (cuFuncGetAttribute: registers, local bytes, static shared memory;
+cuOccupancyMaxActiveBlocksPerMultiprocessor: resident workgroups at the
+declared width), and for every host emitter the highest vector register it
+names and its stack-addressed operands. Vulkan and Metal do not report yet
+(VK_KHR_pipeline_executable_properties and MTLComputePipelineState are the
+sources to wire). Two driver readings were checked against `ptxas -v` (CUDA
+12.9) on the same PTX, sm_86: flashkvpaged 168 registers, 32768 B shared, no
+spill; matvec_q4_k 36 registers; both agree.
+
+Llama-3.2-1B Q4_K_M, worst first:
+
+- RTX 3050 Ti (sm_86, 1536 threads an SM): nothing spills. flashkvpaged 194
+  registers at its widest shape, 2 workgroups an SM (17%); the prefill
+  GemmVolta tiles 159-162 registers, 3 workgroups (25%); every matvec, norm
+  and quantize kernel 100% except the 1024-wide norms at 67%.
+- V100 (sm_70, 2048 threads an SM): GemmVolta q6_k m4n4w1x4k2 hit the
+  255-register ceiling and spilled 8 bytes a thread; q4_k m4n4 sat at 255
+  without spilling. Everything else is clean; flashkvpaged 170 registers, 2
+  workgroups.
+- Host, AVX2: the k-quant matvecs name all 16 YMM and stage their scales in
+  the red zone by design (emitMatVec4 8, emitKQuantMatVec 12, emitQ6KMatVec
+  18, emitQ3KMatVec 21 stack operands); no other emitter touches the stack.
+
+`TestHotKernelsKeepTheirRegisters` holds the hot kernels that ran to no spill
+and a floor -- streaming kernels at least half an SM, GEMM and flash attention
+at least two resident workgroups -- and every host emitter but the red-zone
+stagers to no stack operand. Capped at 32 registers (`tier.WithCUDAMaxRegs`)
+it reports 52 spilling kernels of 69 on sm_86; with a staging emitter taken
+off the list it names it.
+
+The batched GEMM now passes over a tile its compiler reports spilling
+(`tier.Config.SpillingTiles` is the other arm): on sm_70 q6_k takes the m4n2
+tile at 223 registers instead. `verify -ab spill`, V100, Llama-3.2-1B,
+four 512-token prompts a round, 21 rounds, pinned to the second socket: A/A
+1.0008 (refused both) and 1.0005 (allowed both); refused against allowed
+1.0362 and 1.0375 with the shipped tier as B, 0.9655 and 0.9637 with the arms
+swapped -- 3.6-3.8% faster prefill, IQR/median at most 0.5%. Decode does not
+run GemmVolta and its kernel split is unchanged (2706.5 against 2708.4 us of
+kernels a token). On sm_86 no tile spills, so nothing changes there by
+construction.

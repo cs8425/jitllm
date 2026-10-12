@@ -96,12 +96,10 @@ func main() {
 		eng.Live = true
 		register(sh, d)
 	} else {
-		eng := engine.New(sh)
-		sh.ServeAPI(eng.Server())
-		// Before the window closes, so a decode in flight is cancelled and the
-		// container and device are released rather than leaked past the window.
-		sh.OnShutdown(eng.Close)
-		register(sh, screen.Deps{Engine: eng})
+		// The engine setting decides: under Auto a jitllmd that answers is
+		// used and the window runs its own engine only when none does.
+		eng := engine.Start(sh)
+		register(sh, screen.Deps{Engine: eng.Driver()})
 		// The macOS app's first launch offers to put its jitllm and jitllmd
 		// on PATH; anywhere else it does nothing.
 		screen.OfferCLI(sh)
