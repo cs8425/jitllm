@@ -35,6 +35,8 @@ type fuseArm struct {
 	regions       int64 // parallel pool regions over the decoded tokens
 	phases        int64 // phases fused regions ran over them
 	runs          int64 // fused runs opened
+	grouped       int64 // matvec groups run
+	ahead         int64 // lines the lookahead hinted
 	decoded, nlyr int
 }
 
@@ -53,6 +55,8 @@ func fusedDecode(t *testing.T, m *Model, fused bool, n int) fuseArm {
 			s.jit.ResetRegions()
 			a.phases = s.jit.Phases()
 			a.runs = s.FusedRuns
+			a.grouped = s.Grouped
+			a.ahead = s.jit.AheadLines()
 		}
 		lg, err := s.Forward(tok)
 		if err != nil {
@@ -70,6 +74,8 @@ func fusedDecode(t *testing.T, m *Model, fused bool, n int) fuseArm {
 	a.regions, _ = s.jit.Regions()
 	a.phases = s.jit.Phases() - a.phases
 	a.runs = s.FusedRuns - a.runs
+	a.grouped = s.Grouped - a.grouped
+	a.ahead = s.jit.AheadLines() - a.ahead
 	a.decoded = n
 	a.nlyr = m.Cfg.NLayer
 	return a
@@ -112,6 +118,11 @@ func TestFusedBlocksMatchPerOp(t *testing.T) {
 					t.Fatalf("%s: the fused arm opened %d runs and ran %d phases: it measured the per-op path twice",
 						arm, fu.runs, fu.phases)
 				}
+				// A group names the next op's weights, and a phase with
+				// fewer chunks than workers leaves one idle to hint them.
+				if fu.grouped > 0 && fu.ahead == 0 {
+					t.Fatalf("%s: %d matvec groups ran and the lookahead hinted nothing", arm, fu.grouped)
+				}
 				if per.runs != 0 || per.phases != 0 {
 					t.Fatalf("%s: the per-op arm fused (%d runs, %d phases)", arm, per.runs, per.phases)
 				}
@@ -126,8 +137,9 @@ func TestFusedBlocksMatchPerOp(t *testing.T) {
 						}
 					}
 				}
-				t.Logf("%s, %d layers: per op %.1f regions/token; fused %.1f regions/token + %.1f phases/token, %.1f runs/token",
-					arm, per.nlyr, float64(per.regions)/n, float64(fu.regions)/n, float64(fu.phases)/n, float64(fu.runs)/n)
+				t.Logf("%s, %d layers: per op %.1f regions/token; fused %.1f regions/token + %.1f phases/token, %.1f runs/token, %.0f KiB hinted/token",
+					arm, per.nlyr, float64(per.regions)/n, float64(fu.regions)/n, float64(fu.phases)/n, float64(fu.runs)/n,
+					float64(fu.ahead)*64/1024/n)
 				if fu.regions >= per.regions {
 					t.Fatalf("%s: fused %d regions against per op %d: fusion removed none", arm, fu.regions, per.regions)
 				}

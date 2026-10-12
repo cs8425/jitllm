@@ -29,6 +29,8 @@ type modelOpts struct {
 	noFuse bool
 	// noGroups runs a fused run's matvecs a phase each; see WithMatVecGroups.
 	noGroups bool
+	// noLook turns off the fused runs' weight lookahead; see WithLookahead.
+	noLook bool
 	// noShOverlap runs a mixture's shared expert after its routed read
 	// rather than behind it; see WithSharedOverlap.
 	noShOverlap bool
@@ -125,6 +127,12 @@ func WithBlockFusion(on bool) Option { return func(l *loadOpts) { l.opt.noFuse =
 // run as one region with the activation's quantization folded in
 // (nn.MatVecPackedGroup). On by default, the same bits; off is the A/B arm.
 func WithMatVecGroups(on bool) Option { return func(l *loadOpts) { l.opt.noGroups = !on } }
+
+// WithLookahead sets whether a fused run's workers that find a phase drained
+// hint the next op's weights into the outer caches while the phase's last
+// chunks run (nn.JIT.SetAhead). On by default; it writes nothing a kernel
+// reads, so the bits are the same either way. Off is the A/B arm.
+func WithLookahead(on bool) Option { return func(l *loadOpts) { l.opt.noLook = !on } }
 
 // WithSharedOverlap sets whether a latent mixture's shared experts run while
 // its routed experts are read from the container, instead of after. On by

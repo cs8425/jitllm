@@ -37,8 +37,11 @@ type Emitters struct {
 	Scale   func() ([]byte, error)
 	Softcap func() ([]byte, error)
 	// Clamp is x = min(max(x, lo), hi) with Scr = {lo, hi}: DBRX's clip_qkv.
-	Clamp   func() ([]byte, error)
-	Softmax func() ([]byte, error)
+	Clamp func() ([]byte, error)
+	// PrefetchLines hints Args.K 64-byte lines from Args.Out into the outer
+	// caches: a fused region's lookahead (prefetchlines.go).
+	PrefetchLines func() ([]byte, error)
+	Softmax       func() ([]byte, error)
 	// LogSoftmax is Softmax's log form, the same Args and Scr = ActConsts():
 	// x - max - ln(sum exp(x - max)), in place (EmitLogSoftmax).
 	LogSoftmax func() ([]byte, error)
@@ -285,10 +288,13 @@ func must(op string, b []byte) ([]byte, error) {
 var primaryEmitters = Emitters{
 	Tier: primaryTier,
 
-	Axpy:       func() ([]byte, error) { return must("axpy", EmitAxpy()) },
-	Scale:      func() ([]byte, error) { return must("scale", EmitScale()) },
-	Softcap:    func() ([]byte, error) { return must("softcap", EmitSoftcap()) },
-	Clamp:      func() ([]byte, error) { return must("clamp", EmitClamp()) },
+	Axpy:    func() ([]byte, error) { return must("axpy", EmitAxpy()) },
+	Scale:   func() ([]byte, error) { return must("scale", EmitScale()) },
+	Softcap: func() ([]byte, error) { return must("softcap", EmitSoftcap()) },
+	Clamp:   func() ([]byte, error) { return must("clamp", EmitClamp()) },
+	PrefetchLines: func() ([]byte, error) {
+		return must("prefetch_lines", EmitPrefetchLines())
+	},
 	Resample:   func(prec int) ([]byte, error) { return must("resample", EmitResample(prec)) },
 	ResampleH:  func(prec int) ([]byte, error) { return must("resample_h", EmitResampleH(prec)) },
 	PixLUT:     func() ([]byte, error) { return must("pixlut", EmitPixLUT()) },
@@ -384,24 +390,25 @@ var primaryEmitters = Emitters{
 var sseEmitters = Emitters{
 	Tier: TierSSE,
 
-	Axpy:       EmitAxpySSE,
-	Scale:      EmitScaleSSE,
-	Softcap:    EmitSoftcapSSE,
-	Clamp:      EmitClampSSE,
-	Resample:   EmitResampleSSE,
-	ResampleH:  EmitResampleHSSE,
-	PixLUT:     EmitPixLUTSSE,
-	Copy32:     EmitCopy32SSE,
-	PixelRow:   EmitPixelRowSSE,
-	AxisTaps:   EmitAxisTapsSSE,
-	LerpGrid:   EmitLerpGridSSE,
-	SinCosTab:  EmitSinCosTabSSE,
-	Softmax:    EmitSoftmaxSSE,
-	LogSoftmax: EmitLogSoftmaxSSE,
-	ActMul:     EmitActMulSSE,
-	Act:        EmitActSSE,
-	SigmoidMul: EmitSigmoidMulSSE,
-	XIELU:      EmitXIELUSSE,
+	Axpy:          EmitAxpySSE,
+	Scale:         EmitScaleSSE,
+	Softcap:       EmitSoftcapSSE,
+	Clamp:         EmitClampSSE,
+	PrefetchLines: EmitPrefetchLinesSSE,
+	Resample:      EmitResampleSSE,
+	ResampleH:     EmitResampleHSSE,
+	PixLUT:        EmitPixLUTSSE,
+	Copy32:        EmitCopy32SSE,
+	PixelRow:      EmitPixelRowSSE,
+	AxisTaps:      EmitAxisTapsSSE,
+	LerpGrid:      EmitLerpGridSSE,
+	SinCosTab:     EmitSinCosTabSSE,
+	Softmax:       EmitSoftmaxSSE,
+	LogSoftmax:    EmitLogSoftmaxSSE,
+	ActMul:        EmitActMulSSE,
+	Act:           EmitActSSE,
+	SigmoidMul:    EmitSigmoidMulSSE,
+	XIELU:         EmitXIELUSSE,
 
 	RMSNorm:   EmitRMSNormSSE,
 	LayerNorm: EmitLayerNormSSE,

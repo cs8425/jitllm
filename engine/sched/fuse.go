@@ -50,6 +50,29 @@ type fused struct {
 	done  atomic.Int64
 	end   atomic.Bool
 	n     atomic.Int64 // phases run, for Phases
+	// ahead is what a worker does when it finds nothing left to claim in
+	// the current phase (FuseWith); nil does nothing.
+	ahead Lookahead
+}
+
+// Lookahead is the work a fused region's idle workers do between phases: a
+// worker that found nothing left to claim calls Ahead once per phase, and Ahead
+// returns as soon as Moved reports the region has gone past that phase. It
+// must not write anything a phase reads -- it exists to warm the caches with
+// the next phase's operands (nn's weight prefetch), so a phase runs the same
+// work whether or not it ran.
+type Lookahead interface {
+	Ahead(p *Pool, worker, workers int, tag uint64)
+}
+
+// Moved reports whether phase tag is over: every chunk of it is done, a new
+// phase was published or the region ended. A Lookahead polls it between
+// pieces, so the idle work fills the phase's tail and never delays the next
+// phase -- the caller runs it too, and publishes the next phase only after.
+func (p *Pool) Moved(tag uint64) bool {
+	c := p.w()
+	w := c.fz.word.Load()
+	return fwTag(w) != tag || c.fz.end.Load() || c.fz.done.Load() >= int64(fwTotal(w))
 }
 
 // Fuse opens a fused region on p and reports whether it did. It does not when
@@ -61,7 +84,11 @@ type fused struct {
 // generated code by the region's pprof label, which a phase does not carry, so
 // a profiled run is the per-op one. Every Fuse that returns true is paired
 // with Unfuse.
-func (p *Pool) Fuse() bool {
+func (p *Pool) Fuse() bool { return p.FuseWith(nil) }
+
+// FuseWith is Fuse with l as the region's idle work (Lookahead): set once the
+// region is this caller's, cleared by Unfuse.
+func (p *Pool) FuseWith(l Lookahead) bool {
 	if p == nil || p.stopped.Load() || regionLabels.Load() {
 		return false
 	}
@@ -85,6 +112,7 @@ func (p *Pool) Fuse() bool {
 		}
 	}
 	c.fz.owner.Store(p)
+	c.fz.ahead = l
 	c.fz.end.Store(false)
 	part := int(p.part.Load())
 	if part < 2 {
@@ -125,6 +153,7 @@ func (p *Pool) Unfuse() {
 	for c.left.Load() != joined {
 		runtime.Gosched()
 	}
+	c.fz.ahead = nil
 	c.fz.owner.Store(nil)
 	if p.crew != nil {
 		c.mu.Unlock()
@@ -179,6 +208,9 @@ func (c *Pool) phase(j job, part int) {
 	c.fz.n.Add(1)
 	c.wakeParked(limit - 1)
 	c.fdrain(0, tag)
+	if a := c.fz.ahead; a != nil {
+		a.Ahead(c.fz.owner.Load(), 0, limit, tag)
+	}
 	for spins := 0; c.fz.done.Load() != int64(n); spins++ {
 		if spins&63 == 63 {
 			runtime.Gosched()
@@ -217,8 +249,11 @@ func (c *Pool) phaseLoop(id int) {
 			return
 		}
 		seen = fwTag(w)
-		if id < int(c.limit.Load()) {
+		if lim := int(c.limit.Load()); id < lim {
 			c.fdrain(id, seen)
+			if a := c.fz.ahead; a != nil {
+				a.Ahead(c.fz.owner.Load(), id, lim, seen)
+			}
 		}
 	}
 }

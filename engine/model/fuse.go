@@ -25,6 +25,10 @@ func (s *State) fuseRun() {
 	if s.fused || s.fuseOff {
 		return
 	}
+	// A run starts with nothing to look ahead to: a set named in an earlier
+	// run is the State's to refill now, and no worker may be reading it.
+	s.jit.SetAhead(nil)
+	s.jit.SetLookahead(!s.lookOff)
 	if s.jit.Fuse() {
 		s.fused = true
 		s.FusedRuns++
@@ -84,6 +88,54 @@ func (s *State) groupOf(x []float32, ws [nn.MaxGroup]*tensor, outs [nn.MaxGroup]
 	}
 	return ok
 }
+
+// aheadOps is how many lookahead sets a block has: what it reads after its
+// q/k/v, after its o, after its gate/up and after its down.
+const aheadOps = 4
+
+// aheadOf names in the fused run's lookahead (nn.AheadSet) the weights block
+// li reads after op: idle workers at the end of a phase hint them into the
+// outer caches. It does nothing outside a fused run. The set is the State's,
+// one per (block, op), named once per run (fuseRun clears the last one), so
+// the set a worker may still be reading is never the one being filled.
+func (s *State) aheadOf(li, op int, ws [nn.MaxGroup]*tensor) {
+	if !s.fused || s.lookOff {
+		return
+	}
+	i := li*aheadOps + op
+	if i >= len(s.aheads) {
+		if n := len(s.m.layers) * aheadOps; n > i {
+			s.aheads = make([]nn.AheadSet, n)
+		} else {
+			s.jit.SetAhead(nil)
+			return
+		}
+	}
+	set := &s.aheads[i]
+	for k, w := range ws {
+		set.P[k] = nil
+		if w != nil {
+			set.P[k] = w.packed
+		}
+	}
+	s.jit.SetAhead(set)
+}
+
+// aheadNext names block li+1's q/k/v as what follows li's down projection,
+// when that block runs next in this fused run: on the host and resident.
+func (s *State) aheadNext(li int) {
+	n := li + 1
+	if n >= s.hi || s.devAt(n) || !s.m.blockResident(n) || s.m.layers[n].wq.packed == nil {
+		s.aheadOf(li, 3, [nn.MaxGroup]*tensor{})
+		return
+	}
+	l := &s.m.layers[n]
+	s.aheadOf(li, 3, [nn.MaxGroup]*tensor{&l.wq, &l.wk, &l.wv})
+}
+
+// SetLookahead turns the fused runs' lookahead on or off for this State's
+// decode tokens (WithLookahead is the model-wide default).
+func (s *State) SetLookahead(on bool) { s.lookOff = !on }
 
 // SetMatVecGroups turns groupOf on or off inside fused runs: off, a fused
 // run's matvecs and their activation quantization are a phase each.
