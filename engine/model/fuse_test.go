@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/engine/sched"
 	"github.com/jitllm/jitllm/internal/testmodels"
 )
 
@@ -149,6 +150,14 @@ func fusedRunsCheck(t *testing.T, must bool) func() {
 		}
 		n := fusedRunsTotal.Load() - r0
 		t.Logf("fused runs opened: %d", n)
+		// sched.Pool.Fuse opens no region on a pool of one worker: with no
+		// one else to join there is no round trip to remove, and the per-op
+		// path is what such a host runs (a one-physical-core runner).
+		if must && n == 0 && len(sched.DecodeCores()) < 2 {
+			t.Logf("%s: the decode pool has %d worker(s), and a fused run needs two; the per-op path is this host's",
+				t.Name(), len(sched.DecodeCores()))
+			return
+		}
 		if must && n == 0 {
 			t.Fatalf("%s opened no fused run: it gated the per-op path only", t.Name())
 		}
