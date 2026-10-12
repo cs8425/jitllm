@@ -18,6 +18,11 @@ import (
 var int8Tiles = []kernels.Int8Tile{
 	{MT: 4, NT: 4, WM: 2, WN: 2}, {MT: 2, NT: 2, WM: 2, WN: 2}, {MT: 1, NT: 1, WM: 2, WN: 2},
 	{MT: 4, NT: 2, WM: 1, WN: 4}, {MT: 1, NT: 2, WM: 4, WN: 1},
+	// The deep stage (MMQ's shape): eight warps, 64 and 128 elements of k a
+	// trip, one buffer and two; and sm_75's m8n8k16 at one step and four.
+	{MT: 2, NT: 4, WM: 4, WN: 2, D: 2}, {MT: 4, NT: 2, WM: 2, WN: 4, D: 4, Single: true},
+	{MT: 2, NT: 2, WM: 2, WN: 2, M8: true}, {MT: 4, NT: 4, WM: 2, WN: 2, D: 4, Single: true, M8: true},
+	{MT: 4, NT: 2, WM: 2, WN: 4, D: 4, Single: true, M8: true},
 }
 
 // gemmInt8Case runs GemmInt8 on the fixture run's buffers for every tile in
@@ -43,7 +48,8 @@ func gemmInt8Case(t *testing.T, d backend.Device, q kernels.Quant, nrows, k, nto
 			s := kernels.MatVecShape{T: q, K: k, Rows: nrows, NTok: ntok, Split: split}
 			kk, err := kernels.GemmInt8(s, tl)
 			if err != nil {
-				if strings.Contains(err.Error(), "does not divide") || strings.Contains(err.Error(), "do not tile") {
+				if strings.Contains(err.Error(), "does not divide") || strings.Contains(err.Error(), "do not tile") ||
+					strings.Contains(err.Error(), "shared memory") {
 					continue
 				}
 				t.Fatalf("%+v split %d: %v", tl, split, err)

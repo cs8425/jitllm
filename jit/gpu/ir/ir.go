@@ -703,8 +703,16 @@ const (
 var mmaShapes = []MMAShape{
 	{16, 8, 16, MMAS8}, {16, 8, 32, MMAS8},
 	{16, 8, 8, MMAF16}, {16, 8, 16, MMAF16},
-	MMAVolta,
+	MMAVolta, MMAS8Turing,
 }
+
+// MMAS8Turing is m8n8k16 int8 -> int32, the integer matrix instruction sm_75
+// has (the m16n8 integer shapes are sm_80's). Lane (g, q) = (lane/4, lane%4)
+// holds A's row g at k 4q..4q+3, B's column g at the same k, and D's row g at
+// columns 2q and 2q+1. A kernel asks for it by name: it is not how the m16n8
+// shapes lower, so a device without them still refuses those (and the tier's
+// integer-matvec probe keeps its answer).
+var MMAS8Turing = MMAShape{8, 8, 16, MMAS8}
 
 // MMAVolta is sm_70's only matrix instruction, mma.sync m8n8k4 f16 -> f32. It
 // is not a warp-wide tile: the warp is four quad-pairs (lanes 4q..4q+3 with
