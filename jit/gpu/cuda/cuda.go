@@ -264,6 +264,7 @@ func bindCUDA() error {
 	loadEvents(lib)
 	loadUUID(lib)
 	loadFuncAttrs(lib)
+	loadPeer(lib)
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"time"
@@ -60,7 +61,7 @@ func (e *Engine) MoveToNextDevice() {
 		var hist uint64
 		via := ""
 		for _, r := range runs {
-			mv, err := e.srv.MoveBlocks(e.sess, r[0], r[1]-1, to)
+			mv, err := e.srv.MoveBlocks(context.Background(), e.sess, r[0], r[1]-1, to)
 			if err != nil {
 				e.status("moving blocks to %s: %v", to, err)
 				break
@@ -168,8 +169,13 @@ func relocateRuns(c *client.Conn, sid string, runs [][2]int32, to string) (int, 
 
 // pathName is a RelocationPath as the status line says it.
 func pathName(p v1.RelocationPath) string {
-	if p == v1.RelocationPath_RELOCATION_PATH_HOST {
+	switch p {
+	case v1.RelocationPath_RELOCATION_PATH_HOST:
 		return "host"
+	case v1.RelocationPath_RELOCATION_PATH_STAGED:
+		return "staged"
+	case v1.RelocationPath_RELOCATION_PATH_PEER:
+		return "peer"
 	}
 	return "device"
 }

@@ -152,6 +152,7 @@ func (g *GPU) SetActWindow(w int) {
 // Close closes every device. A tier whose second device failed to open never
 // reaches here; New closes the whole list itself.
 func (g *GPU) Close() {
+	g.settle()
 	for _, d := range g.devs {
 		d.Close()
 	}
@@ -288,6 +289,7 @@ func (g *GPU) PrepLayer(li int, p *nn.LayerPlan, w *nn.LayerWeights) bool {
 // the fastest card page the whole model through two slots while the next card
 // sat empty: the same tokens at a much worse rate.
 func (g *GPU) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeights) bool {
+	g.settle()
 	done, ok := g.admit(p.Model, fmt.Sprintf("block %d", li))
 	if !ok {
 		return false
@@ -852,6 +854,7 @@ func (g *GPU) PrepLayerOn(name string, li int, p *nn.LayerPlan, w *nn.LayerWeigh
 // rather than the router's choice. False means the device declined (its budget,
 // or a graph it does not run); an error means no such device is attached.
 func (g *GPU) prepLayerOn(sid uint64, name string, li int, p *nn.LayerPlan, w *nn.LayerWeights) (bool, error) {
+	g.settle()
 	d, err := g.device(name)
 	if err != nil {
 		return false, err
@@ -893,6 +896,7 @@ func (g *GPU) prepLayerOn(sid uint64, name string, li int, p *nn.LayerPlan, w *n
 
 // PrepHeadOn places the output projection on the named device.
 func (g *GPU) PrepHeadOn(name string, h *nn.Head) (bool, error) {
+	g.settle()
 	d, err := g.device(name)
 	if err != nil {
 		return false, err
@@ -923,12 +927,17 @@ func (g *GPU) PrepHeadOn(name string, h *nn.Head) (bool, error) {
 	g.mu.Lock()
 	prev := g.head
 	g.head = d
-	g.mu.Unlock()
-	// The copy the head moved from is freed when no block is left on that
-	// device to share its scratch (devTier.dropHead).
-	if prev != nil && prev != d {
-		prev.dropHead()
+	if g.stagedHead == d {
+		g.stagedHead = nil
 	}
+	// The copy the head moved from is freed when no block is left on that
+	// device to share its scratch (devTier.dropHead), with a move's other
+	// leftovers (RetireMoved).
+	if prev != nil && prev != d {
+		g.retire = append(g.retire, retiree{prev, -1})
+	}
+	g.mu.Unlock()
+	g.RetireMoved()
 	return true, nil
 }
 
@@ -1596,6 +1605,7 @@ func (g *GPU) ReleaseLayers(lo, hi int) {
 // re-capture for nothing. The cursor goes back to the device holding the
 // highest remaining block (or the fastest), since the release freed room.
 func (g *GPU) releaseLayers(sid uint64, lo, hi int) {
+	g.settle()
 	g.mu.Lock()
 	if g.spillFrom != nil && g.spillLi >= lo && g.spillLi < hi {
 		g.spillFrom = nil

@@ -30,18 +30,34 @@ func moveDevices() (string, string) {
 // bit for bit between two devices running the same kernels, and inside the
 // reduction-order band between two backends (RULE 11c).
 //
-// The upper arm moves only the upper half, so the output projection stays
-// behind on a device that no longer holds the last block: the projection's
-// own submission, which no placement reached before a block could be moved.
+// The default arm prepares each move while the sequence keeps generating
+// (PrepareMove) and commits it at the first token the target is ready, the
+// history copied device to device: it asserts the direct path ran and the
+// blocks were staged. The host arm (WithDirectMoves(false)) is the control
+// the direct path is measured against: every history through the State's
+// cache. The upper arm moves only the upper half, so the output projection
+// stays behind on a device that no longer holds the last block: the
+// projection's own submission, which no placement reached before a block
+// could be moved.
 func TestBlocksMoveBetweenDevices(t *testing.T) {
 	names := append([]string{"Llama-3.2-1B-Instruct-Q4_K_M.gguf"}, relocModels()...)
 	for _, name := range names {
-		t.Run(name, func(t *testing.T) { blocksMoveBetweenDevices(t, jlmOf(t, testmodels.Path(name)), false) })
-		t.Run(name+"/upper", func(t *testing.T) { blocksMoveBetweenDevices(t, jlmOf(t, testmodels.Path(name)), true) })
+		t.Run(name, func(t *testing.T) { blocksMoveBetweenDevices(t, jlmOf(t, testmodels.Path(name)), moveWhole) })
+		t.Run(name+"/host", func(t *testing.T) {
+			blocksMoveBetweenDevices(t, jlmOf(t, testmodels.Path(name)), moveHost, WithDirectMoves(false))
+		})
+		t.Run(name+"/upper", func(t *testing.T) { blocksMoveBetweenDevices(t, jlmOf(t, testmodels.Path(name)), moveUpper) })
 	}
 }
 
-func blocksMoveBetweenDevices(t *testing.T, path string, upper bool, opts ...Option) {
+// The arms of TestBlocksMoveBetweenDevices.
+const (
+	moveWhole = iota
+	moveHost
+	moveUpper
+)
+
+func blocksMoveBetweenDevices(t *testing.T, path string, arm int, opts ...Option) {
 	a, b := moveDevices()
 	g, err := tier.OpenWith(tier.WithDevices(a+","+b), tier.WithDeviceTune(tier.TuneOff))
 	if err != nil || g == nil {
@@ -70,7 +86,7 @@ func blocksMoveBetweenDevices(t *testing.T, path string, upper bool, opts ...Opt
 		if len(placed) == 0 {
 			t.Skipf("%s took no block of this model: %s", a, g.Err())
 		}
-		if upper {
+		if arm == moveUpper {
 			if len(placed) < 2 {
 				t.Skipf("%s took %d block(s); the upper half of one is all of it", a, len(placed))
 			}
@@ -80,9 +96,18 @@ func blocksMoveBetweenDevices(t *testing.T, path string, upper bool, opts ...Opt
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The range the moves name: the placed blocks and every KV-sharing
+		// group they reach, whole.
+		lo, hi := placed[0], placed[len(placed)-1]+1
+		for _, li := range placed {
+			glo, ghi := st.kvSpan(li)
+			lo, hi = min(lo, glo), max(hi, ghi)
+		}
 		var out []int32
 		var lg [][]float32
 		var moves []BlockMove
+		var pm *PendingMove
+		to, from := b, a
 		for i := 0; i < ntok; i++ {
 			lg = append(lg, append([]float32(nil), logits...))
 			next := Greedy(logits)
@@ -91,12 +116,24 @@ func blocksMoveBetweenDevices(t *testing.T, path string, upper bool, opts ...Opt
 			}
 			out = append(out, next)
 			if move && (i == moveAt || i == backAt) {
-				to, from := b, a
+				to, from = b, a
 				if i == backAt {
 					to, from = a, b
 				}
+				if pm, err = st.PrepareMove(lo, hi, to); err != nil {
+					t.Fatalf("%s -> %s, blocks %d..%d: %v", from, to, lo, hi-1, err)
+				}
+			}
+			// The host arm commits at once, as MoveBlocks does; the others at
+			// the first token the target is ready, and the last before the
+			// next move at the latest.
+			if pm != nil && (arm == moveHost || pm.Ready() || i == backAt-1 || i == ntok-1) {
 				rows := st.PrefillRows()
-				mv := st.moveAll(t, from, to, placed)
+				mv, err := pm.Commit()
+				if err != nil {
+					t.Fatalf("%s -> %s, blocks %d..%d: %v", from, to, lo, hi-1, err)
+				}
+				pm = nil
 				if got := st.PrefillRows() - rows; got != 0 {
 					t.Fatalf("the move %s -> %s computed %d prompt rows again", from, to, got)
 				}
@@ -119,8 +156,20 @@ func blocksMoveBetweenDevices(t *testing.T, path string, upper bool, opts ...Opt
 	if len(moves) != 2 || len(moves[0].Moved) == 0 || moves[0].KVBytes+moves[0].RecBytes == 0 {
 		t.Fatalf("the moves did not run: %+v", moves)
 	}
-	t.Logf("%s <-> %s: %d block(s), %d KV and %d recurrent bytes, path %s, head moved %v",
-		a, b, len(moves[0].Moved), moves[0].KVBytes, moves[0].RecBytes, moves[0].Path, moves[0].Head)
+	for i, mv := range moves {
+		t.Logf("move %d: %d block(s), %d KV and %d recurrent bytes, path %q, %d copied, head moved %v, "+
+			"%d staged in %v, pause %v", i, len(mv.Moved), mv.KVBytes, mv.RecBytes, mv.Path, mv.Copied,
+			mv.Head, mv.Staged, mv.Prepare, mv.Pause)
+	}
+	_, mover := any(g.Attach()).(nn.BlockMover)
+	switch {
+	case arm == moveHost && moves[0].Path != "host":
+		t.Fatalf("the host arm's history went by %q", moves[0].Path)
+	case arm != moveHost && mover && moves[0].Path == "host":
+		t.Fatalf("the direct arm's history came home: the direct path did not run")
+	case arm == moveWhole && mover && !m.Cfg.MoE() && moves[0].Staged != len(moves[0].Moved):
+		t.Fatalf("%d of %d blocks were prepared ahead of the move", moves[0].Staged, len(moves[0].Moved))
+	}
 	same := strings.SplitN(a, ":", 2)[0] == strings.SplitN(b, ":", 2)[0]
 	var band float64
 	defer func() { t.Logf("largest logit difference after a move: %g", band) }()

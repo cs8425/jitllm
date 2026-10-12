@@ -282,6 +282,27 @@ func (s *gpuSession) PrepHeadOn(name string, h *nn.Head) (bool, error) {
 	return s.g.PrepHeadOn(name, h)
 }
 
+// StageBlock is nn.BlockMover's: deliberately not under enter, since it runs
+// beside this session's steps on the block's current device (GPU.stageBlock).
+func (s *gpuSession) StageBlock(li int, to string, p *nn.LayerPlan, w *nn.LayerWeights, positions int) bool {
+	return s.g.stageBlock(s.sid, li, to, p, w, positions)
+}
+
+// RetireMoved is nn.BlockMover's; see GPU.RetireMoved.
+func (s *gpuSession) RetireMoved() { s.g.RetireMoved() }
+
+func (s *gpuSession) StageHead(to string, h *nn.Head) bool { return s.g.stageHead(to, h) }
+
+func (s *gpuSession) Unstage(lo, hi int) {
+	defer s.leave(s.enter())
+	s.g.Unstage(lo, hi)
+}
+
+func (s *gpuSession) MoveBlock(li int, to string, p *nn.LayerPlan, w *nn.LayerWeights, pos int) (nn.BlockMoved, error) {
+	defer s.leave(s.enter())
+	return s.g.moveBlock(s.sid, li, to, p, w, pos)
+}
+
 func (s *gpuSession) DeviceOf(li int) (string, bool) { return s.g.DeviceOf(li) }
 func (s *gpuSession) HeadDeviceName() (string, bool) { return s.g.HeadDeviceName() }
 func (s *gpuSession) HeadWith(li int) bool           { return s.g.HeadWith(li) }

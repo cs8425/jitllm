@@ -133,7 +133,12 @@ func relocateBlocks(ctx context.Context, c cli, cn *conn, session, spec, to stri
 	// Between devices the history travelled with the blocks; say how much
 	// and by which path, so a pause can be read against the bytes.
 	if p := m.GetPath(); p != v1.RelocationPath_RELOCATION_PATH_UNSPECIFIED {
-		line := fmt.Sprintf("  history %s via %s", m.GetHistory().GetHuman(), relocationPath(p))
+		line := fmt.Sprintf("  history %s via %s, the sequence waited %s", m.GetHistory().GetHuman(),
+			relocationPath(p), (time.Duration(m.GetPauseMicros()) * time.Microsecond).Round(10*time.Microsecond))
+		if n := m.GetStagedBlocks(); n > 0 {
+			line += fmt.Sprintf("; %d block(s) prepared beside its tokens in %s", n,
+				(time.Duration(m.GetPrepareMillis()) * time.Millisecond).Round(time.Millisecond))
+		}
 		if m.GetHeadMoved() {
 			line += "; the output projection followed"
 		}
@@ -154,6 +159,10 @@ func relocationPath(p v1.RelocationPath) string {
 	switch p {
 	case v1.RelocationPath_RELOCATION_PATH_HOST:
 		return "the host"
+	case v1.RelocationPath_RELOCATION_PATH_STAGED:
+		return "a host buffer"
+	case v1.RelocationPath_RELOCATION_PATH_PEER:
+		return "peer access, card to card"
 	}
 	return strings.ToLower(strings.TrimPrefix(p.String(), "RELOCATION_PATH_"))
 }

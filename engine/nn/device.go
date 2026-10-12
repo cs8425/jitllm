@@ -3,6 +3,7 @@
 package nn
 
 import (
+	"errors"
 	"math"
 	"strings"
 	"unsafe"
@@ -1231,6 +1232,54 @@ type SeqKVDevice interface {
 // prompt a State runs does not grow the pool inside its own time.
 type KVPrewarmer interface {
 	PrewarmKV(positions int)
+}
+
+// BlockMover is a NamedDevice that moves a placed block to another of its
+// devices itself, the session's history copied from the source's pages into
+// the target's without coming home (tier.GPU, move.go).
+type BlockMover interface {
+	// StageBlock prepares block li on the named device -- weights uploaded,
+	// kernels built, room for positions of history -- without routing it
+	// there. It is safe beside the
+	// session's own steps on the block's current device, so a move's
+	// preparation overlaps the tokens before it. False means not staged.
+	StageBlock(li int, to string, p *LayerPlan, w *LayerWeights, positions int) bool
+	// StageHead prepares the output projection on the named device the same
+	// way, for a move that will leave none of the session's blocks beside it.
+	StageHead(to string, h *Head) bool
+	// Unstage frees what StageBlock prepared on blocks [lo, hi), and what
+	// StageHead prepared, that no move committed.
+	Unstage(lo, hi int)
+	// MoveBlock routes block li to the named device with the session's
+	// history at pos positions, between steps. Moved false with no error is
+	// the target refusing the block, which stays where it was. An error that
+	// is ErrNotDirect changed nothing: the caller moves the block itself. w
+	// nil asks for the staged copy, and ErrNotStaged says there is none.
+	MoveBlock(li int, to string, p *LayerPlan, w *LayerWeights, pos int) (BlockMoved, error)
+	// RetireMoved frees what the MoveBlocks since the last call left on their
+	// sources, after the caller has moved what it is moving.
+	RetireMoved()
+}
+
+// ErrNotDirect is a BlockMover's answer for a move it cannot make itself --
+// a device that keeps the contiguous cache, a batch's rows -- with nothing
+// changed.
+var ErrNotDirect = errors.New("the block's history cannot move between the devices directly")
+
+// ErrNotStaged is a BlockMover's answer to a MoveBlock handed no weights for
+// a block StageBlock did not prepare: the caller reads the block and asks
+// again.
+var ErrNotStaged = errors.New("the block was not staged on the target, and no weights came with the move")
+
+// BlockMoved is what a BlockMover did with one block.
+type BlockMoved struct {
+	Moved bool
+	// Path is how the history went: "peer" card to card, "staged" through a
+	// host buffer, "host" through the device-independent row layout; "" when
+	// the block had no history.
+	Path string
+	// Bytes is the history copied.
+	Bytes uint64
 }
 
 type NamedDevice interface {

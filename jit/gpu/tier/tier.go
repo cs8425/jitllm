@@ -1788,6 +1788,17 @@ type GPU struct {
 	// own maps a block index to the device holding it. A block with no entry is
 	// on the host.
 	own map[int]*devTier
+	// staged is a block StageBlock prepared on a device ahead of a move's
+	// commit, not yet routed there (move.go).
+	staged map[int]*devTier
+	// stagedHead is the device StageHead prepared the projection on.
+	stagedHead *devTier
+	// retire is what a move left on its source -- a block, or a projection
+	// (block -1) -- freed after the route switched (RetireMoved), and
+	// retiring the frees running; every placement call waits for them
+	// (settle), so none re-creates a block a free is about to take.
+	retire   []retiree
+	retiring sync.WaitGroup
 	// geo is a block's scratch set (gemma4.go: Gemma 4's attention geometry
 	// and FFN width), so a range is cut where it changes as it is cut where
 	// the device does (runsInto). Set with own; a block's never changes.
