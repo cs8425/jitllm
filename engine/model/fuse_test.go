@@ -41,11 +41,12 @@ type fuseArm struct {
 	decoded, nlyr int
 }
 
-func fusedDecode(t *testing.T, m *Model, fused bool, n int) fuseArm {
+func fusedDecode(t *testing.T, m *Model, fused bool, n int, resid bool) fuseArm {
 	t.Helper()
 	s := m.NewState(128)
 	defer s.Close()
 	s.SetBlockFusion(fused)
+	s.SetResidualFold(resid)
 	var a fuseArm
 	prompt := []int32{1, 7, 42, 3, 99, 5}
 	tok := prompt[0]
@@ -108,9 +109,19 @@ func TestFusedBlocksMatchPerOp(t *testing.T) {
 					}
 					m.SetPageBudget(2 * m.PageSize())
 				}
-				per := fusedDecode(t, m, false, n)
-				fu := fusedDecode(t, m, true, n)
+				per := fusedDecode(t, m, false, n, false)
+				fu := fusedDecode(t, m, true, n, false)
+				// The residual fold is off by default; it must be the same
+				// bits on.
+				fr := fusedDecode(t, m, true, n, true)
 				m.Close()
+				for i := range per.toks {
+					for j, v := range per.logits[i] {
+						if math.Float32bits(v) != math.Float32bits(fr.logits[i][j]) {
+							t.Fatalf("residual fold: token %d logit %d: %v, per op %v (not the same bits)", i, j, fr.logits[i][j], v)
+						}
+					}
+				}
 				arm := "resident"
 				if paged {
 					arm = "paged"

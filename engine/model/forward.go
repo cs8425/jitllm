@@ -136,7 +136,10 @@ type State struct {
 	// lookOff turns the lookahead off (fuse.go).
 	aheads  []nn.AheadSet
 	lookOff bool
-	Grouped int64
+	// residFold lets the o and down groups add their rows into the
+	// residual (WithResidualFold).
+	residFold bool
+	Grouped   int64
 
 	// kv is the paged KV history (see engine/model/kvpage.go). Pages are committed as
 	// the sequence reaches them rather than reserved for the whole context.
@@ -644,7 +647,8 @@ func (m *Model) newStateRange(nseq, maxSeq, lo, hi int) *State {
 	}
 	s := &State{m: m, c: m.Cfg, lo: lo, hi: hi, gpuLayers: lo, maxSeq: maxSeq, reqSeq: req, nseq: nseq,
 		devFallback: true, relocate: true, prof: m.opt.profile, outNorm: m.outNorm, outW: &m.output,
-		fuseOff: m.opt.noFuse, groupOff: m.opt.noGroups, lookOff: m.opt.noLook}
+		fuseOff: m.opt.noFuse, groupOff: m.opt.noGroups, lookOff: m.opt.noLook,
+		residFold: m.opt.residFold}
 	s.holdHostRuns()
 	// A State over a prediction block projects through that block's head.
 	if lo < len(m.layers) {
@@ -3718,7 +3722,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 				}
 				// With nothing between the projection and the residual, the
 				// add rides the projection's rows (fuse.go).
-				plain := l.bo == nil && !kind.Recurrent() && l.postAttnNorm == nil &&
+				plain := s.residFold && l.bo == nil && !kind.Recurrent() && l.postAttnNorm == nil &&
 					!c.ResAttn() && c.AltUp == 0
 				if plain {
 					s.grp.Resid, s.grp.Alpha = s.x, float32(c.ResidualScale)
@@ -3846,7 +3850,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			// Inside a fused run the activation rides the down projection's
 			// group: each worker forms act(gate)*up itself (fuse.go).
 			s.grp.ActUp, s.grp.Act = up, act
-			if l.postFFNNorm == nil {
+			if s.residFold && l.postFFNNorm == nil {
 				s.grp.Resid, s.grp.Alpha = s.x, float32(c.ResidualScale)
 			}
 			s.aheadNext(li)

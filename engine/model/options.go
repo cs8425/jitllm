@@ -31,6 +31,9 @@ type modelOpts struct {
 	noGroups bool
 	// noLook turns off the fused runs' weight lookahead; see WithLookahead.
 	noLook bool
+	// residFold adds the o and down projections into the residual inside
+	// their groups; see WithResidualFold.
+	residFold bool
 	// noShOverlap runs a mixture's shared expert after its routed read
 	// rather than behind it; see WithSharedOverlap.
 	noShOverlap bool
@@ -133,6 +136,16 @@ func WithMatVecGroups(on bool) Option { return func(l *loadOpts) { l.opt.noGroup
 // chunks run (nn.JIT.SetAhead). On by default; it writes nothing a kernel
 // reads, so the bits are the same either way. Off is the A/B arm.
 func WithLookahead(on bool) Option { return func(l *loadOpts) { l.opt.noLook = !on } }
+
+// WithResidualFold sets whether a fused run's o and down groups add their rows
+// into the residual as each worker makes them, rather than in an add of its
+// own. The same bits either way (TestFusedBlocksMatchPerOp runs both). Off by
+// default: on the Xeon its rows against off read 0.9905, 0.9965 and 1.0015
+// (Llama-3.2-1B), unresolved, so it is not on until a row shows it gains.
+func WithResidualFold(on bool) Option { return func(l *loadOpts) { l.opt.residFold = on } }
+
+// SetResidualFold is WithResidualFold for one State.
+func (s *State) SetResidualFold(on bool) { s.residFold = on }
 
 // WithSharedOverlap sets whether a latent mixture's shared experts run while
 // its routed experts are read from the container, instead of after. On by

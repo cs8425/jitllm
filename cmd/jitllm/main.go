@@ -1611,6 +1611,11 @@ func loadOpts(t []tok.Option, budget uint64) []model.Option {
 	if os.Getenv("JITLLM_LOOKAHEAD") == "0" {
 		o = append(o, model.WithLookahead(false))
 	}
+	// JITLLM_FUSE_RESID=1 folds the residual add into the o and down groups
+	// (model.WithResidualFold).
+	if os.Getenv("JITLLM_FUSE_RESID") == "1" {
+		o = append(o, model.WithResidualFold(true))
+	}
 	if os.Getenv("JITLLM_SH_OVERLAP") == "0" {
 		o = append(o, model.WithSharedOverlap(false))
 	}
