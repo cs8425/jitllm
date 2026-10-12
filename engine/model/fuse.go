@@ -1,6 +1,10 @@
 package model
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+
+	"github.com/jitllm/jitllm/engine/nn"
+)
 
 // A decode token runs each run of consecutive resident host blocks as ONE pool
 // region (sched.Pool.Fuse): the workers join once and every op of every block
@@ -51,3 +55,36 @@ func (m *Model) blockResident(li int) bool {
 // fusedRunsTotal counts fused runs across every State, for the gates that must
 // show a fused run happened inside them.
 var fusedRunsTotal atomic.Int64
+
+// groupOf runs n matvecs of ws that read x as one region
+// (nn.MatVecPackedGroup) when a fused run is open, and reports whether it did;
+// false means nothing ran and the caller runs them one at a time. Inside a
+// fused run this folds the activation's quantization into the products and
+// runs siblings (q/k/v, gate/up) back to back, with no phase wait between.
+func (s *State) groupOf(x []float32, ws [nn.MaxGroup]*tensor, outs [nn.MaxGroup][]float32, n int) bool {
+	if !s.fused || s.groupOff {
+		return false
+	}
+	g := &s.grp
+	for i := 0; i < n; i++ {
+		w := ws[i]
+		if w.packed == nil || w.k != ws[0].k || len(x) < w.k {
+			return false
+		}
+		g.Out[i], g.T[i], g.P[i], g.Rows[i] = outs[i], w.typ, w.packed, w.rows
+	}
+	g.N, g.X, g.K = n, x, ws[0].k
+	ok := s.jit.MatVecPackedGroup(g)
+	g.X = nil
+	for i := range g.Out {
+		g.Out[i], g.P[i] = nil, nil
+	}
+	if ok {
+		s.Grouped++
+	}
+	return ok
+}
+
+// SetMatVecGroups turns groupOf on or off inside fused runs: off, a fused
+// run's matvecs and their activation quantization are a phase each.
+func (s *State) SetMatVecGroups(on bool) { s.groupOff = !on }

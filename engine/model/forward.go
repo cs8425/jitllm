@@ -128,6 +128,11 @@ type State struct {
 	fuseOff   bool
 	fused     bool
 	FusedRuns int64
+	// grp is groupOf's call, reused; groupOff keeps a fused run's matvecs
+	// one region each (SetMatVecGroups); Grouped counts the group calls.
+	grp      nn.MVGroup
+	groupOff bool
+	Grouped  int64
 
 	// kv is the paged KV history (see engine/model/kvpage.go). Pages are committed as
 	// the sequence reaches them rather than reserved for the whole context.
@@ -3559,7 +3564,13 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			m.trace(li, "k", s.kc[:c.KVDim()])
 		} else {
 			kvd := c.KVDimAt(li)
-			if _, err := s.projectQ(l, s.q, s.ogate, s.h, 1, false); err != nil {
+			// q, k and v as one region inside a fused run (fuse.go).
+			grouped := !c.AttnOutGate && !c.KVShared(li) && !l.vFromK && !c.MSAAt(li) &&
+				s.groupOf(s.h, [nn.MaxGroup]*tensor{&l.wq, &l.wk, &l.wv},
+					[nn.MaxGroup][]float32{s.q, s.kc, s.vc}, 3)
+			if grouped {
+				s.addBiasRows(s.q, l.bq, 1)
+			} else if _, err := s.projectQ(l, s.q, s.ogate, s.h, 1, false); err != nil {
 				return nil, err
 			}
 			// A KV-sharing block projects q alone and attends to its
@@ -3568,16 +3579,20 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 				s.attnPrep(l, s.q, nil, nil, s.ropeTable(li, s.cs, s.csSWA, 0), li, 0, s.pos)
 				goto attend
 			}
-			if err := s.mv(s.kc, l.wk, s.h); err != nil {
-				return nil, err
+			if !grouped {
+				if err := s.mv(s.kc, l.wk, s.h); err != nil {
+					return nil, err
+				}
 			}
 			s.addBias(s.kc, l.bk)
 			if l.vFromK {
 				// Gemma 4's global layers: v is k's projection, taken before
 				// k's norm and rotary.
 				copy(s.vc[:kvd], s.kc[:kvd])
-			} else if err := s.mv(s.vc, l.wv, s.h); err != nil {
-				return nil, err
+			} else if !grouped {
+				if err := s.mv(s.vc, l.wv, s.h); err != nil {
+					return nil, err
+				}
 			}
 			s.addBias(s.vc, l.bv)
 			// MiniMax Sparse Attention: the indexer's key rides the row as one
@@ -3682,8 +3697,11 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 					s.jit.NewInput()
 					src = s.ogate
 				}
-				if err := s.mv(s.h, l.wo, src[:c.QDimAt(li)]); err != nil {
-					return nil, err
+				if !s.groupOf(src[:c.QDimAt(li)], [nn.MaxGroup]*tensor{&l.wo},
+					[nn.MaxGroup][]float32{s.h}, 1) {
+					if err := s.mv(s.h, l.wo, src[:c.QDimAt(li)]); err != nil {
+						return nil, err
+					}
 				}
 			}
 			// The bias goes before the residual add; after it s.h is dead.
@@ -3782,19 +3800,29 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			// NFFN (Config.NFFNAt).
 			ff := c.NFFNAt(li)
 			gate, up, act := s.gate[:ff], s.up[:ff], c.Act
-			if err := s.mv(gate, l.gate, ffnIn); err != nil {
-				return nil, err
-			}
-			if err := s.mv(up, l.up, ffnIn); err != nil {
-				return nil, err
+			if !s.groupOf(ffnIn, [nn.MaxGroup]*tensor{&l.gate, &l.up},
+				[nn.MaxGroup][]float32{gate, up}, 2) {
+				if err := s.mv(gate, l.gate, ffnIn); err != nil {
+					return nil, err
+				}
+				if err := s.mv(up, l.up, ffnIn); err != nil {
+					return nil, err
+				}
 			}
 			t0 = s.tick()
 			s.gaussTopK(li, gate, ff)
-			s.actmulAll(gate, up, act)
-			s.jit.NewInput()
-			s.tock(opAct, t0)
-			if err := s.mv(s.h, l.down, gate); err != nil {
-				return nil, err
+			// Inside a fused run the activation rides the down projection's
+			// group: each worker forms act(gate)*up itself (fuse.go).
+			s.grp.ActUp, s.grp.Act = up, act
+			grouped := s.groupOf(gate, [nn.MaxGroup]*tensor{&l.down}, [nn.MaxGroup][]float32{s.h}, 1)
+			s.grp.ActUp = nil
+			if !grouped {
+				s.actmulAll(gate, up, act)
+				s.jit.NewInput()
+				s.tock(opAct, t0)
+				if err := s.mv(s.h, l.down, gate); err != nil {
+					return nil, err
+				}
 			}
 		}
 		if l.postFFNNorm != nil {

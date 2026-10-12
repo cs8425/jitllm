@@ -159,6 +159,7 @@ func (c *Pool) wakeParked(n int) {
 // done. The chunking is j's, scaled up only when its chunk count would not fit
 // the phase word.
 func (c *Pool) phase(j job, part int) {
+	phaseHook(j.total, j.chunk)
 	total, chunk := j.total, j.chunk
 	n := (total + chunk - 1) / chunk
 	if n > fwMax {

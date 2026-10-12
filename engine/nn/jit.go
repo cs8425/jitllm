@@ -187,6 +187,15 @@ type JIT struct {
 	// (WidenKVRows), emitted on first ask.
 	kvWiden map[int]*cpu.Code
 
+	// grq, grpairs, grhalfs and grseen are each worker's private quantized
+	// activation for MatVecPackedGroup, one per format slot, and the group
+	// call each was made for (groupGen).
+	grq      [][]int8
+	grpairs  [][]float32
+	grhalfs  [][]float32
+	grseen   []uint64
+	gract    [][]float32 // each worker's act(x)*up for a gated group
+	groupGen uint64
 	q        []int8
 	pairs    []float32
 	kpart    []float32           // MatVecPacked's k-slice partial outputs (fusedSliced)
