@@ -524,6 +524,7 @@ type hotRegions struct {
 		m                         [MaxGroup]groupMat
 		n, nch, nslot, k, maxRows int
 		slotT                     [MaxGroup]quant.Type
+		slotQK                    [MaxGroup]cpu.QuantActKernels
 		x, actUp                  []float32
 		act                       ActKind
 		gen                       uint64

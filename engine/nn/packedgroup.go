@@ -106,6 +106,9 @@ func (f *JIT) MatVecPackedGroup(g *MVGroup) bool {
 		if m.slot < 0 {
 			m.slot = j.nslot
 			j.slotT[j.nslot] = t
+			// Resolved here, on the caller: quantKernel fills a map on
+			// first use, which workers must not race on.
+			j.slotQK[j.nslot] = f.quantKernel(t)
 			j.nslot++
 		}
 		j.nch += (groups + per - 1) / per
@@ -191,7 +194,7 @@ func (h *hotRegions) groupFn(f *JIT) func(worker, lo, hi int) {
 						copy(x, j.x)
 						ActMul32JIT(x, j.actUp, j.act)
 					}
-					f.quantKernel(t).Run(t, f.grq[b][:j.k], f.grpairs[b][:2*nb], half,
+					j.slotQK[m.slot].Run(t, f.grq[b][:j.k], f.grpairs[b][:2*nb], half,
 						f.quantScratch(worker), x, j.k, 0, nb, f.actWindow)
 					f.grseen[b] = j.gen
 				}
