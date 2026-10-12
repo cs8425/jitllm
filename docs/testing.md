@@ -181,6 +181,7 @@ sweep by name and are never resolved.
 | `JITLLM_ALLOC_MODELS` | `model.TestDecodeDoesNotAllocate` | comma-separated names or paths, each run beside the default | Llama-3.2-1B, olmoe and Qwen3.5-0.8B only |
 | `JITLLM_SLOW` | several `model` sweeps | `1` admits models over 2 GiB | small models only |
 | `JITLLM_STEP_DEVICES` | every `model` gate that sweeps backends (the step, scheduler, MLA, C6, vision, gpt-oss, Llama 4 and hybrid device gates, and the decode allocation gate) | comma-separated device specs, e.g. `cuda:0` | `cuda:0,vulkan:0,metal`; the allocation gate takes each backend's default device |
+| `JITLLM_MOVE_DEVICES` | `model.TestBlocksMoveBetweenDevices`, `server.TestBlocksMoveBetweenDevicesThroughThePlacementService` | the two devices of one tier the blocks move between, e.g. `cuda:0,cuda:1` | `cuda:0,vulkan:1`: one card under two backends |
 | `JITLLM_POSTNORM_MODELS` | `model.TestPostNormDeviceErrorIsAmplification` | comma-separated GGUF names in the directory, any model whose last block has a post-FFN norm | OLMo 2 1B and EXAONE 4.0 1.2B |
 | `JITLLM_LLAMACPP_CPU` | `model.TestPostNormDeviceErrorIsAmplification` | a directory holding a CPU-only `llama-perplexity` and its libraries (a CUDA library beside it is loaded and used) | the test skips naming it |
 

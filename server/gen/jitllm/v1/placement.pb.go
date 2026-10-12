@@ -21,6 +21,54 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// RelocationPath is how a block's history went from one device to another.
+type RelocationPath int32
+
+const (
+	RelocationPath_RELOCATION_PATH_UNSPECIFIED RelocationPath = 0
+	// Home to the session's host cache, then up to the target.
+	RelocationPath_RELOCATION_PATH_HOST RelocationPath = 1
+)
+
+// Enum value maps for RelocationPath.
+var (
+	RelocationPath_name = map[int32]string{
+		0: "RELOCATION_PATH_UNSPECIFIED",
+		1: "RELOCATION_PATH_HOST",
+	}
+	RelocationPath_value = map[string]int32{
+		"RELOCATION_PATH_UNSPECIFIED": 0,
+		"RELOCATION_PATH_HOST":        1,
+	}
+)
+
+func (x RelocationPath) Enum() *RelocationPath {
+	p := new(RelocationPath)
+	*p = x
+	return p
+}
+
+func (x RelocationPath) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RelocationPath) Descriptor() protoreflect.EnumDescriptor {
+	return file_jitllm_v1_placement_proto_enumTypes[0].Descriptor()
+}
+
+func (RelocationPath) Type() protoreflect.EnumType {
+	return &file_jitllm_v1_placement_proto_enumTypes[0]
+}
+
+func (x RelocationPath) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RelocationPath.Descriptor instead.
+func (RelocationPath) EnumDescriptor() ([]byte, []int) {
+	return file_jitllm_v1_placement_proto_rawDescGZIP(), []int{0}
+}
+
 type BlockPlacement struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Index    int32                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
@@ -658,8 +706,11 @@ type RelocateBlocksRequest struct {
 	FirstBlock int32 `protobuf:"varint,2,opt,name=first_block,json=firstBlock,proto3" json:"first_block,omitempty"`
 	LastBlock  int32 `protobuf:"varint,3,opt,name=last_block,json=lastBlock,proto3" json:"last_block,omitempty"`
 	// Where to put them. Empty `to_device_id` with `to_host` true brings them
-	// home; a non-empty id moves them to that device, including FROM another
-	// device.
+	// home; a non-empty id moves them to that device. A range already on the
+	// session's devices moves between them: each block's KV pages and
+	// recurrent summary go with it, and no prompt row is computed again. The
+	// device must be one the session's model was loaded with (the tier owns
+	// the devices).
 	ToDeviceId    string `protobuf:"bytes,4,opt,name=to_device_id,json=toDeviceId,proto3" json:"to_device_id,omitempty"`
 	ToHost        bool   `protobuf:"varint,5,opt,name=to_host,json=toHost,proto3" json:"to_host,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -737,8 +788,16 @@ type RelocateBlocksResponse struct {
 	BlocksMoved int32                  `protobuf:"varint,2,opt,name=blocks_moved,json=blocksMoved,proto3" json:"blocks_moved,omitempty"`
 	// Blocks the target refused, with the reason. A refusal is reported, not
 	// an error: the rest of the range may still have moved.
-	Declined      []*PlacementDecline `protobuf:"bytes,3,rep,name=declined,proto3" json:"declined,omitempty"`
-	Millis        int64               `protobuf:"varint,4,opt,name=millis,proto3" json:"millis,omitempty"`
+	Declined []*PlacementDecline `protobuf:"bytes,3,rep,name=declined,proto3" json:"declined,omitempty"`
+	Millis   int64               `protobuf:"varint,4,opt,name=millis,proto3" json:"millis,omitempty"`
+	// How the history of blocks moved between devices travelled. Unspecified
+	// for a move between the host and a device.
+	Path RelocationPath `protobuf:"varint,5,opt,name=path,proto3,enum=jitllm.v1.RelocationPath" json:"path,omitempty"`
+	// The history the moved blocks carried: KV pages and recurrent summaries.
+	History *ByteSize `protobuf:"bytes,6,opt,name=history,proto3" json:"history,omitempty"`
+	// The output projection followed the blocks, because none of the
+	// session's blocks was left beside it.
+	HeadMoved     bool `protobuf:"varint,7,opt,name=head_moved,json=headMoved,proto3" json:"head_moved,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -799,6 +858,27 @@ func (x *RelocateBlocksResponse) GetMillis() int64 {
 		return x.Millis
 	}
 	return 0
+}
+
+func (x *RelocateBlocksResponse) GetPath() RelocationPath {
+	if x != nil {
+		return x.Path
+	}
+	return RelocationPath_RELOCATION_PATH_UNSPECIFIED
+}
+
+func (x *RelocateBlocksResponse) GetHistory() *ByteSize {
+	if x != nil {
+		return x.History
+	}
+	return nil
+}
+
+func (x *RelocateBlocksResponse) GetHeadMoved() bool {
+	if x != nil {
+		return x.HeadMoved
+	}
+	return false
 }
 
 type SetRelocationRequest struct {
@@ -1338,12 +1418,16 @@ const file_jitllm_v1_placement_proto_rawDesc = "" +
 	"last_block\x18\x03 \x01(\x05R\tlastBlock\x12 \n" +
 	"\fto_device_id\x18\x04 \x01(\tR\n" +
 	"toDeviceId\x12\x17\n" +
-	"\ato_host\x18\x05 \x01(\bR\x06toHost\"\xc0\x01\n" +
+	"\ato_host\x18\x05 \x01(\bR\x06toHost\"\xbd\x02\n" +
 	"\x16RelocateBlocksResponse\x122\n" +
 	"\tplacement\x18\x01 \x01(\v2\x14.jitllm.v1.PlacementR\tplacement\x12!\n" +
 	"\fblocks_moved\x18\x02 \x01(\x05R\vblocksMoved\x127\n" +
 	"\bdeclined\x18\x03 \x03(\v2\x1b.jitllm.v1.PlacementDeclineR\bdeclined\x12\x16\n" +
-	"\x06millis\x18\x04 \x01(\x03R\x06millis\"O\n" +
+	"\x06millis\x18\x04 \x01(\x03R\x06millis\x12-\n" +
+	"\x04path\x18\x05 \x01(\x0e2\x19.jitllm.v1.RelocationPathR\x04path\x12-\n" +
+	"\ahistory\x18\x06 \x01(\v2\x13.jitllm.v1.ByteSizeR\ahistory\x12\x1d\n" +
+	"\n" +
+	"head_moved\x18\a \x01(\bR\theadMoved\"O\n" +
 	"\x14SetRelocationRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x18\n" +
@@ -1374,7 +1458,10 @@ const file_jitllm_v1_placement_proto_rawDesc = "" +
 	"\fbudget_bytes\x18\x02 \x01(\x04R\vbudgetBytes\"_\n" +
 	"\x15SetPageBudgetResponse\x122\n" +
 	"\tresidency\x18\x01 \x01(\v2\x14.jitllm.v1.ResidencyR\tresidency\x12\x12\n" +
-	"\x04fits\x18\x02 \x01(\bR\x04fits2\xd9\x04\n" +
+	"\x04fits\x18\x02 \x01(\bR\x04fits*K\n" +
+	"\x0eRelocationPath\x12\x1f\n" +
+	"\x1bRELOCATION_PATH_UNSPECIFIED\x10\x00\x12\x18\n" +
+	"\x14RELOCATION_PATH_HOST\x10\x012\xd9\x04\n" +
 	"\x10PlacementService\x12Q\n" +
 	"\fGetPlacement\x12\x1e.jitllm.v1.GetPlacementRequest\x1a\x1f.jitllm.v1.GetPlacementResponse\"\x00\x12Q\n" +
 	"\fSetPlacement\x12\x1e.jitllm.v1.SetPlacementRequest\x1a\x1f.jitllm.v1.SetPlacementResponse\"\x00\x12W\n" +
@@ -1398,65 +1485,69 @@ func file_jitllm_v1_placement_proto_rawDescGZIP() []byte {
 	return file_jitllm_v1_placement_proto_rawDescData
 }
 
+var file_jitllm_v1_placement_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_jitllm_v1_placement_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_jitllm_v1_placement_proto_goTypes = []any{
-	(*BlockPlacement)(nil),         // 0: jitllm.v1.BlockPlacement
-	(*PlacementDecline)(nil),       // 1: jitllm.v1.PlacementDecline
-	(*Placement)(nil),              // 2: jitllm.v1.Placement
-	(*Residency)(nil),              // 3: jitllm.v1.Residency
-	(*GetPlacementRequest)(nil),    // 4: jitllm.v1.GetPlacementRequest
-	(*GetPlacementResponse)(nil),   // 5: jitllm.v1.GetPlacementResponse
-	(*SetPlacementRequest)(nil),    // 6: jitllm.v1.SetPlacementRequest
-	(*SetPlacementResponse)(nil),   // 7: jitllm.v1.SetPlacementResponse
-	(*RelocateBlocksRequest)(nil),  // 8: jitllm.v1.RelocateBlocksRequest
-	(*RelocateBlocksResponse)(nil), // 9: jitllm.v1.RelocateBlocksResponse
-	(*SetRelocationRequest)(nil),   // 10: jitllm.v1.SetRelocationRequest
-	(*SetRelocationResponse)(nil),  // 11: jitllm.v1.SetRelocationResponse
-	(*TuneSeamRequest)(nil),        // 12: jitllm.v1.TuneSeamRequest
-	(*TuneSeamResponse)(nil),       // 13: jitllm.v1.TuneSeamResponse
-	(*GetResidencyRequest)(nil),    // 14: jitllm.v1.GetResidencyRequest
-	(*GetResidencyResponse)(nil),   // 15: jitllm.v1.GetResidencyResponse
-	(*SetPageBudgetRequest)(nil),   // 16: jitllm.v1.SetPageBudgetRequest
-	(*SetPageBudgetResponse)(nil),  // 17: jitllm.v1.SetPageBudgetResponse
-	(BlockKind)(0),                 // 18: jitllm.v1.BlockKind
-	(BlockLocation)(0),             // 19: jitllm.v1.BlockLocation
-	(*ByteSize)(nil),               // 20: jitllm.v1.ByteSize
+	(RelocationPath)(0),            // 0: jitllm.v1.RelocationPath
+	(*BlockPlacement)(nil),         // 1: jitllm.v1.BlockPlacement
+	(*PlacementDecline)(nil),       // 2: jitllm.v1.PlacementDecline
+	(*Placement)(nil),              // 3: jitllm.v1.Placement
+	(*Residency)(nil),              // 4: jitllm.v1.Residency
+	(*GetPlacementRequest)(nil),    // 5: jitllm.v1.GetPlacementRequest
+	(*GetPlacementResponse)(nil),   // 6: jitllm.v1.GetPlacementResponse
+	(*SetPlacementRequest)(nil),    // 7: jitllm.v1.SetPlacementRequest
+	(*SetPlacementResponse)(nil),   // 8: jitllm.v1.SetPlacementResponse
+	(*RelocateBlocksRequest)(nil),  // 9: jitllm.v1.RelocateBlocksRequest
+	(*RelocateBlocksResponse)(nil), // 10: jitllm.v1.RelocateBlocksResponse
+	(*SetRelocationRequest)(nil),   // 11: jitllm.v1.SetRelocationRequest
+	(*SetRelocationResponse)(nil),  // 12: jitllm.v1.SetRelocationResponse
+	(*TuneSeamRequest)(nil),        // 13: jitllm.v1.TuneSeamRequest
+	(*TuneSeamResponse)(nil),       // 14: jitllm.v1.TuneSeamResponse
+	(*GetResidencyRequest)(nil),    // 15: jitllm.v1.GetResidencyRequest
+	(*GetResidencyResponse)(nil),   // 16: jitllm.v1.GetResidencyResponse
+	(*SetPageBudgetRequest)(nil),   // 17: jitllm.v1.SetPageBudgetRequest
+	(*SetPageBudgetResponse)(nil),  // 18: jitllm.v1.SetPageBudgetResponse
+	(BlockKind)(0),                 // 19: jitllm.v1.BlockKind
+	(BlockLocation)(0),             // 20: jitllm.v1.BlockLocation
+	(*ByteSize)(nil),               // 21: jitllm.v1.ByteSize
 }
 var file_jitllm_v1_placement_proto_depIdxs = []int32{
-	18, // 0: jitllm.v1.BlockPlacement.kind:type_name -> jitllm.v1.BlockKind
-	19, // 1: jitllm.v1.BlockPlacement.location:type_name -> jitllm.v1.BlockLocation
-	20, // 2: jitllm.v1.BlockPlacement.bytes:type_name -> jitllm.v1.ByteSize
-	0,  // 3: jitllm.v1.Placement.blocks:type_name -> jitllm.v1.BlockPlacement
-	1,  // 4: jitllm.v1.Placement.declines:type_name -> jitllm.v1.PlacementDecline
-	20, // 5: jitllm.v1.Residency.resident:type_name -> jitllm.v1.ByteSize
-	20, // 6: jitllm.v1.Residency.budget:type_name -> jitllm.v1.ByteSize
-	20, // 7: jitllm.v1.Residency.bytes_read:type_name -> jitllm.v1.ByteSize
-	2,  // 8: jitllm.v1.GetPlacementResponse.placement:type_name -> jitllm.v1.Placement
-	2,  // 9: jitllm.v1.SetPlacementResponse.placement:type_name -> jitllm.v1.Placement
-	2,  // 10: jitllm.v1.RelocateBlocksResponse.placement:type_name -> jitllm.v1.Placement
-	1,  // 11: jitllm.v1.RelocateBlocksResponse.declined:type_name -> jitllm.v1.PlacementDecline
-	2,  // 12: jitllm.v1.TuneSeamResponse.placement:type_name -> jitllm.v1.Placement
-	3,  // 13: jitllm.v1.GetResidencyResponse.residency:type_name -> jitllm.v1.Residency
-	3,  // 14: jitllm.v1.SetPageBudgetResponse.residency:type_name -> jitllm.v1.Residency
-	4,  // 15: jitllm.v1.PlacementService.GetPlacement:input_type -> jitllm.v1.GetPlacementRequest
-	6,  // 16: jitllm.v1.PlacementService.SetPlacement:input_type -> jitllm.v1.SetPlacementRequest
-	8,  // 17: jitllm.v1.PlacementService.RelocateBlocks:input_type -> jitllm.v1.RelocateBlocksRequest
-	10, // 18: jitllm.v1.PlacementService.SetRelocation:input_type -> jitllm.v1.SetRelocationRequest
-	12, // 19: jitllm.v1.PlacementService.TuneSeam:input_type -> jitllm.v1.TuneSeamRequest
-	14, // 20: jitllm.v1.PlacementService.GetResidency:input_type -> jitllm.v1.GetResidencyRequest
-	16, // 21: jitllm.v1.PlacementService.SetPageBudget:input_type -> jitllm.v1.SetPageBudgetRequest
-	5,  // 22: jitllm.v1.PlacementService.GetPlacement:output_type -> jitllm.v1.GetPlacementResponse
-	7,  // 23: jitllm.v1.PlacementService.SetPlacement:output_type -> jitllm.v1.SetPlacementResponse
-	9,  // 24: jitllm.v1.PlacementService.RelocateBlocks:output_type -> jitllm.v1.RelocateBlocksResponse
-	11, // 25: jitllm.v1.PlacementService.SetRelocation:output_type -> jitllm.v1.SetRelocationResponse
-	13, // 26: jitllm.v1.PlacementService.TuneSeam:output_type -> jitllm.v1.TuneSeamResponse
-	15, // 27: jitllm.v1.PlacementService.GetResidency:output_type -> jitllm.v1.GetResidencyResponse
-	17, // 28: jitllm.v1.PlacementService.SetPageBudget:output_type -> jitllm.v1.SetPageBudgetResponse
-	22, // [22:29] is the sub-list for method output_type
-	15, // [15:22] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	19, // 0: jitllm.v1.BlockPlacement.kind:type_name -> jitllm.v1.BlockKind
+	20, // 1: jitllm.v1.BlockPlacement.location:type_name -> jitllm.v1.BlockLocation
+	21, // 2: jitllm.v1.BlockPlacement.bytes:type_name -> jitllm.v1.ByteSize
+	1,  // 3: jitllm.v1.Placement.blocks:type_name -> jitllm.v1.BlockPlacement
+	2,  // 4: jitllm.v1.Placement.declines:type_name -> jitllm.v1.PlacementDecline
+	21, // 5: jitllm.v1.Residency.resident:type_name -> jitllm.v1.ByteSize
+	21, // 6: jitllm.v1.Residency.budget:type_name -> jitllm.v1.ByteSize
+	21, // 7: jitllm.v1.Residency.bytes_read:type_name -> jitllm.v1.ByteSize
+	3,  // 8: jitllm.v1.GetPlacementResponse.placement:type_name -> jitllm.v1.Placement
+	3,  // 9: jitllm.v1.SetPlacementResponse.placement:type_name -> jitllm.v1.Placement
+	3,  // 10: jitllm.v1.RelocateBlocksResponse.placement:type_name -> jitllm.v1.Placement
+	2,  // 11: jitllm.v1.RelocateBlocksResponse.declined:type_name -> jitllm.v1.PlacementDecline
+	0,  // 12: jitllm.v1.RelocateBlocksResponse.path:type_name -> jitllm.v1.RelocationPath
+	21, // 13: jitllm.v1.RelocateBlocksResponse.history:type_name -> jitllm.v1.ByteSize
+	3,  // 14: jitllm.v1.TuneSeamResponse.placement:type_name -> jitllm.v1.Placement
+	4,  // 15: jitllm.v1.GetResidencyResponse.residency:type_name -> jitllm.v1.Residency
+	4,  // 16: jitllm.v1.SetPageBudgetResponse.residency:type_name -> jitllm.v1.Residency
+	5,  // 17: jitllm.v1.PlacementService.GetPlacement:input_type -> jitllm.v1.GetPlacementRequest
+	7,  // 18: jitllm.v1.PlacementService.SetPlacement:input_type -> jitllm.v1.SetPlacementRequest
+	9,  // 19: jitllm.v1.PlacementService.RelocateBlocks:input_type -> jitllm.v1.RelocateBlocksRequest
+	11, // 20: jitllm.v1.PlacementService.SetRelocation:input_type -> jitllm.v1.SetRelocationRequest
+	13, // 21: jitllm.v1.PlacementService.TuneSeam:input_type -> jitllm.v1.TuneSeamRequest
+	15, // 22: jitllm.v1.PlacementService.GetResidency:input_type -> jitllm.v1.GetResidencyRequest
+	17, // 23: jitllm.v1.PlacementService.SetPageBudget:input_type -> jitllm.v1.SetPageBudgetRequest
+	6,  // 24: jitllm.v1.PlacementService.GetPlacement:output_type -> jitllm.v1.GetPlacementResponse
+	8,  // 25: jitllm.v1.PlacementService.SetPlacement:output_type -> jitllm.v1.SetPlacementResponse
+	10, // 26: jitllm.v1.PlacementService.RelocateBlocks:output_type -> jitllm.v1.RelocateBlocksResponse
+	12, // 27: jitllm.v1.PlacementService.SetRelocation:output_type -> jitllm.v1.SetRelocationResponse
+	14, // 28: jitllm.v1.PlacementService.TuneSeam:output_type -> jitllm.v1.TuneSeamResponse
+	16, // 29: jitllm.v1.PlacementService.GetResidency:output_type -> jitllm.v1.GetResidencyResponse
+	18, // 30: jitllm.v1.PlacementService.SetPageBudget:output_type -> jitllm.v1.SetPageBudgetResponse
+	24, // [24:31] is the sub-list for method output_type
+	17, // [17:24] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_jitllm_v1_placement_proto_init() }
@@ -1471,13 +1562,14 @@ func file_jitllm_v1_placement_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_jitllm_v1_placement_proto_rawDesc), len(file_jitllm_v1_placement_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_jitllm_v1_placement_proto_goTypes,
 		DependencyIndexes: file_jitllm_v1_placement_proto_depIdxs,
+		EnumInfos:         file_jitllm_v1_placement_proto_enumTypes,
 		MessageInfos:      file_jitllm_v1_placement_proto_msgTypes,
 	}.Build()
 	File_jitllm_v1_placement_proto = out.File

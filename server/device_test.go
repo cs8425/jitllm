@@ -85,19 +85,26 @@ func TestTheSeamMovesThroughThePlacementService(t *testing.T) {
 		t.Fatalf("placing block %d again: %+v", n-1, out.Msg)
 	}
 
-	for _, tc := range []struct {
+	type refusal struct {
 		what string
 		m    *v1.RelocateBlocksRequest
 		want connect.Code
 		says string
-	}{
+	}
+	refusals := []refusal{
 		{"a hole at the head of the device set", &v1.RelocateBlocksRequest{SessionId: "d", FirstBlock: 0, LastBlock: 0, ToHost: true},
 			connect.CodeUnimplemented, "COUNT"},
-		{"a range that does not extend the set", &v1.RelocateBlocksRequest{SessionId: "d", FirstBlock: 0, LastBlock: 0, ToDeviceId: "gpu:0"},
-			connect.CodeUnimplemented, "EXTENDS"},
 		{"a device the tier does not hold", &v1.RelocateBlocksRequest{SessionId: "d", FirstBlock: 0, LastBlock: 0, ToDeviceId: "cuda:7"},
-			connect.CodeUnimplemented, "device-to-device"},
-	} {
+			connect.CodeFailedPrecondition, "opened at load"},
+	}
+	// A range wholly on the devices moves between them; one reaching past the
+	// device set from inside it is a hole.
+	if n < 6 {
+		refusals = append(refusals, refusal{"a range that does not extend the set",
+			&v1.RelocateBlocksRequest{SessionId: "d", FirstBlock: n - 1, LastBlock: n, ToDeviceId: "gpu:0"},
+			connect.CodeUnimplemented, "EXTENDS"})
+	}
+	for _, tc := range refusals {
 		_, err := c.placement.RelocateBlocks(ctx, req(tc.m))
 		if ce := wantCode(t, tc.what, err, tc.want); !strings.Contains(ce.Message(), tc.says) {
 			t.Errorf("%s: %q does not say %q", tc.what, ce.Message(), tc.says)

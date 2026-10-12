@@ -464,6 +464,11 @@ var ErrNotFound = errors.New("server: not found")
 // ErrInUse is returned when an unload would orphan live sessions.
 var ErrInUse = errors.New("server: still in use")
 
+// ErrPlacement is returned for a placement the session's tier cannot make: a
+// host-only session, a device the tier was not opened with, or a block another
+// session is using where it is.
+var ErrPlacement = errors.New("server: the placement cannot be made")
+
 // ErrExists is returned for a model or session id that is already taken.
 var ErrExists = errors.New("server: already exists")
 
@@ -1038,6 +1043,9 @@ type placementSnapshot struct {
 	reclaims    int
 	relocating  bool
 	takenAt     time.Time
+	// on is the device each block is on, by block; "" for a host block or a
+	// device the tier did not name.
+	on []string
 }
 
 // refresh republishes the snapshot. The caller MUST hold s.mu.
@@ -1060,7 +1068,17 @@ func (s *Session) refresh() {
 		reclaims:    s.st.Reclaims(),
 		relocating:  s.st.Relocating(),
 		takenAt:     time.Now(),
+		on:          blocksOn(s.st, s.lm.m.Cfg.NLayer),
 	})
+}
+
+// blocksOn is the device each block of st is on, "" for the host.
+func blocksOn(st *model.State, n int) []string {
+	on := make([]string, n)
+	for li := range on {
+		on[li], _ = st.DeviceOf(li)
+	}
+	return on
 }
 
 // placement returns the last published snapshot, never nil.
@@ -2182,6 +2200,43 @@ func (e *Engine) SetDeviceBlocks(s *Session, n int) int {
 	s.mu.Unlock()
 	e.applyPageBudget(s.lm, nil)
 	return got
+}
+
+// onDevices reports that every block of first..last is on a device.
+func (s *Session) onDevices(first, last int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for li := first; li <= last; li++ {
+		if _, ok := s.st.DeviceOf(li); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// MoveBlocks moves blocks first..last of a session from the devices they are
+// on to the device named to, history and all (model.State.MoveBlocks). The
+// device must be one of the session's tier: the tier owns the devices and is
+// opened at load.
+func (e *Engine) MoveBlocks(s *Session, first, last int, to string) (model.BlockMove, error) {
+	if s.lm.dev == nil {
+		return model.BlockMove{}, fmt.Errorf("%w: session %q was loaded host-only; there is no "+
+			"device to move blocks to", ErrPlacement, s.id)
+	}
+	if !hasString(s.lm.deviceIDs, to) {
+		return model.BlockMove{}, fmt.Errorf("%w: session %q is on %v and %q is not one of them: "+
+			"the TIER owns the devices and is opened at load. Load the model with every device "+
+			"you want to move between", ErrPlacement, s.id, s.lm.deviceIDs, to)
+	}
+	s.mu.Lock()
+	mv, err := s.st.MoveBlocks(first, last+1, to)
+	if err != nil {
+		err = fmt.Errorf("%w: %v", ErrPlacement, err)
+	}
+	s.refresh()
+	s.mu.Unlock()
+	e.applyPageBudget(s.lm, nil)
+	return mv, err
 }
 
 // hostWeightShare is what the HOST may spend on paged weights, given a total

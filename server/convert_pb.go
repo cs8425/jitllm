@@ -259,9 +259,9 @@ func (e *Engine) pbPlacement(s *Session) *v1.Placement {
 			onDev[i] = true
 		}
 	}
-	// Which device a block is on is not addressable per session: the tier
-	// exposes only per-device counts. With one device the id is exact; with
-	// several it is left empty and GetDevice's placed counts are the truth.
+	// The tier names the device each block is on (model.State.DeviceOf);
+	// with one device the id is the one the model was loaded with, which
+	// is also what an unnamed device reports.
 	single := ""
 	if len(lm.deviceIDs) == 1 {
 		single = lm.deviceIDs[0]
@@ -280,6 +280,9 @@ func (e *Engine) pbPlacement(s *Session) *v1.Placement {
 		if onDev[i] {
 			bp.Location = v1.BlockLocation_BLOCK_LOCATION_DEVICE
 			bp.DeviceId = single
+			if i < len(snap.on) && snap.on[i] != "" {
+				bp.DeviceId = snap.on[i]
+			}
 			bp.HostResident = false
 			devCount++
 		}

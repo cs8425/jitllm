@@ -148,8 +148,11 @@ message RelocateBlocksRequest {
   int32 first_block = 2;
   int32 last_block = 3;
   // Where to put them. Empty `to_device_id` with `to_host` true brings them
-  // home; a non-empty id moves them to that device, including FROM another
-  // device.
+  // home; a non-empty id moves them to that device. A range already on the
+  // session's devices moves between them: each block's KV pages and
+  // recurrent summary go with it, and no prompt row is computed again. The
+  // device must be one the session's model was loaded with (the tier owns
+  // the devices).
   string to_device_id = 4;
   bool to_host = 5;
 }
@@ -161,6 +164,21 @@ message RelocateBlocksResponse {
   // an error: the rest of the range may still have moved.
   repeated PlacementDecline declined = 3;
   int64 millis = 4;
+  // How the history of blocks moved between devices travelled. Unspecified
+  // for a move between the host and a device.
+  RelocationPath path = 5;
+  // The history the moved blocks carried: KV pages and recurrent summaries.
+  ByteSize history = 6;
+  // The output projection followed the blocks, because none of the
+  // session's blocks was left beside it.
+  bool head_moved = 7;
+}
+
+// RelocationPath is how a block's history went from one device to another.
+enum RelocationPath {
+  RELOCATION_PATH_UNSPECIFIED = 0;
+  // Home to the session's host cache, then up to the target.
+  RELOCATION_PATH_HOST = 1;
 }
 
 message SetRelocationRequest {
