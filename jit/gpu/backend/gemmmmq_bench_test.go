@@ -125,13 +125,18 @@ func TestGemmMMQSweep(t *testing.T) {
 				for _, dd := range []int{1, 2, 4} {
 					for _, single := range []bool{false, true} {
 						for _, tl := range []kernels.Int8Tile{
-							{MT: 4, NT: 4, WM: 2, WN: 2}, {MT: 2, NT: 2, WM: 2, WN: 2},
-							{MT: 4, NT: 2, WM: 2, WN: 4}, {MT: 2, NT: 4, WM: 4, WN: 2}, {MT: 4, NT: 4, WM: 2, WN: 4},
+							{MT: 4, NT: 4, WM: 2, WN: 2}, {MT: 2, NT: 2, WM: 2, WN: 2}, {MT: 2, NT: 4, WM: 2, WN: 2},
+							{MT: 4, NT: 2, WM: 2, WN: 4}, {MT: 2, NT: 4, WM: 4, WN: 2}, {MT: 2, NT: 2, WM: 4, WN: 2},
 						} {
-							tl.D, tl.Single, tl.M8 = dd, single, m8
-							for _, split := range []int{1, 2} {
-								i8(fmt.Sprintf("i8 m8=%v d%d w%d %dx%d w%dx%d 1b=%v s%d", m8, 32*dd, tl.WM*tl.WN,
-									tl.MT, tl.NT, tl.WM, tl.WN, single, split), tl, split)
+							for _, ldm := range []bool{false, true} {
+								if !ldm && os.Getenv("JITLLM_GEMMMMQ_LDM_ONLY") != "" {
+									continue
+								}
+								tl.D, tl.Single, tl.M8, tl.LdM = dd, single, m8, ldm
+								for _, split := range []int{1, 2} {
+									i8(fmt.Sprintf("i8 m8=%v ldm=%v d%d w%d %dx%d w%dx%d 1b=%v s%d", m8, ldm, 32*dd, tl.WM*tl.WN,
+										tl.MT, tl.NT, tl.WM, tl.WN, single, split), tl, split)
+								}
 							}
 						}
 					}

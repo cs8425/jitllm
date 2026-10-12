@@ -22,6 +22,10 @@ type Int8Tile struct {
 	MT, NT, WM, WN int
 	D              int
 	Single, M8     bool
+	// LdM stages the weights in natural k order, rows padded to an odd
+	// count of 16-byte chunks, and reads each m-tile's A fragments with one
+	// ldmatrix.x4 a step (ir.Builder.LdMatrix) instead of four 8-byte loads.
+	LdM bool
 }
 
 func (t Int8Tile) depth() int { return max(t.D, 1) }
@@ -111,6 +115,13 @@ func GemmInt8(s MatVecShape, t Int8Tile) (*ir.Kernel, error) {
 	if D > 1 {
 		RS += 8
 	}
+	// RSA is a staged weight row's words: RS, or with LdM 8D+4, an odd
+	// number of 16-byte chunks so ldmatrix's eight row reads a matrix meet
+	// eight bank groups.
+	RSA := RS
+	if t.LdM {
+		RSA = 8*D + 4
+	}
 	itemsA, itemsB := BM*KB, BN*2*D // (row, sub-block) decodes; 16-byte activation chunks
 	if itemsA%nth != 0 && nth%itemsA != 0 || itemsB%nth != 0 && nth%itemsB != 0 {
 		return nil, fmt.Errorf("kernels: GemmInt8: %d threads do not tile %d A items and %d B chunks", nth, itemsA, itemsB)
@@ -123,7 +134,7 @@ func GemmInt8(s MatVecShape, t Int8Tile) (*ir.Kernel, error) {
 	if t.Single {
 		nbuf = 1
 	}
-	shWords := nbuf * (BM*RS + BN*RS + KB*BM + D*BN)
+	shWords := nbuf * (BM*RSA + BN*RS + KB*BM + D*BN)
 	if mins {
 		shWords += nbuf * (KB*BM + KB*BN)
 	}
@@ -141,6 +152,9 @@ func GemmInt8(s MatVecShape, t Int8Tile) (*ir.Kernel, error) {
 	}
 	if t.M8 {
 		name += "_m8"
+	}
+	if t.LdM {
+		name += "_ldm"
 	}
 	b := ir.New(name, [3]int{nth, 1, 1})
 	pQS := b.Param("pQS", ir.U32)
@@ -163,7 +177,7 @@ func GemmInt8(s MatVecShape, t Int8Tile) (*ir.Kernel, error) {
 	// Shared memory, two buffers each: the weights (8 words a row), their
 	// scales and minimums ([sub-block][row]), the activations (8 words a
 	// token), their block scale and their sums ([sub-block][token]).
-	shA := b.Shared("i8A", ir.U32, nbuf*BM*RS)
+	shA := b.Shared("i8A", ir.U32, nbuf*BM*RSA)
 	shB := b.Shared("i8B", ir.U32, nbuf*BN*RS)
 	shSc := b.Shared("i8Sc", ir.F32, nbuf*KB*BM)
 	shDa := b.Shared("i8Da", ir.F32, nbuf*D*BN)
@@ -320,18 +334,26 @@ func GemmInt8(s MatVecShape, t Int8Tile) (*ir.Kernel, error) {
 			sc, mn := dq.scalesF32X(r.a[i][words:], 0, sb, row)
 			outs[i] = aOut{decode(r.a[i][:words]), sc, mn}
 		}
-		baseA := b.Mul(ir.U32, buf, c(int64(BM*RS)))
+		baseA := b.Mul(ir.U32, buf, c(int64(BM*RSA)))
 		baseS := b.Mul(ir.U32, buf, c(int64(KB*BM)))
 		for i, o := range outs {
-			rw := b.Add(ir.U32, baseA, b.Mul(ir.U32, aRow[i], c(int64(RS))))
-			if SB == 1 {
+			rw := b.Add(ir.U32, baseA, b.Mul(ir.U32, aRow[i], c(int64(RSA))))
+			switch {
+			case t.LdM:
+				// Natural order, sub-block aSb's words from word aSb*len:
+				// 8 a step, a 16-element sub-block l of step s at 8s + 4l.
+				p := b.Add(ir.U32, rw, b.Shl(ir.U32, aSb[i], c(int64(log2(len(o.w))))))
+				for x := 0; x < len(o.w); x += 4 {
+					b.StoreV(shA, p, int64(x), o.w[x], o.w[x+1], o.w[x+2], o.w[x+3])
+				}
+			case SB == 1:
 				// Step aSb's natural words 0..7 at int8Pos: (w0 w4 w1 w5) (w2 w6 w3 w7).
 				if D > 1 {
 					rw = b.Add(ir.U32, rw, b.Shl(ir.U32, aSb[i], c(3)))
 				}
 				b.StoreV(shA, rw, 0, o.w[0], o.w[4], o.w[1], o.w[5])
 				b.StoreV(shA, rw, 4, o.w[2], o.w[6], o.w[3], o.w[7])
-			} else {
+			default:
 				// Sub-block sb is half sb&1 of step sb>>1: its natural words
 				// at positions 2x + (sb&1) of the step.
 				p := b.Add(ir.U32, rw, b.And(ir.U32, aSb[i], c(1)))
@@ -388,7 +410,14 @@ func GemmInt8(s MatVecShape, t Int8Tile) (*ir.Kernel, error) {
 	tokW := b.Mul(ir.U32, wn, c(int64(8*t.NT)))
 	rowL := b.Add(ir.U32, rowW, lg) // + 8h + 16i
 	tokL := b.Add(ir.U32, tokW, lg) // + 8j
-	fragA := b.Add(ir.U32, b.Mul(ir.U32, rowL, c(int64(RS))), b.Shl(ir.U32, lq, c(1)))
+	fragA := b.Add(ir.U32, b.Mul(ir.U32, rowL, c(int64(RSA))), b.Shl(ir.U32, lq, c(1)))
+	if t.LdM {
+		// Lane l names row l%8 of matrix l/8 = h + 2kh: row 8h + l%8 of the
+		// m-tile, words 4kh..4kh+3 of the step.
+		mat := b.Shr(ir.U32, lane, c(3))
+		r8 := b.Add(ir.U32, b.Add(ir.U32, rowW, b.And(ir.U32, lane, c(7))), b.Shl(ir.U32, b.And(ir.U32, mat, c(1)), c(3)))
+		fragA = b.Add(ir.U32, b.Mul(ir.U32, r8, c(int64(RSA))), b.Shl(ir.U32, b.Shr(ir.U32, mat, c(1)), c(2)))
+	}
 	fragB := b.Add(ir.U32, b.Mul(ir.U32, tokL, c(int64(RS))), b.Shl(ir.U32, lq, c(1)))
 	tokE := b.Add(ir.U32, tokW, b.Shl(ir.U32, lq, c(1))) // the D fragment's first token, + 8j
 
@@ -447,7 +476,7 @@ func GemmInt8(s MatVecShape, t Int8Tile) (*ir.Kernel, error) {
 			d[i][j] = append([]ir.Value(nil), acc[i][j]...)
 		}
 	}
-	pa := b.Add(ir.U32, fragA, b.Mul(ir.U32, cur, c(int64(BM*RS))))
+	pa := b.Add(ir.U32, fragA, b.Mul(ir.U32, cur, c(int64(BM*RSA))))
 	pb := b.Add(ir.U32, fragB, b.Mul(ir.U32, cur, c(int64(BN*RS))))
 	// The scales this lane's D fragments need: rows g and g+8 of each m-tile
 	// per sub-block, tokens 2q and 2q+1 of each n-tile.
@@ -460,8 +489,15 @@ func GemmInt8(s MatVecShape, t Int8Tile) (*ir.Kernel, error) {
 	for st := 0; st < D; st++ {
 		af := make([][2][]ir.Value, t.MT) // [m-tile][row g, g+8] -> (word q, word q+4)
 		for i := range af {
+			if t.LdM {
+				// Components h + 2kh: af's (word q, word q+4) per row half.
+				m := b.LdMatrix(shA, pa, int64(16*i*RSA+8*st), 4)
+				af[i][0] = []ir.Value{m[0], m[2]}
+				af[i][1] = []ir.Value{m[1], m[3]}
+				continue
+			}
 			for h := 0; h < 2; h++ {
-				af[i][h] = b.LoadV(ir.U32, shA, pa, int64((16*i+8*h)*RS+8*st), 2)
+				af[i][h] = b.LoadV(ir.U32, shA, pa, int64((16*i+8*h)*RSA+8*st), 2)
 			}
 		}
 		bf := make([][]ir.Value, t.NT)

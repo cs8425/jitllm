@@ -23,6 +23,9 @@ var int8Tiles = []kernels.Int8Tile{
 	{MT: 2, NT: 4, WM: 4, WN: 2, D: 2}, {MT: 4, NT: 2, WM: 2, WN: 4, D: 4, Single: true},
 	{MT: 2, NT: 2, WM: 2, WN: 2, M8: true}, {MT: 4, NT: 4, WM: 2, WN: 2, D: 4, Single: true, M8: true},
 	{MT: 4, NT: 2, WM: 2, WN: 4, D: 4, Single: true, M8: true},
+	// ldmatrix weight fragments, on both instructions.
+	{MT: 2, NT: 2, WM: 2, WN: 2, LdM: true}, {MT: 2, NT: 4, WM: 4, WN: 2, D: 4, Single: true, LdM: true},
+	{MT: 2, NT: 2, WM: 2, WN: 2, M8: true, LdM: true}, {MT: 4, NT: 2, WM: 2, WN: 4, D: 4, Single: true, M8: true, LdM: true},
 }
 
 // int8M8Tiles are int8Tiles' m8n8k16 forms: all a device with only sm_75's
