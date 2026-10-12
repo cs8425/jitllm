@@ -162,7 +162,7 @@ const (
 	// OpLoadV reads n (2 or 4) consecutive elements (idx+off .. idx+off+n-1)
 	// in one instruction; OpLoadVGet extracts component Imm (1..n-1), the op
 	// itself being component 0, as with OpMMA/OpMMAGet. OpStoreV writes its
-	// Vargs to the same span. Imm packs off<<4 | ldm<<3 | n, ldm marking an
+	// Vargs to the same span. Imm packs off<<3 | n, and ldmMark marks an
 	// OpLoadV that is a warp's ldmatrix (Builder.LdMatrix).
 	//
 	// The address must be aligned to the whole vector (8 or 16 bytes), and
@@ -403,7 +403,7 @@ func (b *Builder) LoadV(t Type, buf, idx Value, off int64, n int) []Value {
 	if n != 2 && n != 4 {
 		panic(fmt.Sprintf("ir: LoadV of %d elements; 2 or 4", n))
 	}
-	v := b.emit(Op{Kind: OpLoadV, Type: t, Args: [3]Value{buf, idx}, Imm: off<<4 | int64(n)})
+	v := b.emit(Op{Kind: OpLoadV, Type: t, Args: [3]Value{buf, idx}, Imm: off<<3 | int64(n)})
 	out := []Value{v}
 	for i := 1; i < n; i++ {
 		out = append(out, b.emit(Op{Kind: OpLoadVGet, Type: t, Args: [3]Value{v}, Imm: int64(i)}))
@@ -424,7 +424,7 @@ func (b *Builder) LdMatrix(buf, idx Value, off int64, n int) []Value {
 		panic(fmt.Sprintf("ir: LdMatrix of %d matrices; 2 or 4", n))
 	}
 	b.k.Lanes = SubgroupLanes
-	v := b.emit(Op{Kind: OpLoadV, Type: U32, Args: [3]Value{buf, idx}, Imm: off<<4 | 8 | int64(n)})
+	v := b.emit(Op{Kind: OpLoadV, Type: U32, Args: [3]Value{buf, idx}, Imm: ldmMark | off<<3 | int64(n)})
 	out := []Value{v}
 	for i := 1; i < n; i++ {
 		out = append(out, b.emit(Op{Kind: OpLoadVGet, Type: U32, Args: [3]Value{v}, Imm: int64(i)}))
@@ -432,8 +432,13 @@ func (b *Builder) LdMatrix(buf, idx Value, off int64, n int) []Value {
 	return out
 }
 
+// ldmMark is the Imm bit that makes an OpLoadV LdMatrix's: high, so the
+// encoding of every other vector access (and every IR fingerprint) is as it
+// was before ldmatrix existed.
+const ldmMark = int64(1) << 60
+
 // IsLdMatrix reports whether an OpLoadV is LdMatrix's collective load.
-func IsLdMatrix(o Op) bool { return o.Kind == OpLoadV && o.Imm&8 != 0 }
+func IsLdMatrix(o Op) bool { return o.Kind == OpLoadV && o.Imm&ldmMark != 0 }
 
 // StoreV writes vs to elements idx+off .. idx+off+len(vs)-1 of a buffer in
 // one access, len(vs) 2 or 4. The address must be aligned to 4*len(vs) bytes.
@@ -441,12 +446,12 @@ func (b *Builder) StoreV(buf, idx Value, off int64, vs ...Value) {
 	if len(vs) != 2 && len(vs) != 4 {
 		panic(fmt.Sprintf("ir: StoreV of %d elements; 2 or 4", len(vs)))
 	}
-	b.emit(Op{Kind: OpStoreV, Type: Void, Args: [3]Value{buf, idx}, Imm: off<<4 | int64(len(vs)),
+	b.emit(Op{Kind: OpStoreV, Type: Void, Args: [3]Value{buf, idx}, Imm: off<<3 | int64(len(vs)),
 		Vargs: append([]Value{}, vs...)})
 }
 
 // VecOf unpacks a LoadV/StoreV Imm into its element offset and width.
-func VecOf(o Op) (off int64, n int) { return o.Imm >> 4, int(o.Imm & 7) }
+func VecOf(o Op) (off int64, n int) { return (o.Imm &^ ldmMark) >> 3, int(o.Imm & 7) }
 
 // Dot4 is the four-way packed int8 dot product with accumulate: dp4a on PTX,
 // OpSDotKHR on SPIR-V, four multiplies on Metal.
@@ -550,7 +555,7 @@ func (k *Kernel) Validate() error {
 			if _, n := VecOf(o); n != 2 && n != 4 || (o.Kind == OpStoreV && len(o.Vargs) != n) {
 				return fmt.Errorf("ir: op %d: a %s of %d elements", i, o.Kind, n)
 			}
-			if o.Kind == OpStoreV && o.Imm&8 != 0 {
+			if o.Kind == OpStoreV && o.Imm&ldmMark != 0 {
 				return fmt.Errorf("ir: op %d: a StoreV marked ldmatrix", i)
 			}
 			if IsLdMatrix(o) && (o.Args[0] == 0 || k.Ops[o.Args[0]-1].Kind != OpShared || o.Type != U32) {
