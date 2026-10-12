@@ -96,9 +96,9 @@ func GemmInt8(s MatVecShape, t Int8Tile) (*ir.Kernel, error) {
 	if qi.sub != 32 && qi.sub != 16 {
 		return nil, fmt.Errorf("kernels: GemmInt8: sub-block %d", qi.sub)
 	}
-	D := t.depth()     // 32-element steps a trip
-	SB := 32 / qi.sub  // sub-blocks a step
-	KB := D * SB       // sub-blocks a trip
+	D := t.depth()    // 32-element steps a trip
+	SB := 32 / qi.sub // sub-blocks a step
+	KB := D * SB      // sub-blocks a trip
 	nsub := s.K / qi.sub
 	if nsub%(split*KB) != 0 {
 		return nil, fmt.Errorf("kernels: GemmInt8: split %d does not divide %d trips", split, nsub/KB)
