@@ -29,11 +29,24 @@ type launcher struct {
 	memoK   *backend.Kernel
 	memoSrc *backend.Buf
 	a, ax   backend.Buf
+	// g is the submission's device view, for the persistent path's plans
+	// (persist.go).
+	g *devTier
 }
 
 // launch is s.Launch through the reused buffer list.
 func (l *launcher) launch(k backend.Kernel, groups, width int, bufs ...backend.Buf) error {
 	t := l.to
+	if ps := t.ps; ps != nil && ps.on {
+		if ps.add(k, groups, width, bufs) {
+			return nil
+		}
+		// Full: what is held goes first, and this launch after it.
+		l.persistDrain()
+		if *l.err != nil {
+			return *l.err
+		}
+	}
 	t.bufs = append(t.bufs[:0], bufs...)
 	err := t.s.Launch(k, groups, width, t.bufs...)
 	clear(t.bufs)
@@ -45,6 +58,12 @@ func (l *launcher) launch(k backend.Kernel, groups, width int, bufs ...backend.B
 type launchTo struct {
 	s    backend.Session
 	bufs []backend.Buf
+	// ps is the persistent path's collection state (persist.go), nil until
+	// the session first runs with Config.Persist; psess the session a
+	// collecting submission runs its own calls through, so none overtakes
+	// what is held.
+	ps    *persister
+	psess persistSession
 }
 
 // la is the ordinary launch: threads in groups of 128, nothing once the

@@ -314,6 +314,13 @@ func (o *openOpts) devOpts() backend.Opts {
 	return backend.Opts{Vulkan: o.vk, CUDAPosted: o.cudaPosted, Metal: o.metal, HIP: o.hip}
 }
 
+// WithPersist sets whether each decode block's launches are composed into
+// persistent kernels (Config.Persist); grid, when positive, caps their grid
+// below the device's co-residency limit (Config.PersistGrid). Off by default.
+func WithPersist(on bool, grid int) Option {
+	return WithConfig(func(c *Config) { c.Persist, c.PersistGrid = on, grid })
+}
+
 // WithAutoStream sets whether a mixture block no device can hold resident is
 // streamed onto one (GPU.AutoStream) rather than left on the host. On by
 // default.

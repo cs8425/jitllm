@@ -6049,6 +6049,9 @@ type graphKey struct {
 	// hnorm is which norm the head reads (headNormFor): a recording names its
 	// buffer by address.
 	hnorm int
+	// persist says the recording holds composed persistent kernels
+	// (Config.Persist), which a per-op recording does not.
+	persist bool
 	// sid is the session the recording was made for: it bakes that session's
 	// page descriptors and recurrent seats, so another session never replays
 	// it. Keying on it, rather than dropping every recording when the current
@@ -6522,8 +6525,11 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	if allRows {
 		ragHead = head.WantedRows(nrow)
 	}
+	// The persistent path: decode only, and not over history streamed from
+	// home, whose uploads sit between launches.
+	persistOn := R == 1 && rag == nil && !(bs.pkv != nil && bs.pkv.st != nil) && g.ensurePersist()
 	key := graphKey{lo, hi, nCap, R, head != nil, g.TableSplit, g.ScalarSoftmax, g.flashOn(), g.KVF16,
-		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, sid}
+		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, persistOn, sid}
 	if _, live := g.recs[key]; !live {
 		for k, r := range g.recs {
 			older := k
@@ -6578,6 +6584,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	}
 	// Read here, under g.mu: a page-in another session makes changes it.
 	g.sub.paging = g.pagesIn < len(g.layers)
+	g.sub.persist = persistOn
 	g.sessQueue()
 	// The prologue streams this call's history only when some of it was at
 	// home before the prologue began (evictedFor), which made the call one
@@ -6645,7 +6652,9 @@ type submitArgs struct {
 	// paging says a block of the device is paged out, read before the
 	// submission: a recording names device addresses a page-in allocates
 	// afresh.
-	paging                  bool
+	paging bool
+	// persist says the submission composes its decode blocks (persist.go).
+	persist                 bool
 	bs, hb                  *blockScratch
 	head                    *nn.Head
 	lo, hi, pos             int
@@ -6675,6 +6684,17 @@ type submitArgs struct {
 // launches (or a graph replay) and the readback, in one Session. Its arguments
 // are g.sub's; see submitArgs.
 func (g *devTier) layersSession(s backend.Session) {
+	// The persistent path (persist.go) runs the submission through psess,
+	// which issues what the launcher holds before any other call on the
+	// session. Entered again rather than s reassigned below: a reassigned
+	// parameter that closures capture moves to the heap, five objects a token.
+	if g.sub.persist && g.sub.R == 1 && g.sub.rag == nil && g.launchTo.ps != nil &&
+		g.launchTo.ps.sync != nil && g.launchTo.psess.Session == nil {
+		g.launchTo.psess = persistSession{Session: s, t: &g.launchTo, g: g}
+		g.layersSession(&g.launchTo.psess)
+		g.launchTo.psess = persistSession{}
+		return
+	}
 	a := &g.sub
 	// The session the submission runs for, carried in its recording's key.
 	sid := a.key.sid
@@ -6709,9 +6729,14 @@ func (g *devTier) layersSession(s backend.Session) {
 	// lc is the submission's launch path; its la is the ordinary launch
 	// (see launcher).
 	g.launchTo.s = s
+	if ps, ok := s.(*persistSession); ok {
+		g.launchTo.s = ps.Session
+	}
+	persist := g.launchTo.psess.Session != nil
 	defer func() { g.launchTo.s = nil }()
 	lc := &launcher{to: &g.launchTo, err: &err, fsrc: &fsrc,
-		memoK: &actMemoK, memoSrc: &actMemoSrc, a: bs.a, ax: bs.ax}
+		memoK: &actMemoK, memoSrc: &actMemoSrc, a: bs.a, ax: bs.ax, g: g}
+
 	// lamv launches a decode matvec at its own workgroup width: an in-group
 	// split is 32 rows by Split segments (kernels.GroupSplitWidth), every
 	// other matvec 128. The thread count is the same either way.
@@ -7019,6 +7044,9 @@ func (g *devTier) layersSession(s backend.Session) {
 		for li := lo; li < hi; li++ {
 			attnFused, ffnFused := false, false
 			l := g.layers[li]
+			// The previous block's held launches go out; this block's are
+			// held when it is one the path takes.
+			lc.persistBlock(persist && !streamed && persistable(l, bs))
 			// A block whose every batched matvec is on sm_70's f16 path never reads
 			// the int8 activation, so it skips the quantize: the norm runs alone and
 			// fsrc names the float row the ActF16 conversion reads.
@@ -8338,6 +8366,9 @@ func (g *devTier) layersSession(s backend.Session) {
 				lc.la(g.pickK, pickMax, bs.headOut(), g.pickIDs, g.pickOut)
 			}
 		}
+		// What the last block held goes out inside emit, so a recording
+		// captures it.
+		lc.persistFlush()
 	}
 	// submit gets the sequence onto the device, by replaying a captured graph
 	// where the backend has one and by issuing the launches where it does not.

@@ -419,6 +419,7 @@ func (s *cudaSession) BeginRecord() error {
 		}
 		s.qcap = true
 		s.stream = s.q.st.Handle()
+		s.armMarks()
 		return nil
 	}
 	if s.c.cap == nil {
@@ -436,6 +437,13 @@ func (s *cudaSession) BeginRecord() error {
 		return err
 	}
 	s.stream = s.c.cap.Handle()
+	s.armMarks()
+	return nil
+}
+
+// armMarks starts a capture's kernel-timing event nodes when
+// SetCUDAKernelTiming is on, on whichever stream the capture runs.
+func (s *cudaSession) armMarks() {
 	s.recMarks = nil
 	if cudaKernTiming.Load() && cuda.EventsAvailable() {
 		if e, err := cuda.NewEvent(); err == nil && e.RecordNode(s.stream) == nil {
@@ -443,7 +451,6 @@ func (s *cudaSession) BeginRecord() error {
 			s.marks = &s.recMarks
 		}
 	}
-	return nil
 }
 
 // EndRecord closes the capture BeginRecord opened and returns its graph.
@@ -469,33 +476,37 @@ func (s *cudaSession) EndRecord() (Recording, error) {
 
 func (s *cudaSession) Replay(r Recording) error {
 	cg := r.(*cudaGraph)
-	if s.q != nil {
-		return cg.g.Launch(s.q.st)
-	}
 	if len(cg.marks) > 0 {
-		// The previous timed replay is done: decode read its token back.
+		// The previous timed replay is done: decode read its token back. A
+		// session on a queue is no different here; settling only on the
+		// legacy stream left both timing instruments silent for every decode
+		// that runs on a queue, which is every decode of a session.
 		settleMarks(s.c.lastMarks)
 		s.c.lastMarks = cg.marks
 	}
-	if !cudaTiming.Load() || !cuda.EventsAvailable() {
-		return cg.g.Launch(s.c.cap)
+	st := s.c.cap
+	if s.q != nil {
+		st = s.q.st
 	}
-	return s.c.timeReplay(cg.g)
+	if !cudaTiming.Load() || !cuda.EventsAvailable() {
+		return cg.g.Launch(st)
+	}
+	return s.c.timeReplay(cg.g, st)
 }
 
-// timeReplay is Replay between two events on the capture stream. Replay i's
+// timeReplay is Replay between two events on the stream it runs on. Replay i's
 // pair is read at replay i+1: its graph is done by then, because decode reads
 // the token back between them (a legacy-stream copy waits for this stream),
 // and so is replay i-1's after-event, which makes the gap between two graphs
 // -- the device idle while the host takes the token and issues the next --
 // a device-clock number too.
-func (c *cudaDev) timeReplay(g *cuda.Graph) error {
+func (c *cudaDev) timeReplay(g *cuda.Graph, st *cuda.Stream) error {
 	cur := &c.tev[c.ti%3]
 	for i := range cur {
 		if cur[i] == nil {
 			e, err := cuda.NewEvent()
 			if err != nil {
-				return g.Launch(c.cap)
+				return g.Launch(st)
 			}
 			cur[i] = e
 		}
@@ -513,14 +524,14 @@ func (c *cudaDev) timeReplay(g *cuda.Graph) error {
 			graphTimes.add(busy, gap)
 		}
 	}
-	if err := cur[0].Record(c.cap); err != nil {
+	if err := cur[0].Record(st); err != nil {
 		return err
 	}
-	if err := g.Launch(c.cap); err != nil {
+	if err := g.Launch(st); err != nil {
 		return err
 	}
 	c.ti++
-	return cur[1].Record(c.cap)
+	return cur[1].Record(st)
 }
 
 // graphTimes holds the last replays' device times, in microseconds.

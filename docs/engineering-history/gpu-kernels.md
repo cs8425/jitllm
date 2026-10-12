@@ -5714,3 +5714,66 @@ The count-and-generation form with a separate generation read cost 1.46 us at
 launch boundary inside a CUDA graph is ~0.6 us (the section above), so a grid
 barrier is not cheaper than the launch it replaces; what it can remove is the
 drain, and the round trip of an intermediate through memory, not the launch.
+
+## A persistent decode block: composed, bit-identical, and slower
+
+`Config.Persist` (`tier.WithPersist`, `JITLLM_GPU_PERSIST`) composes each
+decode block's launches into persistent kernels (`ir.Persist`,
+`tier/persist.go`): the launcher holds a block's launches, cuts them into runs
+the composer can take, and issues each run as one cooperative grid whose
+workgroups deal out every launch's groups in order, a grid barrier wherever a
+launch touches what an earlier one in the phase wrote. Every body is the
+per-op kernel's own IR with its group index replaced, so the two paths agree
+bit for bit; the plan is keyed by the kernels, grids and aliasing pattern, and
+the buffers are bound per launch, so relocation, paging and seam moves change
+nothing about it. CUDA only: Vulkan and Metal state a compute-unit count and
+no co-residency guarantee, and two sessions' persistent kernels on two queues
+could each hold units the other waits for.
+
+On Llama-3.2-1B Q4_K_M a block is 23 launches on the RTX 3050 Ti and fewer
+on the V100 (whose q/k/v is one segmented matvec); runs are cut where the
+width changes (the 1024-wide norm, sm_70's 256-wide group-split matvecs) and
+before a 128-wide kernel with workgroup memory inside a wider run, which leaves
+about four persistent kernels a block. Inside them almost every launch is its
+own phase: the block is a dependency chain (norm, matvec, its split-K reduce,
+rotary, attention, merge, quantize, ...), and the split-K matvecs share one
+partials buffer, so q, k and v cannot share a phase either. 744 launches
+become 128 persistent kernels in 680 phases.
+
+Gates: `TestPersistentDecodeMatchesPerOp` (Llama-3.2-1B and Qwen2-1.5B, 24
+teacher-forced steps, every block placed with and without the captured graph
+and a partial seam: logits bit-identical to the per-op arm, and both coherent
+with the host; Stats().PersistLaunches > 0 on the persistent arm and 0 on the
+other) on the 3050 Ti and the V100; its violation
+`TestPersistentDecodeSeesABrokenBarrier` (a `jitllmtest` build, every grid
+barrier letting its waiters through) changes 897792 of 1026048 logits.
+
+Measured on the V100 (Llama-3.2-1B Q4_K_M, CUDA, in-process `verify -ab`,
+n=24 rounds of 64 tokens): A/A 0.9989 (IQR 3.8%); persistent against per-op
+0.8916 (IQR 1.2%) and 0.8907 (IQR 1.0%) -- an 11% loss. `jitllm speed`, tg256
+after a 64-token prompt, three runs each:
+
+    graph replay   per-op 518.3 / 517.3 / 517.5 tok/s, device 1825.9 us a token
+                   persist 493.0 / 494.8 / 495.8 tok/s, device 1916.4 us a token
+    no graph       per-op 490.5 / 492.3 / 489.7 tok/s
+                   persist 474.7 / 419.3 / 473.2 tok/s
+
+On a T4 (sm_75, same model, same harness): A/A 0.9989 (IQR 1.0%); persistent
+against per-op 0.9606 (IQR 1.0%) and 0.9594 (IQR 0.6%), a 4% loss; tg128
+236.0 / 235.9 / 235.0 against 233.2 / 233.1 / 233.2 tok/s, device 4122.3
+against 4182.3 us a token. The gate and its violation are green there too.
+
+The per-op token's small kernels (`JITLLM_CUDA_KERNEL_TIMING`, each with
+~3.9 us of event node in it): rmsnormquantw 11.7 us x32, quantize 8.3 x33,
+roperowst 8.7, pagedroperowst 7.9, pagedcopyrows 8.5, flashkvpaged 10.5,
+flashmergewide 8.5 (x16 each); 1352 us a token with the events, ~790 without.
+
+Why it loses: a grid barrier costs 0.8-1.9 us on this card (the section
+above) and a launch boundary inside a CUDA graph ~0.6 us, and composition
+replaces one with the other almost one for one, because the block is a chain.
+It also runs each phase on the persistent grid -- at most what one fused
+kernel's registers leave resident -- rather than the per-op launch's own
+grid. What would win is not composition but fusion that keeps an intermediate
+on chip (norm into the matvec's activation, the reduce into its consumer) and
+so removes phases, which is the composer's next step rather than this one.
+Off by default (RULE 6: a clear regression).
