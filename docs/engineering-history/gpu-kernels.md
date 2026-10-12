@@ -5376,6 +5376,113 @@ set built for the grid, HunyuanOCR places no tower block on any of the three
 (`cuMemAlloc`/`vkAllocateMemory` out of memory, and on the Iris "7150082744 of
 3124649984 used").
 
+## The sm_80+ prompt: what the 0.07-0.33 rows were, and the staged GEMMs
+
+A board taken with `scripts/vs-llamacpp.sh` on A10G, L4, L40S and A100
+cards read jitllm's prefill at 0.07-0.33 of llama.cpp's (Llama-3.2-1B Q4_K_M
+3994 against 17413 tok/s on the A10G), while the V100 board, taken with
+`jitllm speed`, read 1.04-1.38. Two causes, counted on the RTX 3050 Ti
+(sm_86), the one Ampere card at hand:
+
+- **The harness timed a cold engine against a warm one.** Prefill mode ran
+  `jitllm run -n 1` and took its "prompt" figure: the first prompt of a fresh
+  process. `speed.go` already said that figure is not a prefill rate. A CPU
+  profile of the first 512-row prompt in a process: 30 ms of ~200 growing the
+  KV pool (`allocPages` -> `growKVLayer`), 43 ms outside the kernels in all,
+  against 155-165 ms warm. llama-bench runs a warm-up and never times
+  context creation. That fixed cost is a larger share the faster the card,
+  so it compressed the big-card rows most. The jitllm arm is now
+  `jitllm speed -p N -n 0 -r 1` (JITLLM_PP_COLD=1 keeps the old one). On the
+  laptop, both arms warm against the old cold arm, same pass:
+
+      Llama-3.2-1B Q4_K_M   cold 0.44 (REJECTED, IQR 0.114)   warm 0.59
+      Qwen3-0.6B Q8_0       cold 0.38                         warm 0.75
+      Qwen3.5-0.8B Q4_K_M   cold 0.77 (REJECTED, IQR 0.124)   warm 0.91 (REJECTED, IQR 0.163)
+
+- **Every prompt matvec on sm_80/86/89 was MatVecMMA**, the unstaged int8
+  kernel: each warp reads its weights and its activations from global memory
+  inside the MMA loop and decodes every weight once per 32 tokens. sm_70 had
+  GemmVolta (shared-memory staged, binary16) and the newer cards never
+  reached it, since voltaMV runs only where the integer instruction is
+  missing (rows.go `voltaMV`'s `!(g.mmaOff || g.NoMMA)`). Per-launch device
+  time of a warm 512-row Llama-3.2-1B prompt (nsys sees no kernels through
+  goffi and ncu needs counters this box withholds, so
+  `backend.SetCUDAKernelTiming` now times launches outside a capture): 105 of
+  165 ms in the FFN's three projections, 26 in the attention (FMA
+  accumulate 15, m16n8k16 scores 5.6, softmax 5.7), 12 in the activation
+  conversions and SiLU.
+
+What was built, every kernel generated:
+
+- **GemmVolta on m16n8** (`VoltaTile.F16K`: 16 from sm_80, 8 on sm_75): the
+  same staging, lane (g, q) reading chunk q of rows g and g+8 and token g as
+  one 16-byte load each. The k order inside a chunk needs no permutation:
+  word 4q+2s+h of A meets the same word of B.
+- **GemmInt8**: MatVecMMA's arithmetic staged as llama.cpp's MMQ stages it:
+  a trip of 32 elements decoded once a workgroup to signed bytes with
+  float32 scales and minimums per sub-block, the int8 activations with their
+  scales and sums beside them, a lane's two words one 8-byte load. Bit for
+  bit the dp4a matvec unsplit. It was the default on sm_80 and later until
+  the L4 and A100 rows (below) put the binary16 GEMM ahead; it stays behind
+  JITLLM_GPU_GEMM_INT8.
+- **PagedAttnAccMMA**: the weighted sum of V on m16n8k8 behind the m16n8k16
+  scores: 6.5 ms where the FMA tiles read 15.
+- **The tile and split by the card** (`fillTile`, `fillSplit`): about one
+  workgroup an SM, sm_70's measured bar, so a 1024-row projection does not
+  leave a 142-SM card with one workgroup on every second SM.
+
+What the laptop could and could not show. On the RTX 3050 Ti the three GEMMs
+read 8-15 TFLOPS in isolation (`TestGemmF16Speed`, 512 rows), interleaved and
+noisy: the binary16 GEMM sits at GA107's float32-accumulate ceiling (~15
+TFLOPS at 1.5 GHz, half the binary16-accumulate rate on a GeForce part), and
+the int8 GEMM and MatVecMMA land in the same band, so on this card the
+change of kernel is inside the noise of the warm board (Llama-3.2-1B 0.59
+before, 0.63 after with the binary16 GEMM). Its ceilings are not the
+A100's (binary16 with float32 sums at the full rate, int8 at twice it) or
+an Ada card's (int8 at four times the float32-accumulate rate), and the rows
+that matter have to be taken there.
+
+### The L4 and A100 rows of the staged GEMMs
+
+From 8dad3b3e, CUDA against llama.cpp b10825, n=20 paired, both arms warm:
+Llama-3.2-1B Q4_K_M prefill read 0.67 on an L4 and 0.78 on an A100 with
+GemmInt8, 0.75 and 0.91 with the m16n8 binary16 GEMM
+(JITLLM_GPU_NO_GEMM_INT8, as the knob was then); Qwen3.5-0.8B 0.89 and 0.96
+on the binary16 GEMM. The cold arm (the old harness) read 0.22 and 0.24. The
+binary16 GEMM is the default from sm_80 since; sm_75 has no int8 m16n8k32
+and takes the binary16 GEMM's k8 form.
+
+### The three items left after the GEMMs
+
+Per-launch device time of a warm 512-row Llama-3.2-1B Q4_K_M prompt on the
+RTX 3050 Ti, the arms interleaved twice in one sitting (before: NoFlashPrefill,
+NoOperandFuse, WithKVPrewarm(false); the binary16 arms NoGemmInt8 as well).
+The card swings tens of percent between passes, so these are counts of where
+the time sits, not a rate:
+
+    attention (int8 arm)     scores 6.6-8.6 + softmax 4.3-5.5 + accumulate 6.5-9.7 ms
+                             -> FlashPrefill80 2.9-4.9 ms
+    operands (int8 arm)      ActMul 4.9-8.3 + Quantize (33 launches) 3.9-6.9 ms
+                             -> QuantizeAct 5.8-8.3 + Quantize (17) 0.7-0.8 ms
+    operands (binary16 arm)  ActMul 6.2-6.7 + ActF16T (72) 6.8-7.4 + RMSNorm 2.7-4.6 ms
+                             -> ActMulF16T 4.7-6.6 + RMSNormF16TRows 3.2 + ActF16T (24) 1.1 ms
+    first prompt (int8 arm)  171 ms against a warm 136-137
+                             -> 113-116 against a warm 119-130
+
+- **FlashPrefill80** is FlashPrefill70 in FlashAttention-2's layout, so the
+  score fragment is the next product's A fragment and P never reaches shared
+  memory. A head past 128 (gemma-2b's 256) splits its dims over two warps of
+  a row block, its queries in shared memory and its tiles 16 keys; past 256
+  it is declined by name.
+- **The fused operands.** A first form gave each thread a whole
+  (token, sub-block) as ActF16T does. It was slower than the two launches it
+  replaced: the norm's second phase had 64 of 1024 threads busy per row, and
+  each thread ran a sub-block's exponentials 16 to 32 deep. One output word a
+  thread (`f16WordElems`, a word's two elements by arithmetic) is the form
+  that ships.
+- **The KV prewarm** moves the pool's growth into placement: 100-200 ms more
+  placement on the laptop, and the first prompt reads as warm.
+
 ## Measurements once cited in jit/gpu/tier's comments
 
 The tier's comments state the engineering reason and the class of card; the
@@ -5484,4 +5591,109 @@ two submissions one after another, on two queues or one (2.00x both ways),
 while its datacenter driver on the V100 overlaps them (1.00x). The way past
 it on that driver is to record the sessions' work into one submission,
 which is the step loop's batching.
+
+## The collective tiles lower on PTX, and the subgroup collectives are ops
+
+**"A collective tile has no lane layout to map onto mma.sync" was a choice,
+not a hardware limit (RULE 11e).** A collective tile leaves the lane layout to
+the lowering, and mma.sync documents one, so `ptx/tile.go` picks it: every
+tile is a grid of 8x8 atoms, and a lane holds of each atom the two elements
+m16n8k16's fragments give it (A row g, columns 2t..2t+1; B rows 2t..2t+1,
+column g; C row g, columns 2t..2t+1, with g = lane>>2, t = lane&3). A TileMMA of
+any shape whose sides are multiples of 8 is then a run of m16n8k16 (m16n8k8 on
+sm_75) over atoms with no data movement; an 8-row tile -- Metal's 8x8 -- runs
+the m16 instruction with its second row of atoms zero. Loads and stores go
+element by element from the view (a stride-0 bias is just an address); the
+ceiling of that form is the load count, and ldmatrix over a shared view whose
+rows the kernel asserts aligned is the upgrade. float32 operands (FlashPrefillTile's
+P*V) are three tf32 products, a_hi*b_lo + a_lo*b_hi + a_hi*b_hi, about 21
+mantissa bits through the matrix unit; tf32 is sm_80, so sm_75 lowers the f16
+tiles and refuses the f32 ones by name. On FlashPrefillTile's gate one tf32
+product read NMSE ~1.3e-7 and the three ~7e-8, both far inside the 1e-5 bound;
+the three are kept because the IR type is float32 and a single tf32 product is
+a silent precision substitution.
+
+So Metal's prompt path (GemmTile, FlashPrefillTile) is ordinary IR on CUDA
+too, gated by a capability -- `backend.LowersTile` compiles a staged,
+loop-carried probe of the shape -- instead of `API() == "msl"`. Measured
+correctness, all against the float64 reference with poisoned outputs:
+GemmTile on every binary16-dequant format (NMSE 7e-8..1.6e-7, against the dp4a
+path's 2-3.6e-5), its grouped form bit-equal to dense per expert, the tail
+launch, FlashPrefillTile and its paged form, on the RTX 3050 Ti (sm_86), a T4
+(sm_75; f16 only) and the M4; end to end with every block placed against the
+host (TestTilePrefillMatchesTheHost) on sm_86, a T4 and the M4. A violation
+(B's atom layout off by one element) fails TestTileMatchesReference at
+|d| 131-173.
+
+`TileGemm.Tall` multiplies 16-row A tiles where the device lowers 16x8x8
+(PTX), two of the 8-row slots each: the staging is unchanged and the m16
+instruction stops multiplying zeros.
+
+Selection on CUDA is unchanged by default: the m16n8 GEMMs and FlashPrefill80
+run ahead of the tiles, which are reached where those decline, or ahead of them
+with Config.PreferTiles (JITLLM_GPU_PREFER_TILES) -- the arm
+TestTilePrefillMatchesTheHost pins and the A/B uses. On a T4, before the m16n8
+GEMMs landed, the tile GEMM against MatVecMMA read 0.989 (IQR 0.090, A/A
+1.0136 at IQR 0.083): parity, within a noisy box. Against the m16n8 GEMMs
+(the default now) PreferTiles read 1.16 for the default, rejected at IQR
+0.116: the default stays first.
+
+The subgroup collectives (`ir/subgroup.go`: reduce add/max/min, broadcast from
+a uniform lane, shuffle from a per-lane lane & 31, lane id, width) lower to a
+shfl butterfly / shfl.idx / %laneid / WARP_SZ on PTX, OpGroupNonUniform*
+(Reduce) / Shuffle / the two builtins on SPIR-V, simd_sum / simd_shuffle and
+the simdgroup attributes on MSL, and ds_bpermute on AMDGPU.
+TestSubgroupCollectivesMatchTheReference holds every one at f32, i32 and u32
+on CUDA, Vulkan and Metal; a butterfly missing its last step, a reduction
+lowered as the wrong op and a shuffle clamped to 16 lanes each fail it. The
+lane mask is not observable on NVIDIA (CUDA and Vulkan wrap a source past 31
+themselves); it is the IR's definition for the targets that do not.
+
+## Fusing a decode block's launches buys little: the launch is not the cost
+
+The decode token on the V100 (Llama-3.2-1B Q4_K_M, sm_70, kernel timing by
+event nodes, which add ~3.9 us each) issues 234 launches: 14.5 a block plus
+the head. The block's small kernels are norm+quantize twice, quantize twice,
+q rotation, k rotation into its page, v copy into its page, flash decode and
+its merge.
+
+`kernels.RoPEQKVPaged` is the three position writers as one launch, built
+from the same emitted bodies (`ropeBody`, `pagedRopeBody`, `pagedCopyBody`),
+so it is bit-identical to them: TestRoPEQKVPagedMatchesItsParts compares every
+word of q and both NaN-poisoned pools, and TestFusedDecodeMatchesPerOp holds a
+whole decode, every block placed and a partial seam, fused against
+Config.NoFuse to the same logits bit for bit and both to the host (V100, the
+3050 Ti, a T4; Llama-3.2-1B, Qwen2-1.5B, gemma-2b). One pair dropped from the
+k part fails the kernel gate; v's source swapped for k's in the tier fails the
+model gate at step 0.
+
+It removes 32 of 234 launches a token, and measured (verify -ab fuse,
+in-process, n=24, 64 tokens a round):
+
+    V100 (CUDA graph)    A/A 0.9956 (IQR 2.5%)   fused 1.0071, 1.0062 (IQR 3.9%, 4.5%)
+    M4 (Metal)           A/A 0.9893 (IQR 5.6%)   fused 0.9922 (IQR 4.5%), a second pass unstable
+
+and on a T4 through vs-llamacpp.sh with JITLLM_GPU_NO_FUSE as the other arm
+(processes interleaved ABBA, decode 128, one pass): 1.0184, IQR 0.018. That
+row and the V100's fall on the same side and inside two percent.
+
+Sub-noise on both, so not a claim. 32 launches for ~0.7% is ~0.6 us a launch
+inside a CUDA graph: the graph already removed the issue cost, and what a fused
+launch could still remove is the drain between dependent kernels, which these
+tiny kernels barely have. A per-block megakernel would fight the same small
+term at the price of a grid-wide barrier the IR does not have, so it is not
+the decode lever on this card; the matvecs at 60-90% of the read wall and the
+latency-bound norm (~6 us of a 2048-wide row on one 1024-thread group) are.
+The same decode against llama.cpp's CUDA build, vs-llamacpp.sh, decode 128:
+V100 1.0190 (IQR 0.034; A/A 0.9965, IQR 0.049), T4 1.1890 (IQR 0.030).
+
+Bridging consecutive resident blocks into one submission is what `layersFor`
+already does: one call runs the device range [lo, hi) as one captured graph
+keyed by its launch sequence (graphKey: the range, the session, the paged
+variant, the parities...), and a relocation, eviction or seam move changes the
+range and so the key -- the run is re-captured, not patched.
+
+`JITLLM_CUDA_KERNEL_TIMING` had been silent for every decode that runs on a
+queue: the event nodes were armed only on the legacy stream's capture, and the
+settle only on its replay. Both now run on a queue's capture too.
 

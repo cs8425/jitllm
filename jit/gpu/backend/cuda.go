@@ -266,8 +266,21 @@ func (s *cudaSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
 	if st == 0 && s.q != nil {
 		st = s.q.st.Handle()
 	}
+	// Outside a capture the timing instrument is an event pair around the
+	// launch itself, read back by CUDAKernelTimes.
+	var t0 *cuda.Event
+	if s.marks == nil && !s.qcap && s.stream == 0 && cudaKernTiming.Load() && cuda.EventsAvailable() {
+		if e, err := cuda.NewEvent(); err == nil && e.RecordOn(st) == nil {
+			t0 = e
+		}
+	}
 	if err := m.LaunchArgs(st, groups, width, args); err != nil {
 		return err
+	}
+	if t0 != nil {
+		if e, err := cuda.NewEvent(); err == nil && e.RecordOn(st) == nil {
+			directMarks.add(kernPair{t0, e, ck.name})
+		}
 	}
 	if s.marks != nil {
 		// Inside a timed capture: an event NODE after the launch, so a replay
@@ -283,9 +296,10 @@ func (s *cudaSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
 // see SetCUDAKernelTiming.
 var cudaKernTiming atomic.Bool
 
-// SetCUDAKernelTiming arms per-kernel device-clock timing on CUDA: a capture
-// records an event node after every launch, and each replay's kernels are read
-// back one replay later -- the SAME measurement scripts/kshim.c takes of
+// SetCUDAKernelTiming arms per-kernel device-clock timing on CUDA: a launch
+// outside a capture runs between two events, read when CUDAKernelTimes is
+// called after the work is done; a capture records an event node after every
+// launch, and each replay's kernels are read back one replay later -- the SAME measurement scripts/kshim.c takes of
 // llama.cpp's graphs, so the two engines' kernels can be set side by side. It
 // applies to graphs recorded after it is armed. A measurement instrument,
 // default off: the event nodes cost device time of their own.
@@ -296,6 +310,46 @@ func SetCUDAKernelTiming(on bool) { cudaKernTiming.Store(on) }
 type kernMark struct {
 	ev   *cuda.Event
 	name string
+}
+
+// kernPair is one launch outside a capture, between two events.
+type kernPair struct {
+	start, end *cuda.Event
+	name       string
+}
+
+// directMarks holds the launches timed outside a capture until
+// CUDAKernelTimes reads them.
+var directMarks kernPairs
+
+type kernPairs struct {
+	sync.Mutex
+	p []kernPair
+}
+
+func (k *kernPairs) add(p kernPair) {
+	k.Lock()
+	k.p = append(k.p, p)
+	k.Unlock()
+}
+
+// settle adds every completed pair to kernTimes and keeps the rest.
+func (k *kernPairs) settle() {
+	k.Lock()
+	defer k.Unlock()
+	keep := k.p[:0]
+	for _, p := range k.p {
+		if !p.end.Done() {
+			keep = append(keep, p)
+			continue
+		}
+		if ms, err := cuda.Elapsed(p.start, p.end); err == nil {
+			kernTimes.add(p.name, ms*1e3)
+		}
+		p.start.Destroy()
+		p.end.Destroy()
+	}
+	k.p = keep
 }
 
 // settleMarks adds a completed replay's per-kernel times to kernTimes.
@@ -329,6 +383,7 @@ func (t *kernTotals) add(name string, us float32) {
 // CUDAKernelTimes returns, and clears, the per-kernel device microseconds and
 // launch counts SetCUDAKernelTiming collected.
 func CUDAKernelTimes() (us map[string]float64, n map[string]int) {
+	directMarks.settle()
 	kernTimes.Lock()
 	defer kernTimes.Unlock()
 	us, n = kernTimes.us, kernTimes.n
@@ -361,6 +416,7 @@ func (s *cudaSession) BeginRecord() error {
 		}
 		s.qcap = true
 		s.stream = s.q.st.Handle()
+		s.armMarks()
 		return nil
 	}
 	if s.c.cap == nil {
@@ -378,6 +434,13 @@ func (s *cudaSession) BeginRecord() error {
 		return err
 	}
 	s.stream = s.c.cap.Handle()
+	s.armMarks()
+	return nil
+}
+
+// armMarks starts a capture's kernel-timing event nodes when
+// SetCUDAKernelTiming is on, on whichever stream the capture runs.
+func (s *cudaSession) armMarks() {
 	s.recMarks = nil
 	if cudaKernTiming.Load() && cuda.EventsAvailable() {
 		if e, err := cuda.NewEvent(); err == nil && e.RecordNode(s.stream) == nil {
@@ -385,7 +448,6 @@ func (s *cudaSession) BeginRecord() error {
 			s.marks = &s.recMarks
 		}
 	}
-	return nil
 }
 
 // EndRecord closes the capture BeginRecord opened and returns its graph.
@@ -411,13 +473,16 @@ func (s *cudaSession) EndRecord() (Recording, error) {
 
 func (s *cudaSession) Replay(r Recording) error {
 	cg := r.(*cudaGraph)
-	if s.q != nil {
-		return cg.g.Launch(s.q.st)
-	}
 	if len(cg.marks) > 0 {
-		// The previous timed replay is done: decode read its token back.
+		// The previous timed replay is done: decode read its token back. A
+		// session on a queue is no different here, and settling only on the
+		// legacy stream left JITLLM_CUDA_KERNEL_TIMING silent for every
+		// decode that runs on a queue.
 		settleMarks(s.c.lastMarks)
 		s.c.lastMarks = cg.marks
+	}
+	if s.q != nil {
+		return cg.g.Launch(s.q.st)
 	}
 	if !cudaTiming.Load() || !cuda.EventsAvailable() {
 		return cg.g.Launch(s.c.cap)
@@ -815,6 +880,9 @@ func (c *cudaDev) GuaranteedLanes(w int) (bool, string) {
 
 func (c *cudaDev) Compile(k *ir.Kernel) (Kernel, error) {
 	compiles.Add(1)
+	if CompileLog != nil {
+		CompileLog(k.Name)
+	}
 	src, err := ptx.Lower(k, c.d.Target)
 	if err != nil {
 		return nil, err

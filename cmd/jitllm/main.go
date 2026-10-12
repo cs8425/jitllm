@@ -14,6 +14,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,7 +23,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jitllm/jitllm/engine/sched"
 	"github.com/jitllm/jitllm/format/quant"
@@ -82,6 +82,11 @@ func numaNodes() []int {
 // (-ldflags "-X main.version=v0.1.0"; see .goreleaser.yaml).
 var version = "dev"
 
+// procStart is as near process start as Go code runs: package variables are
+// initialised before main. speed -ttft's load row counts from it, as
+// llama.cpp's log timestamps count from its logger's start.
+var procStart = time.Now()
+
 func main() {
 	alignGOMAXPROCS()
 	// Page frames and the dense region live off the Go heap (jlm.SetOffHeap).
@@ -94,9 +99,10 @@ func main() {
 	if os.Getenv("JITLLM_GCSTATS") == "1" {
 		defer gcSummary()
 	}
-	// hardware is the one subcommand that takes no model, because it describes
-	// the machine rather than a file.
-	if len(os.Args) < 2 || (len(os.Args) < 3 && os.Args[1] != "hardware" && os.Args[1] != "library" && os.Args[1] != "version") {
+	// These subcommands take no model: they describe the machine, the build
+	// or the catalogue rather than a file (doctor's container is optional).
+	if len(os.Args) < 2 || (len(os.Args) < 3 && os.Args[1] != "hardware" && os.Args[1] != "library" && os.Args[1] != "version" &&
+		os.Args[1] != "capabilities" && os.Args[1] != "doctor") {
 		usage()
 	}
 	var err error
@@ -105,6 +111,10 @@ func main() {
 		fmt.Println(version)
 	case "hardware":
 		err = hardware()
+	case "capabilities":
+		err = capabilitiesCmd(os.Args[2:], os.Stdout)
+	case "doctor":
+		os.Exit(doctorCmd(os.Args[2:]))
 	case "info":
 		err = info(os.Args[2], len(os.Args) > 3 && os.Args[3] == "-kv")
 	case "asm":
@@ -142,6 +152,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   jitllm version
   jitllm hardware
+  jitllm capabilities [-json]   what this build converts, runs and serves (docs/capabilities.json)
+  jitllm doctor [-json] [model.jlm]   can this machine and build run; exit 0 ok, 2 missing, 1 error
   jitllm info <model.gguf>
   jitllm tokenize [-tokenizer FILE] <model.jlm> <text...>
   jitllm run [flags] <model.jlm> <prompt...>
@@ -388,7 +400,13 @@ func benchmark(path string, topts []tok.Option) error {
 
 // chatSpec is -chat and -system together; nil is raw completion, which is the
 // default and what every board row measures.
-type chatSpec struct{ system string }
+//
+// repl is the interactive conversation `jitllm run model.jlm` holds when no
+// prompt is given and stdin is a terminal (repl.go).
+type chatSpec struct {
+	system string
+	repl   bool
+}
 
 func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram, maxmem uint64, grow, tuneSeam, noFallback, relocate bool, sm *model.Sampler, imgPath string, topts []tok.Option, chat *chatSpec, kvCacheDir string, kvCacheMaxBytes, kvBudget uint64, place *model.Placement, specOpts []model.SpecOption) error {
 	if v := os.Getenv("JITLLM_N"); v != "" {
@@ -475,7 +493,13 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	// -chat is opt-in. The default stays raw completion because every board
 	// row and the llama.cpp comparisons are completions of a bare prompt.
 	ids := m.Vocab.Encode(prompt, true)
-	if chat != nil {
+	replying := chat != nil && chat.repl
+	if replying {
+		if imgPath != "" || specOpts != nil || depth > 0 {
+			return fmt.Errorf("the interactive chat takes neither -image, -spec nor -depth; give a prompt to use them")
+		}
+		ids = nil
+	} else if chat != nil {
 		if !m.HasChatTemplate() {
 			return fmt.Errorf("-chat: %s carries no chat template; it is a base model.\n"+
 				"  Run it without -chat and it completes the prompt instead.", path)
@@ -554,7 +578,11 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	// No -n: generate until the model ends its reply, in a session as long as
 	// the model's context, as the server's sessions are by default. KV pages
 	// are committed as the context grows, so the length costs nothing up front.
-	if n <= 0 {
+	replyCap := n
+	if replying {
+		// The conversation grows into the model's whole context.
+		n = m.Cfg.NCtx - 1
+	} else if n <= 0 {
 		if n = m.Cfg.NCtx - len(ids) - extra - 1; n <= 0 {
 			return fmt.Errorf("the prompt is %d positions and fills the model's context of %d", len(ids)+extra, m.Cfg.NCtx)
 		}
@@ -690,6 +718,12 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 
 	phRead(ph, dev, m)
 	ph.Mark("load")
+	if replying {
+		if err := repl(m, st, sm, chat.system, replyCap, kvCacheDir != "", os.Stdin, os.Stdout); err != nil {
+			return withDeviceErr(err, dev)
+		}
+		return nil
+	}
 
 	// -spec drafts with the model's own prediction block and verifies the
 	// drafts in one pass. The draft session attaches to the device the trunk
@@ -758,21 +792,17 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	if chat == nil {
 		fmt.Print(prompt)
 	}
-	printed := 0
+	// Each new id is decoded once (tok.ChatStream); a rune a token leaves
+	// unfinished waits in held for the token that completes it.
+	cs, decoded, held := m.Vocab.NewChatStream(), 0, ""
 	emitOf := func(out []int32) {
-		full := m.Vocab.DecodeChat(out)
-		if len(full) <= printed {
-			return
+		for _, id := range out[decoded:] {
+			held += cs.Next(id)
 		}
-		chunk := full[printed:]
-		// Never split a multi-byte rune across two writes: hold the tail back
-		// until the token that completes it arrives.
-		for chunk != "" && !utf8.ValidString(chunk) {
-			chunk = chunk[:len(chunk)-1]
-		}
-		if chunk != "" {
-			fmt.Print(chunk)
-			printed += len(chunk)
+		decoded = len(out)
+		if k := tok.Complete(held); k > 0 {
+			fmt.Print(held[:k])
+			held = held[k:]
 		}
 	}
 	// Printing runs beside the next token, off the GPU's critical path. One
@@ -1437,14 +1467,30 @@ func runCmd(args []string) error {
 		return err
 	}
 	defer closeTok()
-	if fs.NArg() < 2 {
+	prompt := strings.Join(fs.Args()[1:], " ")
+	interactive := false
+	switch {
+	case fs.NArg() == 0:
 		usage()
+	case fs.NArg() == 1 && stdinIsTerminal():
+		// No prompt and a person at the keyboard: a conversation, through the
+		// model's own template (repl.go).
+		interactive = true
+	case fs.NArg() == 1:
+		// No prompt on the command line and stdin a pipe or file: that is it.
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+		if prompt = strings.TrimRight(string(b), "\r\n"); prompt == "" {
+			usage()
+		}
 	}
 	sm := &model.Sampler{Temp: *temp, TopK: *topK, TopP: *topP, MinP: *minP,
 		RepeatPen: *repPen, RepeatLastN: *repN, Seed: *seed}
 	var cs *chatSpec
-	if *chat {
-		cs = &chatSpec{system: *system}
+	if *chat || interactive {
+		cs = &chatSpec{system: *system, repl: interactive}
 	} else if *system != "" {
 		return fmt.Errorf("-system needs -chat: without a template there is no system turn to put it in")
 	}
@@ -1481,7 +1527,7 @@ func runCmd(args []string) error {
 	} else if *placeStrict {
 		return fmt.Errorf("-placement-strict needs -placement")
 	}
-	return run(fs.Arg(0), strings.Join(fs.Args()[1:], " "), *n, *depth, *dev, *layers, *vram, *maxmem, *grow, *tuneSeam, *noFallback, *relocate, sm, *imgPath, topts, cs, *kvCache, *kvCacheMax, *kvBudget, place, specOpts)
+	return run(fs.Arg(0), prompt, *n, *depth, *dev, *layers, *vram, *maxmem, *grow, *tuneSeam, *noFallback, *relocate, sm, *imgPath, topts, cs, *kvCache, *kvCacheMax, *kvBudget, place, specOpts)
 }
 
 // tokenizerOption turns a -tokenizer path into the tok.Option it names, plus the

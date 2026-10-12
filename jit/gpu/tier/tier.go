@@ -160,18 +160,42 @@ type Config struct {
 	NoTail bool
 	// NoKT refuses the transposed device K cache, leaving [position][head][dim].
 	NoKT bool
+	// NoFuse issues each fused kernel's parts one launch at a time
+	// (kernels.RoPEQKVPaged's three writers): the per-op reference path, the
+	// A/B arm and the bisection switch for a fused kernel.
+	NoFuse bool
 	// NoMMA refuses the warp matrix instruction, leaving the dp4a tile. It is
 	// the bisection switch for a wrong answer that only the matrix path shows.
 	NoMMA bool
 	// NoVolta refuses sm_70's f16 tensor-core matvec (kernels.MatVecMMA70),
 	// which a card without the integer matrix instruction -- or NoMMA -- takes
-	// before the dp4a tile. The A/B arm and the bisection switch for it.
+	// before the dp4a tile, and the m16n8 binary16 GEMM (devTier.f16Gemm) that
+	// sm_75 and later take before MatVecMMA. The A/B arm and the bisection
+	// switch for both.
 	//
 	// It refuses Metal's kernels.GemmTile too (tileMV, tileMoE): both are the
 	// binary16-activation twin of the int8 matvec, and a gate that holds the
 	// device to the int8 path's precision (model's hybrid batch gate) asks for
 	// that with this one knob on every backend.
 	NoVolta bool
+	// NoOperandFuse keeps a prompt chunk's norm and gated activation apart
+	// from the GEMM operand they feed: RMSNorm then ActF16T, ActMul then
+	// ActF16T or Quantize, instead of RMSNormF16TRows, ActMulF16T and
+	// QuantizeAct (the same bits in one launch). The A/B arm and the
+	// bisection switch.
+	NoOperandFuse bool
+	// PreferGemmInt8 puts a prompt chunk's matvecs on the staged int8 GEMM
+	// (kernels.GemmInt8, sm_80 on) ahead of the m16n8 binary16 GEMM. Off by
+	// default: on an L4 and an A100 the binary16 GEMM read Llama-3.2-1B's
+	// prompt at 0.75 and 0.91 of llama.cpp where this one read 0.67 and 0.78
+	// (gpu-kernels.md "The sm_80+ prompt"). The A/B arm.
+	PreferGemmInt8 bool
+	// PreferTiles puts the collective-tile prompt kernels (kernels.GemmTile,
+	// kernels.FlashPrefillTile) ahead of a backend's own -- the m16n8 GEMMs
+	// and FlashPrefill80 on CUDA -- wherever the device lowers the tiles. Off
+	// by default: it is the arm that gates and measures the IR path on a card
+	// that has a faster special case.
+	PreferTiles bool
 	// NoTileTail keeps GemmTile to one blocking that divides the whole prompt
 	// rather than the widest block plus a tail launch (tileMV): the A/B arm
 	// and the bisection switch.
@@ -565,9 +589,10 @@ type Stats struct {
 	// budget and is reported apart because it is constant in the context
 	// length, where the KV cache grows.
 	RecBytes uint64
-	// KVGrows is how many times the position capacity doubled: zero on a
-	// session that never outran its first page, and the way to tell "the
-	// capacity was big enough" from "growth never ran".
+	// KVGrows is how many times a KV pool layer's buffers grew (growKVLayer):
+	// zero on a session that never outran the pages placement and PrewarmKV
+	// gave it, and the way to tell "the pool was big enough" from "growth
+	// never ran".
 	KVGrows int
 	Served  int // matvecs served on the device
 	// Forgotten counts lone-matvec copies dropped because the host said the
@@ -640,6 +665,21 @@ type Stats struct {
 	// VoltaGemm counts those of them that are the shared-memory-staged
 	// kernels.GemmVolta rather than MatVecMMA70.
 	VoltaGemm int
+	// GemmF16 counts batched matvecs built as GemmVolta on the m16n8 binary16
+	// instruction (sm_75 on, devTier.f16Gemm) rather than MatVecMMA.
+	GemmF16 int
+	// GemmInt8 counts batched matvecs built as kernels.GemmInt8, the staged
+	// int8 GEMM (sm_80 on, devTier.int8Gemm).
+	GemmInt8 int
+	// NormF16, ActF16Fused and QuantActs count a prompt chunk's fused operand
+	// launches: a norm that wrote the binary16 GEMM's operand
+	// (RMSNormF16TRows), a gated activation that did (ActMulF16T), and one
+	// that quantized for the int8 matvec (QuantizeAct). Each is a conversion
+	// launch, and a pass over the float row, that did not run.
+	NormF16, ActF16Fused, QuantActs int
+	// KVPrewarmPages counts pages a pool grew ahead of its history
+	// (PrewarmKV): the growth a State's first prompt no longer pays.
+	KVPrewarmPages int
 	// GroupedVolta counts a batched mixture's expert matvecs run as grouped
 	// GemmVolta on sm_70's tensor cores, or grouped GemmTile on Metal, rather
 	// than the dp4a grouped matvec.
@@ -773,6 +813,10 @@ type Stats struct {
 	AttnMMA bool
 	// FlashLaunches counts encoded fused-attention launches (not graph replays).
 	FlashLaunches int
+	// FusedLaunches counts encoded launches of a kernel that stands for
+	// several (kernels.RoPEQKVPaged), not graph replays: the selection check
+	// that the fused form ran rather than its parts.
+	FusedLaunches int
 	// PagedLaunches counts encoded paged-attention launches: the check that a
 	// paged run read its history through the pool.
 	PagedLaunches int
@@ -846,6 +890,14 @@ type Stats struct {
 	// (PagedAttnScoresMMA70/PagedAttnAccMMA70): the selection check that a
 	// prompt on an sm_70 card took the tensor cores, latent blocks included.
 	PagedPrefill70 int
+	// PagedAccMMA counts prefill launches whose accumulate ran on the m16n8k8
+	// binary16 instruction (kernels.PagedAttnAccMMA, sm_75 on): the selection
+	// check that the weighted sum of V left the FMA tiles.
+	PagedAccMMA int
+	// FlashPrefill80 counts prompt attention launches of
+	// kernels.FlashPrefill80, scores, softmax and accumulate in one kernel
+	// on m16n8k16 (sm_80 on).
+	FlashPrefill80 int
 	// PagedPrefillPasses counts the passes those launches ran over a history
 	// longer than one launch attends -- the selection check for the fold.
 	PagedPrefillPasses int
@@ -856,7 +908,8 @@ type Stats struct {
 	// HeadFolds counts batched chunks that ran the output projection on
 	// their last row inside their own submission.
 	HeadFolds int
-	// FlashPrefills counts batched attention launches of kernels.FlashPrefill70.
+	// FlashPrefills counts batched attention launches of a one-kernel form
+	// (kernels.FlashPrefill70, FlashPrefillTile), paged or not.
 	FlashPrefills int
 	// VisionAttnChunks counts the query chunks vision blocks ran their
 	// attention in (visionattn.go) -- the selection check that a large image's
@@ -1034,6 +1087,12 @@ func (s *Stats) add(o Stats) {
 	s.LinearFused += o.LinearFused
 	s.RecShared += o.RecShared
 	s.VoltaGemm += o.VoltaGemm
+	s.GemmF16 += o.GemmF16
+	s.GemmInt8 += o.GemmInt8
+	s.NormF16 += o.NormF16
+	s.ActF16Fused += o.ActF16Fused
+	s.QuantActs += o.QuantActs
+	s.KVPrewarmPages += o.KVPrewarmPages
 	s.GroupedVolta += o.GroupedVolta
 	s.MLAScores70 += o.MLAScores70
 	s.MLAAcc70 += o.MLAAcc70
@@ -1091,6 +1150,7 @@ func (s *Stats) add(o Stats) {
 	s.Captures += o.Captures
 	s.AttnMMA = s.AttnMMA || o.AttnMMA
 	s.FlashLaunches += o.FlashLaunches
+	s.FusedLaunches += o.FusedLaunches
 	s.PagedLaunches += o.PagedLaunches
 	s.PagedPrefillLaunches += o.PagedPrefillLaunches
 	s.PagedStagedLaunches += o.PagedStagedLaunches
@@ -1111,6 +1171,8 @@ func (s *Stats) add(o Stats) {
 	s.RecAligns += o.RecAligns
 	s.RecCarryBytes += o.RecCarryBytes
 	s.PagedPrefill70 += o.PagedPrefill70
+	s.PagedAccMMA += o.PagedAccMMA
+	s.FlashPrefill80 += o.FlashPrefill80
 	s.PagedPrefillPasses += o.PagedPrefillPasses
 	s.EmbedLaunches += o.EmbedLaunches
 	s.HeadFolds += o.HeadFolds
@@ -1514,13 +1576,22 @@ type devShared struct {
 	xfBuf               backend.Buf // a float weight's activation
 	xfCap               int
 	reduce              map[[2]int]backend.Kernel
-	retunedAt           int                           // len(layers) at the last retuneDecode
-	restrides           map[[4]int]backend.Kernel     // kernels.Restride by shape; see copyKVAcrossStride
-	segKerns            map[string]backend.Kernel     // kernels.MatVecSegments by shapes; see fuseQKV
-	ragKerns            map[moeKernKey]backend.Kernel // a batched mixture's grouped matvecs (moegroup.go)
-	moeVolta            map[moeVoltaKey]moeVoltaMV    // their tensor-core twins; see voltaGroupedMV
-	ragK                map[ragKey]backend.Kernel     // a ragged step's matvecs; see ragMV
-	kshared             map[string]backend.Kernel     // scratch kernels by content; see compileShared
+	retunedAt           int // len(layers) at the last retuneDecode
+	// The background split tuner (WithLazyTune): its queue, whether its
+	// goroutine runs, Close's stop, and the goroutine to wait for.
+	tuneQ       []tuneJob
+	tuneRunning bool
+	tuneStop    bool
+	tuneWG      sync.WaitGroup
+	// lastSub is when the device last started or finished a submission
+	// (unix ns): the background tuner waits for tuneQuiet past it.
+	lastSub   atomic.Int64
+	restrides map[[4]int]backend.Kernel     // kernels.Restride by shape; see copyKVAcrossStride
+	segKerns  map[string]backend.Kernel     // kernels.MatVecSegments by shapes; see fuseQKV
+	ragKerns  map[moeKernKey]backend.Kernel // a batched mixture's grouped matvecs (moegroup.go)
+	moeVolta  map[moeVoltaKey]moeVoltaMV    // their tensor-core twins; see voltaGroupedMV
+	ragK      map[ragKey]backend.Kernel     // a ragged step's matvecs; see ragMV
+	kshared   map[string]backend.Kernel     // scratch kernels by content; see compileShared
 	// convK, conv and convN are the convolutional blocks' kernels, their
 	// shared scratch and how many hold it (conv.go).
 	convK   map[convKey]backend.Kernel
@@ -1622,9 +1693,23 @@ type devShared struct {
 	mmaOff bool
 	// tileOff records that this device refused kernels.GemmTile; see tileMV.
 	tileOff bool
+	// tileCap is the collective-tile probe (tilesOK): 0 not yet asked, 1 the
+	// device lowers the 8x8 f16 tile GemmTile and FlashPrefillTile multiply
+	// in, -1 it does not.
+	tileCap int8
+	// tileTallCap is tileTall's probe, in tileCap's terms.
+	tileTallCap int8
+	// tileF32Cap is tileF32's probe, in tileCap's terms.
+	tileF32Cap int8
 	// voltaMoE is the grouped tensor-core mixture's probe (voltaOn): 0 not yet
 	// asked, 1 this device runs it, -1 it does not.
 	voltaMoE int8
+	// f16K is f16GemmK's probe: 0 not yet asked, -1 no m16n8 binary16
+	// instruction, else its k.
+	f16K int
+	// i8Gemm is int8GemmOn's probe: 0 not yet asked, 1 the device lowers
+	// GemmInt8, -1 it does not.
+	i8Gemm int8
 }
 
 // GPU serves decode matvecs and whole blocks from one or more devices. It is a
@@ -2141,7 +2226,8 @@ func (g *devTier) Close() {
 	// decline tombstones, freeStale) rather than a second copy of that walk.
 	// A driver that reclaims the context on close would hide a leak here, but
 	// a unified-memory device would not. It takes g.mu, hence before the lock
-	// below.
+	// below. The background tuner stops first: it times resident weights.
+	g.stopTune()
 	g.releaseEveryLayer()
 
 	g.mu.Lock()

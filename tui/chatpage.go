@@ -48,8 +48,8 @@ func newChatPage(env *env) *chatPage {
 			Think:  bind("ctrl+t", "thinking"),
 			Copy:   bind("ctrl+y", "copy reply"),
 			New:    bind("ctrl+n", "new chat"),
-			Prev:   bind("ctrl+↑", "prev chat", "ctrl+up", "alt+up"),
-			Next:   bind("ctrl+↓", "next chat", "ctrl+down", "alt+down"),
+			Prev:   bind("ctrl/⌥+↑", "prev chat", "ctrl+up", "alt+up"),
+			Next:   bind("ctrl/⌥+↓", "next chat", "ctrl+down", "alt+down"),
 			Scroll: bind("pgup/pgdn", "scroll", "pgup", "pgdown", "ctrl+u", "ctrl+d"),
 		},
 		tr:     newTranscript(env),
@@ -61,7 +61,7 @@ func newChatPage(env *env) *chatPage {
 }
 
 func (c *chatPage) Help() []key.Binding {
-	return []key.Binding{c.prompt.keys.Send, c.keys.Stop, c.prompt.keys.Older, c.keys.Copy, c.keys.New, c.keys.Prev, c.keys.Think, c.keys.Scroll}
+	return []key.Binding{c.prompt.keys.Send, c.keys.Stop, c.prompt.keys.Older, c.keys.Copy, c.keys.New, c.keys.Prev, c.keys.Next, c.keys.Think, c.keys.Scroll}
 }
 
 func (c *chatPage) Focus() tea.Cmd  { return c.prompt.Focus() }
@@ -426,16 +426,17 @@ func sidebar(env *env, w, h int) string {
 	section("MODELS")
 	models := st.Models.Get()
 	if len(models) == 0 {
-		b.WriteString(sDim.Render("none open · f2") + "\n")
+		b.WriteString(sDim.Render("none loaded · f2") + "\n")
 	}
 	for _, lm := range models {
 		name := truncate(strings.TrimSuffix(lm.Name, ".jlm"), iw-2)
+		// Every loaded model is loaded and usable; the chat's own is bold.
+		ns := sMuted
 		if lm.Active {
-			b.WriteString(lipgloss.NewStyle().Foreground(colourOf(lm.Colour, modelColours)).Render("●") + " " + sBold.Render(name) + "\n")
-			b.WriteString("  " + sDim.Render(fmt.Sprintf("%s · %d blocks", lm.Arch, lm.Blocks)) + "\n")
-		} else {
-			b.WriteString(sDim.Render("○ ") + sMuted.Render(name) + "\n")
+			ns = sBold
 		}
+		b.WriteString(lipgloss.NewStyle().Foreground(colourOf(lm.Colour, modelColours)).Render("●") + " " + ns.Render(name) + "\n")
+		b.WriteString("  " + sDim.Render(fmt.Sprintf("%s · %d blocks", lm.Arch, lm.Blocks)) + "\n")
 	}
 
 	b.WriteString("\n")
