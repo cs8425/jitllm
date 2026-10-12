@@ -69,6 +69,9 @@ func all(t *testing.T) map[string]*ir.Kernel {
 	add("k3/resmix", func() (*ir.Kernel, error) { return kernels.K3ResMix(64, 2, 3) })
 	add("k3/post-restart", func() (*ir.Kernel, error) { return kernels.K3Post(64, 2, 4, 2, true) })
 	add("k3/decaybound", func() (*ir.Kernel, error) { return kernels.DeltaDecayBoundRows(32, 2, -5) })
+	// The grid barrier's gate kernel (kernels/gridprobe.go), so ptxas and
+	// spirv-val see the atomics and the spin loop.
+	add("grid/probe", func() (*ir.Kernel, error) { return kernels.GridProbe(4, 128), nil })
 	// A kernel that uses shared memory and a barrier, so the vendors'
 	// assemblers see that surface. The barrier is load-bearing: each thread
 	// stages one element and reads its neighbour's.

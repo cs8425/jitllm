@@ -138,7 +138,11 @@ func (v *vkDev) Compile(k *ir.Kernel) (Kernel, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &vkKern{k: kern, group: k.Group, name: k.Name}, nil
+	vk := &vkKern{k: kern, group: k.Group, name: k.Name, src: k}
+	if k.GridSync() {
+		vk.resident, vk.residentErr = v.GridLimit(vk)
+	}
+	return vk, nil
 }
 
 // ImportAlign and Import are VK_EXT_external_memory_host, which the Vulkan
@@ -199,6 +203,28 @@ type vkKern struct {
 	// on part of its rows.
 	group [3]int
 	name  string
+	// src is the kernel's IR (IRSource); resident and residentErr its
+	// co-residency limit when it has a grid barrier.
+	src         *ir.Kernel
+	resident    int
+	residentErr error
+}
+
+func (k *vkKern) IR() *ir.Kernel { return k.src }
+
+// GridLimit is one workgroup per compute unit, as a vendor extension states
+// the count (vulkan/cores.go); a device none states cannot run a grid barrier.
+func (v *vkDev) GridLimit(k Kernel) (int, error) {
+	vk := k.(*vkKern)
+	if !vk.src.GridSync() {
+		return 0, fmt.Errorf("backend: spirv: %s has no grid barrier", vk.name)
+	}
+	n, _ := v.c.Cores()
+	if n == 0 {
+		return 0, fmt.Errorf("backend: spirv: %s states no compute-unit count (VK_NV_shader_sm_builtins, "+
+			"VK_AMD_shader_core_properties), and core Vulkan no co-residency", v.c.Name())
+	}
+	return n, nil
 }
 
 // Launch re-binds only when the buffer set changes. Descriptor updates are
@@ -206,6 +232,9 @@ type vkKern struct {
 // measuring the binding.
 func (k *vkKern) Launch(groups, width int, bufs ...Buf) error {
 	if err := checkWidth("spirv", k.name, k.group, width); err != nil {
+		return err
+	}
+	if err := checkGrid("spirv", k.name, k.src, groups, k.resident, k.residentErr); err != nil {
 		return err
 	}
 	if !same(k.bound, bufs) {
@@ -288,6 +317,9 @@ func (s *vkSession) Read(b Buf, p []byte) error {
 func (s *vkSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
 	vk := k.(*vkKern)
 	if err := checkWidth("spirv", vk.name, vk.group, width); err != nil {
+		return err
+	}
+	if err := checkGrid("spirv", vk.name, vk.src, groups, vk.resident, vk.residentErr); err != nil {
 		return err
 	}
 	if s.batch == nil {

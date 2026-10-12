@@ -155,6 +155,14 @@ func Emit(k *ir.Kernel) (string, error) {
 	}
 	l := &lowerer{k: k, name: make([]string, len(k.Ops)+1), fc: floatCarried(k), ind: 1}
 	l.b.WriteString(preamble)
+	grid := k.GridSync()
+	if grid {
+		wait := "while (atomic_load_explicit(s + 1, memory_order_relaxed) == g) {\n            }"
+		if gridBroken {
+			wait = "(void)g;"
+		}
+		l.b.WriteString(strings.Replace(gridPreamble, "JITLLM_GRID_WAIT", wait, 1))
+	}
 	if ir.UsesTiles(k) {
 		// Not in the preamble unconditionally: it is an extra header on every
 		// kernel the device compiles, and every other one has no matrix in it.
@@ -172,7 +180,14 @@ func Emit(k *ir.Kernel) (string, error) {
 		if p.IsTile {
 			et = tileElemName(p.Tile)
 		}
-		fmt.Fprintf(&l.b, "device %s* %s [[buffer(%d)]]", et, p.Name, i)
+		// A grid barrier's kernel reads, after the barrier, words other
+		// threadgroups wrote before it: coherent(device) keeps those loads
+		// off a cache that is not coherent across the GPU (MSL 3.2).
+		coh := ""
+		if grid {
+			coh = "coherent(device) "
+		}
+		fmt.Fprintf(&l.b, "%sdevice %s* %s [[buffer(%d)]]", coh, et, p.Name, i)
 	}
 	pad := ",\n" + strings.Repeat(" ", 13+len(k.Name))
 	fmt.Fprintf(&l.b, "%suint jitllm_tid [[thread_position_in_threadgroup]]", pad)
@@ -189,6 +204,9 @@ func Emit(k *ir.Kernel) (string, error) {
 			fmt.Fprintf(&l.b, "%suint jitllm_sgsize [[threads_per_simdgroup]]", pad)
 			break
 		}
+	}
+	if grid {
+		fmt.Fprintf(&l.b, "%suint jitllm_ngroups [[threadgroups_per_grid]]", pad)
 	}
 	fmt.Fprintf(&l.b, "%suint jitllm_ctaid [[threadgroup_position_in_grid]]) {\n", pad)
 
@@ -279,6 +297,8 @@ func (l *lowerer) block(lo, hi int) error {
 			l.line("threadgroup %s %s[%d];", tname(o.Type), l.name[i+1], o.Imm)
 		case ir.OpBarrier:
 			l.line("threadgroup_barrier(mem_flags::mem_threadgroup);")
+		case ir.OpGridBarrier:
+			l.line("jitllm_grid_barrier((device atomic_uint*)%s, jitllm_tid, jitllm_ngroups);", l.n(o.Args[0]))
 		default:
 			if err := l.arith(i, o); err != nil {
 				return err
@@ -499,3 +519,37 @@ func (l *lowerer) loop(start, end int) error {
 	l.line("}")
 	return nil
 }
+
+// gridPreamble is ir.OpGridBarrier's body, in a kernel that has one: the
+// arrive-and-wait counter of ptx/grid.go. MSL's atomics are relaxed only; the
+// order comes from atomic_thread_fence at device scope (MSL 3.2), a fence
+// before arriving and one after the generation moves, and
+// threadgroup_barrier(mem_device) carries it to and from the rest of the
+// threadgroup. Apple documents no forward-progress guarantee between
+// threadgroups; the launch is bounded by the device's co-residency limit.
+const gridPreamble = `
+#if __METAL_VERSION__ < 320
+#error "a grid barrier needs MSL 3.2 (atomic_thread_fence at device scope, coherent(device))"
+#endif
+inline void jitllm_grid_barrier(device atomic_uint* s, uint tid, uint n) {
+    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        uint g = atomic_load_explicit(s + 1, memory_order_relaxed);
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+        uint old = atomic_fetch_add_explicit(s, 1u, memory_order_relaxed);
+        if (old == n - 1u) {
+            atomic_store_explicit(s, 0u, memory_order_relaxed);
+            atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+            atomic_fetch_add_explicit(s + 1, 1u, memory_order_relaxed);
+        } else {
+            JITLLM_GRID_WAIT
+        }
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+    }
+    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+}
+`
+
+// gridBroken makes every waiter leave without waiting (BreakGridBarrierForTest,
+// jitllmtest builds only): the violation the grid barrier's gate must see.
+var gridBroken bool

@@ -799,12 +799,20 @@ still stands.
 
 Evidence: `docs/engineering-history/placement.md` ("RULE 12's tower case").
 
-## RULE 13: device kernels — two invariants that do not bend.
+## RULE 13: device kernels — three invariants that do not bend.
 
-- **No kernel may read a buffer it writes.** The IR has no conditional execution
-  outside a loop, so surplus threads are CLAMPED to the last work item; that is
-  benign only when the result is a pure function of read-only inputs.
-  `ir.Validate` refuses it.
+- **No kernel may read a buffer it writes within one phase.** The IR has no
+  conditional execution outside a loop, so surplus threads are CLAMPED to the
+  last work item; that is benign only when the result is a pure function of
+  read-only inputs. A grid barrier (`ir.OpGridBarrier`) ends a phase: every
+  write before it is visible to every read after it. `ir.Validate` refuses a
+  buffer read and written in one phase.
+- **A grid barrier runs only on a grid the device holds resident at once.** A
+  workgroup waiting for one that cannot start until it finishes never returns.
+  `backend.GridLimit` states the limit from a documented source (the CUDA
+  occupancy calculator, a vendor extension's compute-unit count, the
+  IORegistry's core count), every launch refuses a wider grid, and a device
+  that states none cannot run one.
 - **Poison the buffer, do not trust the allocator.** A fresh device buffer is
   usually zero, so reading memory nothing wrote is invisible until it is not.
   `0 * NaN` is NaN.

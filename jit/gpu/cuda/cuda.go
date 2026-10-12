@@ -260,6 +260,7 @@ func bindCUDA() error {
 	cuMemHostUnregister = ffi.Fn1[CUresult, unsafe.Pointer](lib, "cuMemHostUnregister")
 	cuMemHostGetDevicePointer = ffi.Fn3[CUresult, *CUdevptr, unsafe.Pointer, uint32](lib, "cuMemHostGetDevicePointer_v2")
 	loadGraphs(lib)
+	loadCoop(lib)
 	loadQueues(lib)
 	loadEvents(lib)
 	loadUUID(lib)

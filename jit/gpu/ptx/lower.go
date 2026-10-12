@@ -113,6 +113,9 @@ func Lower(k *ir.Kernel, target string) (string, error) {
 		case ir.OpBarrier:
 			b.Op("bar.sync 0;")
 
+		case ir.OpGridBarrier:
+			gridBarrier(&b, reg[a0], sm)
+
 		case ir.OpParam:
 			r := b.Reg(class(o.Type))
 			b.Op("ld.param.u64 %v,[%s];", r, k.Params[o.Imm].Name)
