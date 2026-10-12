@@ -176,6 +176,8 @@ type MVGroup struct {
 	K     int
 	ActUp []float32
 	Act   ActKind
+	Resid []float32
+	Alpha float32
 }
 
 func (f *JIT) MatVecPackedGroup(g *MVGroup) bool { return false }

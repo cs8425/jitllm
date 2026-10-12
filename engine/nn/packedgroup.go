@@ -29,6 +29,11 @@ type MVGroup struct {
 	// as it was.
 	ActUp []float32
 	Act   ActKind
+	// Resid, when set, takes matrix 0's output rows into the residual as
+	// they are made: Resid[r] += Alpha*Out[0][r] (the generated axpy), by the
+	// worker that made them, so the residual add needs no pass of its own.
+	Resid []float32
+	Alpha float32
 }
 
 // MatVecPackedGroup runs every matvec of g as ONE pool region with no
@@ -118,6 +123,13 @@ func (f *JIT) MatVecPackedGroup(g *MVGroup) bool {
 	f.growGroupAct(k)
 	j.n, j.x, j.k, j.maxRows = g.N, g.X[:k], k, maxRows
 	j.actUp, j.act = nil, g.Act
+	j.resid, j.alpha = nil, g.Alpha
+	if g.Resid != nil {
+		if len(g.Resid) < g.Rows[0] {
+			return false
+		}
+		j.resid = g.Resid
+	}
 	if g.ActUp != nil {
 		if len(g.ActUp) < k || gatedIndex(g.Act) < 0 {
 			return false
@@ -133,7 +145,7 @@ func (f *JIT) MatVecPackedGroup(g *MVGroup) bool {
 	for i := 0; i < g.N; i++ {
 		j.m[i].p, j.m[i].out = nil, nil
 	}
-	j.x, j.actUp, j.nslot = nil, nil, 0
+	j.x, j.actUp, j.resid, j.nslot = nil, nil, nil, 0
 	return true
 }
 
@@ -199,8 +211,13 @@ func (h *hotRegions) groupFn(f *JIT) func(worker, lo, hi int) {
 					f.grseen[b] = j.gen
 				}
 				g0 := (c - m.first) * m.per
-				m.fc.run(m.p, m.out, m.p.Row, m.stride, g0, min(m.groups, g0+m.per),
+				g1 := min(m.groups, g0+m.per)
+				m.fc.run(m.p, m.out, m.p.Row, m.stride, g0, g1,
 					f.grq[b], f.grpairs[b], half, worker*j.maxRows)
+				if i == 0 && j.resid != nil {
+					r0, r1 := g0*m.fc.grp, g1*m.fc.grp
+					Axpy32JIT(j.resid[r0:r1], m.out[r0:r1], j.alpha)
+				}
 			}
 		}
 	}

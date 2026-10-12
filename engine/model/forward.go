@@ -3415,6 +3415,9 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			unhide()
 		}
 	}()
+	// attnResid and ffnResid: a group already added the projection into the
+	// residual (fuse.go).
+	var attnResid, ffnResid bool
 	for li := s.lo; li < s.hi; li++ {
 		if s.devAt(li) {
 			// A device run ends the fused host run (fuse.go).
@@ -3697,7 +3700,17 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 					s.jit.NewInput()
 					src = s.ogate
 				}
-				if !s.groupOf(src[:c.QDimAt(li)], [nn.MaxGroup]*tensor{&l.wo},
+				// With nothing between the projection and the residual, the
+				// add rides the projection's rows (fuse.go).
+				plain := l.bo == nil && !kind.Recurrent() && l.postAttnNorm == nil &&
+					!c.ResAttn() && c.AltUp == 0
+				if plain {
+					s.grp.Resid, s.grp.Alpha = s.x, float32(c.ResidualScale)
+				}
+				attnResid = plain && s.groupOf(src[:c.QDimAt(li)], [nn.MaxGroup]*tensor{&l.wo},
+					[nn.MaxGroup][]float32{s.h}, 1)
+				s.grp.Resid = nil
+				if !attnResid && !s.groupOf(src[:c.QDimAt(li)], [nn.MaxGroup]*tensor{&l.wo},
 					[nn.MaxGroup][]float32{s.h}, 1) {
 					if err := s.mv(s.h, l.wo, src[:c.QDimAt(li)]); err != nil {
 						return nil, err
@@ -3719,9 +3732,10 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 		t0 = s.tick()
 		if c.ResAttn() {
 			s.k3Resid(li, s.x, s.h, 1)
-		} else {
+		} else if !attnResid {
 			s.addInto(s.x, s.h)
 		}
+		attnResid = false
 		if c.AltUp != 0 {
 			s.laurelJoin(s.x, s.altLaur)
 		}
@@ -3814,8 +3828,12 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			// Inside a fused run the activation rides the down projection's
 			// group: each worker forms act(gate)*up itself (fuse.go).
 			s.grp.ActUp, s.grp.Act = up, act
+			if l.postFFNNorm == nil {
+				s.grp.Resid, s.grp.Alpha = s.x, float32(c.ResidualScale)
+			}
 			grouped := s.groupOf(gate, [nn.MaxGroup]*tensor{&l.down}, [nn.MaxGroup][]float32{s.h}, 1)
-			s.grp.ActUp = nil
+			ffnResid = grouped && s.grp.Resid != nil
+			s.grp.ActUp, s.grp.Resid = nil, nil
 			if !grouped {
 				s.actmulAll(gate, up, act)
 				s.jit.NewInput()
@@ -3831,7 +3849,10 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			s.tock(opRMSNorm, t0)
 		}
 		t0 = s.tick()
-		s.addInto(s.x, ffn)
+		if !ffnResid {
+			s.addInto(s.x, ffn)
+		}
+		ffnResid = false
 		s.tock(opResid, t0)
 		if c.AltUp != 0 {
 			if err := s.altCorrect(li, l, s.xa, s.altPred, s.ple, 1); err != nil {

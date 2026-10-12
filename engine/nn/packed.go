@@ -527,6 +527,8 @@ type hotRegions struct {
 		slotQK                    [MaxGroup]cpu.QuantActKernels
 		x, actUp                  []float32
 		act                       ActKind
+		resid                     []float32
+		alpha                     float32
 		gen                       uint64
 		fn                        func(worker, lo, hi int)
 	}
