@@ -27,6 +27,8 @@ type modelOpts struct {
 	// noFuse runs a decode token's host blocks one pool region per op rather
 	// than as fused runs; see WithBlockFusion.
 	noFuse bool
+	// noGroups runs a fused run's matvecs a phase each; see WithMatVecGroups.
+	noGroups bool
 	// noShOverlap runs a mixture's shared expert after its routed read
 	// rather than behind it; see WithSharedOverlap.
 	noShOverlap bool
@@ -115,6 +117,11 @@ func defaultOpts() modelOpts {
 // kernels, their chunks and their order are the same, so the answer is the
 // same bits (TestFusedBlocksMatchPerOp); off is the other arm.
 func WithBlockFusion(on bool) Option { return func(l *loadOpts) { l.opt.noFuse = !on } }
+
+// WithMatVecGroups sets whether a fused run's matvecs that read one activation
+// run as one region with the activation's quantization folded in
+// (nn.MatVecPackedGroup). On by default, the same bits; off is the A/B arm.
+func WithMatVecGroups(on bool) Option { return func(l *loadOpts) { l.opt.noGroups = !on } }
 
 // WithSharedOverlap sets whether a latent mixture's shared experts run while
 // its routed experts are read from the container, instead of after. On by

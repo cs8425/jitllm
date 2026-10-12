@@ -1583,6 +1583,11 @@ func loadOpts(t []tok.Option, budget uint64) []model.Option {
 	if os.Getenv("JITLLM_FUSE") == "0" {
 		o = append(o, model.WithBlockFusion(false))
 	}
+	// JITLLM_FUSE_GROUPS=0 keeps a fused run's matvecs a phase each
+	// (model.WithMatVecGroups).
+	if os.Getenv("JITLLM_FUSE_GROUPS") == "0" {
+		o = append(o, model.WithMatVecGroups(false))
+	}
 	if os.Getenv("JITLLM_SH_OVERLAP") == "0" {
 		o = append(o, model.WithSharedOverlap(false))
 	}

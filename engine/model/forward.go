@@ -634,7 +634,7 @@ func (m *Model) newStateRange(nseq, maxSeq, lo, hi int) *State {
 	}
 	s := &State{m: m, c: m.Cfg, lo: lo, hi: hi, gpuLayers: lo, maxSeq: maxSeq, reqSeq: req, nseq: nseq,
 		devFallback: true, relocate: true, prof: m.opt.profile, outNorm: m.outNorm, outW: &m.output,
-		fuseOff: m.opt.noFuse}
+		fuseOff: m.opt.noFuse, groupOff: m.opt.noGroups}
 	s.holdHostRuns()
 	// A State over a prediction block projects through that block's head.
 	if lo < len(m.layers) {
