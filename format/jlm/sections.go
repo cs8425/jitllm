@@ -170,7 +170,10 @@ func encodeConfig(c *Config) []byte {
 	// it did before the field existed. The tenth, a decision model's readout
 	// and temperatures, implies the first nine; an older reader drops it and
 	// runs the model as the backbone it is, a model that generates.
-	dec := c.Decision != DecisionNone || c.DecisionBlocks != 0 || c.DecisionHeadTokens != 0 || len(c.DecisionTemps) != 0 ||
+	// The eleventh, Clef's routing blocks and head epsilon, implies the first
+	// ten; an older reader refuses its decision kind by code.
+	clef := c.DecisionRouting != 0 || c.DecisionEps != 0
+	dec := clef || c.Decision != DecisionNone || c.DecisionBlocks != 0 || c.DecisionHeadTokens != 0 || len(c.DecisionTemps) != 0 ||
 		c.DecisionHeads != 0
 	k3 := dec || c.AttnResBlock != 0 || c.ExpertLatent != 0 || c.SituBeta != 0 || c.SituLinearBeta != 0 ||
 		c.KDALowerBound != 0 || c.LatentNormEps != 0
@@ -252,6 +255,10 @@ func encodeConfig(c *Config) []byte {
 			w.u32(d.MaxOptions)
 			w.f32(d.T)
 		}
+	}
+	if clef {
+		w.u32(c.DecisionRouting)
+		w.f32(c.DecisionEps)
 	}
 	return w.b
 }
@@ -373,6 +380,10 @@ func decodeConfig(b []byte) (*Config, error) {
 				d.T = r.f32()
 			}
 		}
+	}
+	if r.err == nil && len(r.b) > 0 {
+		c.DecisionRouting = r.u32()
+		c.DecisionEps = r.f32()
 	}
 	if r.err != nil {
 		return nil, r.err

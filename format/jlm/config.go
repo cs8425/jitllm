@@ -641,6 +641,12 @@ type Config struct {
 	// DecisionHeads is the head blocks' attention head count, which Laya's
 	// reference sets as max(1, n_embd/64) whatever the encoder's is.
 	DecisionHeads uint32
+	// DecisionRouting is Clef's routing blocks, before its DecisionBlocks
+	// joint ones, and DecisionEps the head's LayerNorm epsilon (torch's
+	// default, which the reference never sets). An eleventh optional tail;
+	// see encodeConfig.
+	DecisionRouting uint32
+	DecisionEps     float32
 
 	Flags Flags
 }

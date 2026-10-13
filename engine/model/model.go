@@ -1231,6 +1231,9 @@ type Model struct {
 	// q/k RMSNorm runs the generated norm against. nil unless QKL2Norm.
 	onesHD  []float32
 	outNorm []float32
+	// clef is a Clef decision model's joint schema head, loaded by the first
+	// Decider (decideclef.go) under bind; nil on every other model.
+	clef *clefHead
 	// outNormB and outB are the output LayerNorm's bias and the head's bias
 	// (phi-2), nil everywhere else.
 	outNormB, outB []float32

@@ -46,10 +46,12 @@ type batchJob struct {
 	ids     []int32
 	groups  [][]int32
 	markers []int
-	scores  []float32
-	seq     Seq
-	sample  func([]float32) int32
-	err     error
+	// clef is a Clef request's prompt: one job answers the whole request.
+	clef   *clefPrompt
+	scores []float32
+	seq    Seq
+	sample func([]float32) int32
+	err    error
 }
 
 // read is the job's sequence's Sample: the label scores at the prompt's last
@@ -99,6 +101,15 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 			continue
 		}
 		first := n
+		if d.kind == jlm.DecisionClef {
+			j := d.job(n)
+			j.r, j.q, j.v = r, -1, 0
+			if res.Err = d.clefJob(j, rq.State, rq.Questions); res.Err != nil {
+				continue
+			}
+			n++
+			continue
+		}
 	questions:
 		for qi := range rq.Questions {
 			q := &rq.Questions[qi]
@@ -136,6 +147,11 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 			continue
 		}
 		qs := reqs[r].Questions
+		if d.kind == jlm.DecisionClef {
+			res.Answers, res.Err = d.clefAnswers(qs, jobs[at].scores)
+			at++
+			continue
+		}
 		res.Answers = make([]DecisionAnswer, len(qs))
 		for qi := range qs {
 			var all [][]float32
@@ -164,6 +180,24 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 	d.input = 0
 	for _, j := range jobs {
 		d.input += len(j.ids)
+	}
+	if d.kind == jlm.DecisionClef {
+		// One pass a request, every row of it kept for the head: a batch
+		// session's rows give back their last row alone.
+		for _, j := range jobs {
+			if cap(j.scores) < len(j.clef.opts) {
+				j.scores = make([]float32, len(j.clef.opts))
+			}
+			j.scores = j.scores[:len(j.clef.opts)]
+			if err := d.clefForward(j.clef, j.scores); err != nil {
+				return err
+			}
+		}
+		d.input = 0
+		for _, j := range jobs {
+			d.input += len(j.ids)
+		}
+		return nil
 	}
 	if d.kind == jlm.DecisionLaya {
 		for _, j := range jobs {

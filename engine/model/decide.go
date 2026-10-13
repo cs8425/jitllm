@@ -114,6 +114,13 @@ type Decider struct {
 	// batchN is how many of jobs the last batch ran.
 	batchN int
 
+	// clef is Clef's head and its working memory (decideclef.go), and
+	// clefEmb the prefill mode its prompt runs under: the residual of every
+	// row, no output projection.
+	clefH   *clefHead
+	clef    *clefRun
+	clefEmb embedMode
+
 	// violation names one feature of the readout a test removes, to show the
 	// gate sees it (RULE 10). Empty in every caller but those tests.
 	violation string
@@ -161,6 +168,13 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 		}
 		d.maxOptions = len(d.labels)
 	case jlm.DecisionLFM2D1:
+	case jlm.DecisionClef:
+		d.st = m.NewState(maxSeq)
+		if err := d.clefInit(); err != nil {
+			d.st.Close()
+			return nil, err
+		}
+		return d, nil
 	case jlm.DecisionLaya:
 		if m.encMB() == nil || m.encMB().head == nil {
 			return nil, fmt.Errorf("model: a laya readout wants a ModernBERT encoder with its head")
@@ -272,6 +286,18 @@ func (d *Decider) Decide(state jinja.Value, qs []DecisionQuestion) ([]DecisionAn
 	}
 	d.input = 0
 	out := make([]DecisionAnswer, len(qs))
+	if d.kind == jlm.DecisionClef {
+		// One pass answers every question jointly.
+		p, err := d.clefPrompt(state, qs)
+		if err != nil {
+			return nil, err
+		}
+		s := d.variantScores(0, len(p.opts))
+		if err := d.clefForward(p, s); err != nil {
+			return nil, err
+		}
+		return d.clefAnswers(qs, s)
+	}
 	for i := range qs {
 		q := &qs[i]
 		nv := d.variants(q)
@@ -304,7 +330,7 @@ func (d *Decider) variants(q *DecisionQuestion) int {
 // order is the question's options in the order the prompt shows them: d1
 // shows a noul true first.
 func (d *Decider) order(q *DecisionQuestion) []DecisionOption {
-	if d.kind == jlm.DecisionLFM2D1 && q.Type == jlm.QuestionNoul && d.violation != "false-first" {
+	if (d.kind == jlm.DecisionLFM2D1 || d.kind == jlm.DecisionClef) && q.Type == jlm.QuestionNoul && d.violation != "false-first" {
 		return []DecisionOption{q.Options[1], q.Options[0]}
 	}
 	return q.Options
@@ -745,6 +771,11 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 			uni = float64(n*n-1) / float64(4*n)
 		}
 		a.Confidence = confidenceScore(float64(dist), uni, n)
+	}
+	if d.kind == jlm.DecisionClef && d.violation != "typesafe-confidence" {
+		// Clef's own (systemone_answer): the chosen option's probability, and
+		// a score's largest; llama.cpp gives TypeSafe's formula.
+		a.Confidence = top
 	}
 	if d.kind == jlm.DecisionLaya {
 		// One minus the entropy over log n: -sum p log p, with log p the

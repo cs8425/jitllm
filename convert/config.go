@@ -33,10 +33,14 @@ var archOf = map[string]jlm.Arch{
 	// the interleaved M-RoPE is exactly NEOX for a text prompt. See qwen35Of.
 	"qwen35":    jlm.ArchQwen3Next,
 	"qwen35moe": jlm.ArchQwen3Next,
-	"qwen2vl":   jlm.ArchQwen2VL,
-	"gemma2":    jlm.ArchGemma2,
-	"gemma3":    jlm.ArchGemma3,
-	"gpt-oss":   jlm.ArchGPTOSS,
+	// Clef-Flash: Qwen3.5-9B's text model under another name, with a joint
+	// schema head after it that the decision readout reads (decisionOf,
+	// jlm.DecisionClef).
+	"clef":    jlm.ArchQwen3Next,
+	"qwen2vl": jlm.ArchQwen2VL,
+	"gemma2":  jlm.ArchGemma2,
+	"gemma3":  jlm.ArchGemma3,
+	"gpt-oss": jlm.ArchGPTOSS,
 	// DeepSeek-V2/V3/R1, Kimi-K2 and Moonlight-16B-A3B. Not GLM: see
 	// jlm.ArchDeepseek2 for which GLM is this graph and which is not.
 	"deepseek2": jlm.ArchDeepseek2,
