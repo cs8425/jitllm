@@ -18,7 +18,26 @@ import (
 var int8Tiles = []kernels.Int8Tile{
 	{MT: 4, NT: 4, WM: 2, WN: 2}, {MT: 2, NT: 2, WM: 2, WN: 2}, {MT: 1, NT: 1, WM: 2, WN: 2},
 	{MT: 4, NT: 2, WM: 1, WN: 4}, {MT: 1, NT: 2, WM: 4, WN: 1},
+	// The deep stage (MMQ's shape): eight warps, 64 and 128 elements of k a
+	// trip, one buffer and two; and sm_75's m8n8k16 at one step and four.
+	{MT: 2, NT: 4, WM: 4, WN: 2, D: 2}, {MT: 4, NT: 2, WM: 2, WN: 4, D: 4, Single: true},
+	{MT: 2, NT: 2, WM: 2, WN: 2, M8: true}, {MT: 4, NT: 4, WM: 2, WN: 2, D: 4, Single: true, M8: true},
+	{MT: 4, NT: 2, WM: 2, WN: 4, D: 4, Single: true, M8: true},
+	// ldmatrix weight fragments, on both instructions.
+	{MT: 2, NT: 2, WM: 2, WN: 2, LdM: true}, {MT: 2, NT: 4, WM: 4, WN: 2, D: 4, Single: true, LdM: true},
+	{MT: 2, NT: 2, WM: 2, WN: 2, M8: true, LdM: true}, {MT: 4, NT: 2, WM: 2, WN: 4, D: 4, Single: true, M8: true, LdM: true},
 }
+
+// int8M8Tiles are int8Tiles' m8n8k16 forms: all a device with only sm_75's
+// integer instruction runs.
+var int8M8Tiles = func() (out []kernels.Int8Tile) {
+	for _, tl := range int8Tiles {
+		if tl.M8 {
+			out = append(out, tl)
+		}
+	}
+	return
+}()
 
 // gemmInt8Case runs GemmInt8 on the fixture run's buffers for every tile in
 // int8Tiles that divides the shape, unsplit and split in two, and holds it
@@ -27,7 +46,7 @@ var int8Tiles = []kernels.Int8Tile{
 // order. run launches a kernel into a fresh poisoned output of n floats per
 // split slice and returns the bytes. A format GemmInt8 has no decode for is
 // refused by name.
-func gemmInt8Case(t *testing.T, d backend.Device, q kernels.Quant, nrows, k, ntok int, want []byte,
+func gemmInt8Case(t *testing.T, d backend.Device, q kernels.Quant, nrows, k, ntok int, want []byte, tiles []kernels.Int8Tile,
 	run func(kern backend.Kernel, groups, w, n int) []byte) {
 	t.Helper()
 	if !kernels.Int8OK(q) {
@@ -38,12 +57,13 @@ func gemmInt8Case(t *testing.T, d backend.Device, q kernels.Quant, nrows, k, nto
 		return
 	}
 	ran := 0
-	for _, tl := range int8Tiles {
+	for _, tl := range tiles {
 		for _, split := range []int{1, 2} {
 			s := kernels.MatVecShape{T: q, K: k, Rows: nrows, NTok: ntok, Split: split}
 			kk, err := kernels.GemmInt8(s, tl)
 			if err != nil {
-				if strings.Contains(err.Error(), "does not divide") || strings.Contains(err.Error(), "do not tile") {
+				if strings.Contains(err.Error(), "does not divide") || strings.Contains(err.Error(), "do not tile") ||
+					strings.Contains(err.Error(), "shared memory") {
 					continue
 				}
 				t.Fatalf("%+v split %d: %v", tl, split, err)

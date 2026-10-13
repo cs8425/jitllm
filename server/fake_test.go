@@ -39,6 +39,19 @@ func (f *fakeBackend) Generate(ctx context.Context, o GenerateOptions, emit func
 	if f.failWith != nil {
 		return f.failWith
 	}
+	// A request for several choices (n) gets the script once for each.
+	for ch := 0; ch < max(len(o.Seeds), 1); ch++ {
+		if err := f.choice(ctx, o, ch, func(ev Event) error {
+			ev.Choice = ch
+			return emit(ev)
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *fakeBackend) choice(ctx context.Context, o GenerateOptions, _ int, emit func(Event) error) error {
 	if err := emit(Event{Kind: EventStarted, Started: &Started{
 		SessionID:    "sess-fake",
 		ModelID:      o.ModelID,

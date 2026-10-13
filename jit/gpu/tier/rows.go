@@ -1069,7 +1069,37 @@ func (g *devTier) f16Gemm(m mv, ntok int) (mv, bool) {
 	// sm_70's measured one (kb0Split: a V100's 128-row blocks were fastest
 	// unsplit from 64 workgroups on 80 SMs), not full residency: a staged
 	// block's shared memory holds an SM to a few of them anyway.
+	deep := g.Config.GemmDeep
+	if deep == 0 {
+		deep = gemmDeepDefault
+	}
+	if deep > 0 || deep == 0 && g.gemmDeep[splitKey{m.q, m.rows, m.k}] {
+		if bm, ok := g.stagedGemm(m, ntok, f16DeepTiles, k, g.dev.Slots()/16); ok {
+			g.Stats.GemmDeep++
+			return bm, true
+		}
+	}
 	return g.stagedGemm(m, ntok, f16Tiles, k, g.dev.Slots()/16)
+}
+
+// f16DeepTiles are the m16n8 blockings in llama.cpp MMQ's shape: eight warps
+// a workgroup and 64 elements of k a trip in one buffer (KB counts 32-element
+// steps here). They win on some shapes and lose on others, by card, so
+// tuneGemm times them against f16Tiles' pick per shape and gemmDeep records
+// where they won.
+var f16DeepTiles = []kernels.VoltaTile{
+	{MT: 4, NT: 4, WM: 2, WN: 4, KB: 2, Single: true}, {MT: 4, NT: 2, WM: 2, WN: 4, KB: 2, Single: true},
+}
+
+// gemmDeepDefault stands in for a Config.GemmDeep of 0; only a jitllmtest
+// build changes it (ForceGemmDeepForTest).
+var gemmDeepDefault int
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // fusedKern is a prompt chunk's fused operand kernel under key, compiled on
@@ -1279,7 +1309,7 @@ func (g *devTier) int8Gemm(m mv, ntok int) (mv, bool) {
 		}
 		s := kernels.MatVecShape{Rows: m.rows, NTok: ntok, Split: split}
 		out := mv{kern: c, rows: m.rows, split: split, bias: m.bias, q: m.q, k: m.k,
-			threads: kernels.GemmInt8Groups(s, tl) * tl.Threads(), redN: m.rows * ntok}
+			threads: kernels.GemmInt8Groups(s, tl) * tl.Threads(), width: tl.Threads(), redN: m.rows * ntok}
 		if split > 1 {
 			if out.red = g.reduceKernel(m.rows*ntok, split); out.red == nil ||
 				!g.sizePart(m.rows*ntok*split) {
@@ -1346,7 +1376,8 @@ func (g *devTier) stagedGemm(m mv, ntok int, tiles []kernels.VoltaTile, f16k, fi
 			idx = first
 		}
 		tl := tiles[idx]
-		tl.KB, tl.F16K = kbN, f16k
+		// A list's KB is the trip in 32-element steps (0 is one).
+		tl.KB, tl.F16K = kbN*max(tl.KB, 1), f16k
 		s := kernels.MatVecShape{Center: g.center, T: m.q, K: m.k, Rows: m.rows, NTok: ntok, Bias: m.bias != nil}
 		if m.rows%tl.Rows() != 0 || ntok%tl.Toks() != 0 {
 			continue
@@ -1363,7 +1394,7 @@ func (g *devTier) stagedGemm(m mv, ntok int, tiles []kernels.VoltaTile, f16k, fi
 		for ; split >= 1; split /= 2 {
 			s.Split = split
 			key := ragKey{kind: "gemmvolta", q: m.q, k: m.k, rows: m.rows, ntok: ntok,
-				tile: [5]int{tl.MT, tl.NT, tl.WM, tl.WN, tl.KB}, split: split, bias: s.Bias, r: f16k}
+				tile: [5]int{tl.MT, tl.NT, tl.WM, tl.WN, tl.KB + 1000*b2i(tl.Single)}, split: split, bias: s.Bias, r: f16k}
 			k, ok := g.ragK[key]
 			if !ok {
 				ker, err := kernels.GemmVolta(s, tl)
@@ -1409,7 +1440,7 @@ func (g *devTier) stagedGemm(m mv, ntok int, tiles []kernels.VoltaTile, f16k, fi
 			return mv{}, false
 		}
 		out := mv{kern: c, act: a, actN: ntok * m.k / sub, rows: m.rows, split: split, bias: m.bias,
-			q: m.q, k: m.k, threads: kernels.GemmVoltaGroups(s, tl) * tl.Threads(), redN: m.rows * ntok}
+			q: m.q, k: m.k, threads: kernels.GemmVoltaGroups(s, tl) * tl.Threads(), width: tl.Threads(), redN: m.rows * ntok}
 		if split > 1 {
 			if out.red = g.reduceKernel(m.rows*ntok, split); out.red == nil ||
 				!g.sizePart(m.rows*ntok*split) {

@@ -203,6 +203,10 @@ type Config struct {
 	// prompt at 0.75 and 0.91 of llama.cpp where this one read 0.67 and 0.78
 	// (gpu-kernels.md "The sm_80+ prompt"). The A/B arm.
 	PreferGemmInt8 bool
+	// GemmDeep forces the deep m16n8 tiles (f16DeepTiles) on every prompt
+	// GEMM shape they divide (1) or off (-1); 0 leaves it to tuneGemm's
+	// measurement. The A/B arm and the gate's selection switch.
+	GemmDeep int
 	// PreferTiles puts the collective-tile prompt kernels (kernels.GemmTile,
 	// kernels.FlashPrefillTile) ahead of a backend's own -- the m16n8 GEMMs
 	// and FlashPrefill80 on CUDA -- wherever the device lowers the tiles. Off
@@ -689,6 +693,8 @@ type Stats struct {
 	// GemmF16 counts batched matvecs built as GemmVolta on the m16n8 binary16
 	// instruction (sm_75 on, devTier.f16Gemm) rather than MatVecMMA.
 	GemmF16 int
+	// GemmDeep counts those built on the deep tiles (f16DeepTiles).
+	GemmDeep int
 	// GemmInt8 counts batched matvecs built as kernels.GemmInt8, the staged
 	// int8 GEMM (sm_80 on, devTier.int8Gemm).
 	GemmInt8 int
@@ -1120,6 +1126,7 @@ func (s *Stats) add(o Stats) {
 	s.RecShared += o.RecShared
 	s.VoltaGemm += o.VoltaGemm
 	s.GemmF16 += o.GemmF16
+	s.GemmDeep += o.GemmDeep
 	s.GemmInt8 += o.GemmInt8
 	s.NormF16 += o.NormF16
 	s.ActF16Fused += o.ActF16Fused
@@ -1582,6 +1589,9 @@ type devShared struct {
 	idKerns map[kernels.MatVecShape]backend.Kernel
 	res     map[resKey]*resident
 	splits  map[splitKey]int
+	// gemmDeep is tuneGemm's verdict per prompt GEMM shape: true where the
+	// deep m16n8 tiles (f16DeepTiles) measured faster than f16Tiles' pick.
+	gemmDeep map[splitKey]bool
 	// groupSplit records, per shape, whether tuneSplit found the in-group
 	// reduction faster than the partial-buffer one.
 	groupSplit map[splitKey]bool

@@ -1400,6 +1400,7 @@ func TestFileStoreStaysInsideItsLimit(t *testing.T) {
 // anywhere: the fake carries the history rather than computing with it, since
 // what is under test is the gather/migrate/scatter seam in model/.
 func TestKVPagesRelocateWithTheLayer(t *testing.T) {
+	defer fusedRunsCheck(t, true)()
 	for _, name := range relocModels() {
 		t.Run(name, func(t *testing.T) { kvPagesRelocateWithTheLayer(t, jlmOf(t, testmodels.Path(name)), KVF32) })
 		// The q8_0 cache travels widened to float32 and comes home quantized

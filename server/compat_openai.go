@@ -427,8 +427,7 @@ func (e *compat) openAICompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lpr.on && req.Echo {
-		oaFail(w, http.StatusBadRequest, "logprobs with echo would need the prompt's own "+
-			"log-probabilities, which are not built", "invalid_request_error")
+		oaFail(w, http.StatusBadRequest, errLogprobsWithEcho, "invalid_request_error")
 		return
 	}
 	seeds, err := oaChoiceSeeds(req.N, req.Seed)

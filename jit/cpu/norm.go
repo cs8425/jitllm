@@ -23,50 +23,14 @@ func EmitRMSNorm(n int) []byte {
 	// ---- pass 1: sum of squares, four independent chains ----
 	//
 	// Four accumulators: one chain makes this latency-bound on the FP add.
-	a.VPXOR(Y0, Y0, Y0)
-	a.VPXOR(Y1, Y1, Y1)
-	a.VPXOR(Y2, Y2, Y2)
-	a.VPXOR(Y3, Y3, Y3)
-	a.MOVQ(R11, RSI)
-
-	if blocks := n / 32; blocks > 0 {
-		a.MOVimm(R10, int64(blocks))
-		lp := a.Label()
-		a.Bind(lp)
-		a.VMOVDQULoad(Y4, At(R11, 0))
-		a.VFMADD231PS(Y0, Y4, Y4)
-		a.VMOVDQULoad(Y5, At(R11, 32))
-		a.VFMADD231PS(Y1, Y5, Y5)
-		a.VMOVDQULoad(Y6, At(R11, 64))
-		a.VFMADD231PS(Y2, Y6, Y6)
-		a.VMOVDQULoad(Y7, At(R11, 96))
-		a.VFMADD231PS(Y3, Y7, Y7)
-		a.ADDimm(R11, 128)
-		a.DEC(R10)
-		a.JNZ(lp)
-	}
-	// The tail, in eights. Baked rather than looped: n is known here, so a
+	// The tail, in eights, is baked rather than looped: n is known here, so a
 	// model whose n_embd is not a multiple of 32 costs a few more instructions
-	// once rather than a branch per token.
-	for off := (n / 32) * 32; off+8 <= n; off += 8 {
-		a.VMOVDQULoad(Y4, At(R11, 0))
-		a.VFMADD231PS(Y0, Y4, Y4)
-		a.ADDimm(R11, 32)
-	}
-	// The last n%8 one at a time: a scalar load zeroes lanes 1..7, so they
-	// add nothing to the sum.
-	for i := 0; i < n%8; i++ {
-		a.VMOVSSLoad(Y4, At(R11, int32(4*i)))
-		a.VFMADD231PS(Y0, Y4, Y4)
-	}
-
-	a.VADDPS(Y0, Y0, Y1)
-	a.VADDPS(Y2, Y2, Y3)
-	a.VADDPS(Y0, Y0, Y2)
-	a.VEXTRACTF128(Y1, Y0, 1)
-	a.VADDPSx(Y0, Y0, Y1)
-	a.VHADDPSx(Y0, Y0, Y0)
-	a.VHADDPSx(Y0, Y0, Y0) // lane 0 = sum of squares
+	// once rather than a branch per token. The last n%8 are one at a time: a
+	// scalar load zeroes lanes 1..7, so they add nothing to the sum.
+	sumRowAVX2(&a, n,
+		func(reg Reg, off int32) { a.VMOVDQULoad(reg, At(R11, off)) },
+		func(reg Reg, off int32) { a.VMOVSSLoad(reg, At(R11, off)) },
+		func(dst, t Reg) { a.VFMADD231PS(dst, t, t) })
 
 	// ---- the scalar tail: scale = 1 / sqrt(ss/n + eps) ----
 	//
@@ -85,10 +49,7 @@ func EmitRMSNorm(n int) []byte {
 	// ---- pass 2: y = x * scale * w ----
 	a.MOVQ(R11, RSI)
 	a.MOVQ(R8, RCX)
-	if blocks := n / 32; blocks > 0 {
-		a.MOVimm(R10, int64(blocks))
-		lp := a.Label()
-		a.Bind(lp)
+	newRowWalk(&a, n, R11, RDX, R8).run(func() {
 		for i := 0; i < 4; i++ {
 			d := int32(32 * i)
 			a.VMOVDQULoad(Y4, At(R11, d))
@@ -96,31 +57,59 @@ func EmitRMSNorm(n int) []byte {
 			a.VMULPSMem(Y4, Y4, At(RDX, d))
 			a.VMOVDQUStore(At(R8, d), Y4)
 		}
-		a.ADDimm(R11, 128)
-		a.ADDimm(RDX, 128)
-		a.ADDimm(R8, 128)
-		a.DEC(R10)
-		a.JNZ(lp)
-	}
-	for off := (n / 32) * 32; off+8 <= n; off += 8 {
+	}, func() {
 		a.VMOVDQULoad(Y4, At(R11, 0))
 		a.VMULPS(Y4, Y4, Y0)
 		a.VMULPSMem(Y4, Y4, At(RDX, 0))
 		a.VMOVDQUStore(At(R8, 0), Y4)
-		a.ADDimm(R11, 32)
-		a.ADDimm(RDX, 32)
-		a.ADDimm(R8, 32)
-	}
-	for i := 0; i < n%8; i++ {
+	}, func(i int) {
 		d := int32(4 * i)
 		a.VMOVSSLoad(Y4, At(R11, d))
 		a.VMULPS(Y4, Y4, Y0)
 		a.VMOVSSLoad(Y5, At(RDX, d))
 		a.VMULPS(Y4, Y4, Y5)
 		a.VMOVSSStore(At(R8, d), Y4)
-	}
+	})
 
 	a.VZEROUPPER()
 	a.RET()
 	return a.Bytes()
+}
+
+// sumRowAVX2 reduces a transform of the n floats at RSI into lane 0 of Y0 with
+// four chains Y0..Y3: it clears them, walks R11 from RSI, and folds. load puts
+// one vector at an offset from R11 into reg, loadOne one element with lanes
+// 1..7 zero; both may transform what they load (the variance subtracts the mean
+// and squares). acc folds the loaded register t into chain dst.
+func sumRowAVX2(a *Buf, n int, load, loadOne func(reg Reg, off int32), acc func(dst, t Reg)) {
+	a.VPXOR(Y0, Y0, Y0)
+	a.VPXOR(Y1, Y1, Y1)
+	a.VPXOR(Y2, Y2, Y2)
+	a.VPXOR(Y3, Y3, Y3)
+	a.MOVQ(R11, RSI)
+	newRowWalk(a, n, R11).run(func() {
+		for i := 0; i < 4; i++ {
+			load(Reg(int(Y4)+i), int32(32*i))
+			acc(Reg(int(Y0)+i), Reg(int(Y4)+i))
+		}
+	}, func() {
+		load(Y4, 0)
+		acc(Y0, Y4)
+	}, func(i int) {
+		loadOne(Y4, int32(4*i))
+		acc(Y0, Y4)
+	})
+	foldChainsAVX2(a)
+}
+
+// foldChainsAVX2 folds the four chains Y0..Y3 into lane 0 of Y0, in the order
+// the SSE and NEON twins mirror.
+func foldChainsAVX2(a *Buf) {
+	a.VADDPS(Y0, Y0, Y1)
+	a.VADDPS(Y2, Y2, Y3)
+	a.VADDPS(Y0, Y0, Y2)
+	a.VEXTRACTF128(Y1, Y0, 1)
+	a.VADDPSx(Y0, Y0, Y1)
+	a.VHADDPSx(Y0, Y0, Y0)
+	a.VHADDPSx(Y0, Y0, Y0) // lane 0 = the total
 }

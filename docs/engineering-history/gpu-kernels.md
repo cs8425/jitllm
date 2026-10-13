@@ -5678,6 +5678,105 @@ stream-K in place of the k-split's Reduce, and J chosen per call so a
 have a kernel worth putting it in; and putting it in on sm_75 must not
 flip `mmaOff`'s other consequences (the attention and the grain) with it.
 
+### The deep stage, built and measured
+
+The first two items of that list were built: the m16n8 binary16 GEMM and the
+int8 GEMM both stage 64 or 128 elements of k a trip on eight warps, in one
+buffer or two, and the int8 GEMM multiplies on sm_75's m8n8k16 and reads its
+weight fragments with ldmatrix.
+
+- **GemmVolta's m16n8 tile** (`VoltaTile.KB` past one 32-element step,
+  `Single`): a wide trip needs its own swizzle (`f16Swizzle`, rows g and g+1
+  of a fragment load four chunks apart), and one buffer halves the shared
+  memory so a 128-deep trip fits 48 KiB. **A 256-deep binary16 stage cannot
+  exist on a T4**: 128 weight rows of 256 binary16 elements are 64 KiB, the
+  whole of what sm_75 gives a block, before any activation. MMQ fits it
+  because its operand is int8. Gate: `TestGemmF16DeepStageMatchesTheReference`.
+- **GemmInt8** (`Int8Tile.D`, `Single`, `M8`, `LdM`): rows padded so a
+  fragment phase meets four bank groups; m8n8k16 asked for by name
+  (`ir.MMAS8Turing`), so the m16n8 integer shapes still refuse on sm_75 and
+  `mmaOff` keeps its answer (the attention and the grain do not move); `LdM`
+  stages the weights in natural k order on rows of an odd count of 16-byte
+  chunks and reads an m-tile's A fragments with one `ldmatrix.x4` a step
+  (`ir.Builder.LdMatrix`, PTX only, the other lowerers refuse it by name).
+  Gate: `TestMatVecMMAMatchesDot4` holds every form bit for bit to the dp4a
+  arm, on an sm_75 card through the m8n8k16 forms alone; a swapped k-half
+  and a dropped step offset each fail it.
+
+Tesla T4 (sm_75, 70 W, power-capped under load at 800-1250 MHz), a rented card,
+`TestGemmDeepSweep` / `TestGemmMMQSweep`: Llama-3.1-8B Q4_K_M's
+projections at 512 rows, every arm interleaved in each of 24 rounds of 5
+launches, the median per-round ratio to the shipping tile (m4n4 w2x2, 32 of
+k a trip), two passes. The A/A arm read 0.99-1.005 on the small shapes and
+1.03-1.07 (first job) and 1.09-1.21 (second and third) on the three large
+ones: a slot bias of the power cap that a dispersion gate does not see, so a
+large shape's ratio is read against its own A/A.
+
+    deep binary16 tile (8 warps, 64 a trip, one buffer), pass 1 / pass 2
+    q/o  4096x4096   0.928 / 0.954     (the shipping tile split in two: 0.937 / 0.934)
+    k    1024x4096   0.931 / 0.946
+    v    1024x4096   Q6_K: 0.906 / 0.920 on 32 a trip, 8 warps, two buffers; the 64 tile 1.00
+    gate/up 14336x4096   0.996 / 1.012      A/A 1.014 / 1.033
+    down 4096x14336 Q4_K 0.910 / 0.919      A/A 1.035 / 1.035
+    down 4096x14336 Q6_K 1.015 / 1.017      A/A 1.066 / 1.058
+
+So no tile wins everywhere, and the tier measures it: `tuneGemm` times the
+deep tile against `f16Tiles`' pick per shape on the resident weights at the
+prompt width (after the split tuner, cached per device, driver and
+executable like it) and `f16Gemm` takes the deep tile where it read under
+0.98. Its verdicts on the T4, three jobs:
+
+    Llama-3.2-1B   Q4_K 2048x2048 0.915-0.932 deep   Q4_K 8192x2048 0.929-0.941 deep   Q4_K 2048x8192 0.912-0.919 deep
+                   Q4_K 512x2048  1.331-1.341        Q6_K 512x2048  1.460-1.505        Q6_K 2048x8192 1.022-1.040
+    Llama-3.1-8B   Q4_K 4096x4096 0.938-0.957 deep   Q4_K 1024x4096 0.924-0.927 deep   Q4_K 14336x4096 0.953-0.958 deep
+                   Q4_K 4096x14336 0.966-0.986 (deep twice of three)   Q6_K 1024x4096 1.034-1.040   Q6_K 4096x14336 1.109-1.137
+
+**The int8 instruction is still not the gap, and the kernel's shape is not
+enough to close it.** Best int8 arm against the shipping binary16 tile, T4,
+same harness, pass 1 / pass 2 (registers per thread, resident workgroups):
+
+    shape        int8, plain fragment loads          int8, ldmatrix A
+    q/o          1.173 / 1.136  (168 regs, 3)        1.155 / 1.122  (168, 3)
+    k            1.359 / 1.322  (247, 1)             1.294 / 1.281  (252, 1)
+    v  Q6_K      1.676 / 1.689  (148, 2)             1.361 / 1.383  (128, 4)
+    gate/up      1.193 / 1.191  (245, 1)  A/A 1.135  1.430 / 1.426  (255 + 24 B spill)
+    down Q4_K    1.148 / 1.142  (245, 1)  A/A 1.122  1.249 / 1.252  (129, 1)
+    down Q6_K    1.380 / 1.384  (174, 2)  A/A 1.100  1.114 / 1.122  (168, 3)
+
+The operand costs less on the int8 side (`Quantize` 58-171 us against
+`ActF16T` 77-274 us at these widths, both fused into the norm or activation
+in the engine), which does not cover a GEMM 15-70% slower. ldmatrix pays on
+Q6_K (two 16-element sub-blocks a step, whose plain loads were the most
+fragmented) and little elsewhere; tiles held under 168 registers (2x4 and
+2x2 warp tiles, 128-148 registers, 2-4 resident) were not faster than the
+245-register 4x4 one. What remains between this kernel and MMQ's 443 ms is
+the per-sub-block float fold: four conversions, multiplies and fused adds a
+fragment for every 32 (16 on Q6_K) elements, where MMQ folds with its
+scales held as half2 and the minimum through the activation block's
+precomputed sum.
+
+End to end, `scripts/vs-llamacpp.sh` prefill 514 on the T4, CUDA both
+arms, every binary's tune cache warmed first (a cold one tunes inside its
+row: an earlier job that warmed only the branch read main slower for that
+reason alone), ratio = A over B in tok/s:
+
+    Llama-3.1-8B Q4_K_M (12 rounds, n=24)   pass 1             pass 2
+    A/A (the branch both arms)              0.998 (IQR 0.011)
+    main / branch (tuned)                   0.809 (0.016)      0.808 (0.013)
+    main / branch (deep forced everywhere)  0.785 (0.010)      0.779 (0.015)
+    branch (tuned) / llama.cpp b10825       1.094 (0.010)      1.091 (0.019)
+    absolute, warm speed -p 514             main 927-940 tok/s, branch 1141-1166 tok/s
+
+Every Llama-3.2-1B row (20 rounds, n=40) was REJECTED, the A/A included
+(IQR/median 0.11-0.23): an 80 ms prompt on a power-capped T4 does not
+resolve in this harness. The 8B gain is larger than the GEMM trial's 4-8% a
+shape; the warm per-kernel split of one prompt in the same jobs read the
+prompt's GEMMs at 546 ms on main against 461 tuned and 393 forced deep, but
+each arm there is a separate process at its own clock, so it is not an A/B.
+Forced deep beat the tuned choice end to end although the tuner keeps the
+shipping tile on both Q6_K shapes: a trial of one GEMM alone is not the
+prompt's mix. That is the next measurement for this tuner.
+
 ### `run` against `speed` on the A100
 
 The same job timed `jitllm run -n 128` token by token (a stamp on every

@@ -12,6 +12,7 @@ import (
 // rows in flight while the seam moves, each block's history moving at its own
 // geometry. The fixtures are F32 and take the families' bound.
 func TestBatchSeamMovesCarryEveryRowGemma4(t *testing.T) {
+	defer fusedRunsCheck(t, false)()
 	for _, name := range []string{"synth-gemma4", "synth-gemma4-kv", "synth-gemma4-moe", "synth-gemma4-e"} {
 		t.Run(name, func(t *testing.T) {
 			p, ok := existingModel(testmodels.Path(name + ".gguf"))

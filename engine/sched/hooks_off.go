@@ -4,3 +4,6 @@ package sched
 
 // workerWake is the test hook a release build compiles out (hooks_on.go).
 func workerWake(*Pool, int) {}
+
+// phaseHook is the test hook a release build compiles out (hooks_on.go).
+func phaseHook(int, int) {}

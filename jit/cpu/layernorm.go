@@ -42,39 +42,7 @@ func emitRowStat(n int, bias bool, mode RowMode) []byte {
 	// variance tail blends those lanes back to zero from Y10.
 	a.VPXOR(Y10, Y10, Y10)
 	sum := func(sub, subOne func(reg Reg, off int32)) {
-		a.VPXOR(Y0, Y0, Y0)
-		a.VPXOR(Y1, Y1, Y1)
-		a.VPXOR(Y2, Y2, Y2)
-		a.VPXOR(Y3, Y3, Y3)
-		a.MOVQ(R11, RSI)
-		if blocks := n / 32; blocks > 0 {
-			a.MOVimm(R10, int64(blocks))
-			lp := a.Label()
-			a.Bind(lp)
-			for i := 0; i < 4; i++ {
-				sub(Reg(int(Y4)+i), int32(32*i))
-				a.VADDPS(Reg(int(Y0)+i), Reg(int(Y0)+i), Reg(int(Y4)+i))
-			}
-			a.ADDimm(R11, 128)
-			a.DEC(R10)
-			a.JNZ(lp)
-		}
-		for off := (n / 32) * 32; off+8 <= n; off += 8 {
-			sub(Y4, 0)
-			a.VADDPS(Y0, Y0, Y4)
-			a.ADDimm(R11, 32)
-		}
-		for i := 0; i < n%8; i++ {
-			subOne(Y4, int32(4*i))
-			a.VADDPS(Y0, Y0, Y4)
-		}
-		a.VADDPS(Y0, Y0, Y1)
-		a.VADDPS(Y2, Y2, Y3)
-		a.VADDPS(Y0, Y0, Y2)
-		a.VEXTRACTF128(Y1, Y0, 1)
-		a.VADDPSx(Y0, Y0, Y1)
-		a.VHADDPSx(Y0, Y0, Y0)
-		a.VHADDPSx(Y0, Y0, Y0) // lane 0 = the total
+		sumRowAVX2(&a, n, sub, subOne, func(dst, t Reg) { a.VADDPS(dst, dst, t) })
 	}
 
 	if mode == RowMag {
@@ -151,28 +119,13 @@ func emitRowStat(n int, bias bool, mode RowMode) []byte {
 	}
 	a.MOVQ(R11, RSI)
 	a.MOVQ(R8, RCX)
-	if blocks := n / 32; blocks > 0 {
-		a.MOVimm(R10, int64(blocks))
-		lp := a.Label()
-		a.Bind(lp)
+	newRowWalk(&a, n, R11, RDX, R9, R8).run(func() {
 		for i := 0; i < 4; i++ {
 			one(Reg(int(Y4)+i), R8, int32(32*i))
 		}
-		a.ADDimm(R11, 128)
-		a.ADDimm(RDX, 128)
-		a.ADDimm(R9, 128)
-		a.ADDimm(R8, 128)
-		a.DEC(R10)
-		a.JNZ(lp)
-	}
-	for off := (n / 32) * 32; off+8 <= n; off += 8 {
+	}, func() {
 		one(Y4, R8, 0)
-		a.ADDimm(R11, 32)
-		a.ADDimm(RDX, 32)
-		a.ADDimm(R9, 32)
-		a.ADDimm(R8, 32)
-	}
-	for i := 0; i < n%8; i++ {
+	}, func(i int) {
 		d := int32(4 * i)
 		a.VMOVSSLoad(Y4, At(R11, d))
 		switch mode {
@@ -192,7 +145,7 @@ func emitRowStat(n int, bias bool, mode RowMode) []byte {
 			}
 		}
 		a.VMOVSSStore(At(R8, d), Y4)
-	}
+	})
 
 	a.VZEROUPPER()
 	a.RET()

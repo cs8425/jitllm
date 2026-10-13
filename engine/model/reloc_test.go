@@ -268,6 +268,9 @@ func TestPageBudgetResizesWhileServing(t *testing.T) {
 // first token and requires the same answer. It skips with the reason when the
 // second tier takes no blocks.
 func TestLayerRelocatesToAnotherDevice(t *testing.T) {
+	// Every block is on a card here, so no host run exists to fuse; the
+	// fused relocation is TestFusedRunsFollowARelocation.
+	defer fusedRunsCheck(t, false)()
 	for _, name := range relocModels() {
 		t.Run(name, func(t *testing.T) { layerRelocatesToAnotherDevice(t, jlmOf(t, testmodels.Path(name))) })
 	}
