@@ -36,6 +36,7 @@ func TestA64NewEncodingsMatchLLVM(t *testing.T) {
 		{"uzp2 v1.8h, v30.8h, v2.8h", func(a *A64) { a.UZP2h8(1, 30, 2) }, 0x4e425bc1},
 		{"prfm pldl1keep, [x12, #512]", func(a *A64) { a.PRFM(XReg(12), 512) }, 0xf9810180},
 		{"prfm pldl1keep, [x3]", func(a *A64) { a.PRFM(X3, 0) }, 0xf9800060},
+		{"prfm pldl2keep, [x1]", func(a *A64) { a.PRFMop(prfmPLDL2KEEP, X1, 0) }, 0xf9800022},
 		{"prfm pldl1keep, [x11, #32760]", func(a *A64) { a.PRFM(XReg(11), 32760) }, 0xf9bffd60},
 	} {
 		var a A64

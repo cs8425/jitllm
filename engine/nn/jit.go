@@ -260,6 +260,9 @@ type JIT struct {
 	// pool runs on the decode core set (physical P-cores). Decode is
 	// memory-bound and E-cores add no read bandwidth.
 	pool *sched.Pool
+	// look is the fused runs' idle work (lookahead.go); lookOff turns it off.
+	look    lookahead
+	lookOff bool
 	// narrow is the decode pool and wide, when non-nil, the prefill pool;
 	// pool is whichever of them the current phase runs on. See BeginPrefill.
 	narrow, wide *sched.Pool
@@ -1069,7 +1072,18 @@ func (f *JIT) KSliced() int64 {
 // region this JIT dispatches is a phase of one region. It reports whether it
 // opened one; a pool another user shares, a NUMA pool and a one-core pool do
 // not fuse, and their regions run as they always do.
-func (f *JIT) Fuse() bool { return f != nil && f.pool.Fuse() }
+func (f *JIT) Fuse() bool {
+	if f == nil {
+		return false
+	}
+	if f.lookOff {
+		return f.pool.Fuse()
+	}
+	if w := f.pool.Max(); len(f.look.pos) < w {
+		f.look.pos = make([]aheadPos, w)
+	}
+	return f.pool.FuseWith(&f.look)
+}
 
 // Unfuse closes the region a true Fuse opened.
 func (f *JIT) Unfuse() { f.pool.Unfuse() }

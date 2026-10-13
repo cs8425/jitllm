@@ -132,6 +132,10 @@ type State struct {
 	// one region each (SetMatVecGroups); Grouped counts the group calls.
 	grp      nn.MVGroup
 	groupOff bool
+	// aheads is the fused runs' lookahead sets, one per (block, op), and
+	// lookOff turns the lookahead off (fuse.go).
+	aheads  []nn.AheadSet
+	lookOff bool
 	// residFold lets the o and down groups add their rows into the
 	// residual (WithResidualFold).
 	residFold bool
@@ -643,7 +647,8 @@ func (m *Model) newStateRange(nseq, maxSeq, lo, hi int) *State {
 	}
 	s := &State{m: m, c: m.Cfg, lo: lo, hi: hi, gpuLayers: lo, maxSeq: maxSeq, reqSeq: req, nseq: nseq,
 		devFallback: true, relocate: true, prof: m.opt.profile, outNorm: m.outNorm, outW: &m.output,
-		fuseOff: m.opt.noFuse, groupOff: m.opt.noGroups, residFold: m.opt.residFold}
+		fuseOff: m.opt.noFuse, groupOff: m.opt.noGroups, lookOff: m.opt.noLook,
+		residFold: m.opt.residFold}
 	s.holdHostRuns()
 	// A State over a prediction block projects through that block's head.
 	if lo < len(m.layers) {
@@ -3582,6 +3587,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 		} else {
 			kvd := c.KVDimAt(li)
 			// q, k and v as one region inside a fused run (fuse.go).
+			s.aheadOf(li, 0, [nn.MaxGroup]*tensor{&l.wo})
 			grouped := !c.AttnOutGate && !c.KVShared(li) && !l.vFromK && !c.MSAAt(li) &&
 				s.groupOf(s.h, [nn.MaxGroup]*tensor{&l.wq, &l.wk, &l.wv},
 					[nn.MaxGroup][]float32{s.q, s.kc, s.vc}, 3)
@@ -3721,6 +3727,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 				if plain {
 					s.grp.Resid, s.grp.Alpha = s.x, float32(c.ResidualScale)
 				}
+				s.aheadOf(li, 1, [nn.MaxGroup]*tensor{&l.gate, &l.up})
 				attnResid = plain && s.groupOf(src[:c.QDimAt(li)], [nn.MaxGroup]*tensor{&l.wo},
 					[nn.MaxGroup][]float32{s.h}, 1)
 				s.grp.Resid = nil
@@ -3828,6 +3835,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			// NFFN (Config.NFFNAt).
 			ff := c.NFFNAt(li)
 			gate, up, act := s.gate[:ff], s.up[:ff], c.Act
+			s.aheadOf(li, 2, [nn.MaxGroup]*tensor{&l.down})
 			if !s.groupOf(ffnIn, [nn.MaxGroup]*tensor{&l.gate, &l.up},
 				[nn.MaxGroup][]float32{gate, up}, 2) {
 				if err := s.mv(gate, l.gate, ffnIn); err != nil {
@@ -3845,6 +3853,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			if s.residFold && l.postFFNNorm == nil {
 				s.grp.Resid, s.grp.Alpha = s.x, float32(c.ResidualScale)
 			}
+			s.aheadNext(li)
 			grouped := s.groupOf(gate, [nn.MaxGroup]*tensor{&l.down}, [nn.MaxGroup][]float32{s.h}, 1)
 			ffnResid = grouped && s.grp.Resid != nil
 			s.grp.ActUp, s.grp.Resid = nil, nil

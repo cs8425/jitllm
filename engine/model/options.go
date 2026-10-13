@@ -29,6 +29,8 @@ type modelOpts struct {
 	noFuse bool
 	// noGroups runs a fused run's matvecs a phase each; see WithMatVecGroups.
 	noGroups bool
+	// noLook turns off the fused runs' weight lookahead; see WithLookahead.
+	noLook bool
 	// residFold adds the o and down projections into the residual inside
 	// their groups; see WithResidualFold.
 	residFold bool
@@ -128,6 +130,12 @@ func WithBlockFusion(on bool) Option { return func(l *loadOpts) { l.opt.noFuse =
 // run as one region with the activation's quantization folded in
 // (nn.MatVecPackedGroup). On by default, the same bits; off is the A/B arm.
 func WithMatVecGroups(on bool) Option { return func(l *loadOpts) { l.opt.noGroups = !on } }
+
+// WithLookahead sets whether a fused run's workers that find a phase drained
+// hint the next op's weights into the outer caches while the phase's last
+// chunks run (nn.JIT.SetAhead). On by default; it writes nothing a kernel
+// reads, so the bits are the same either way. Off is the A/B arm.
+func WithLookahead(on bool) Option { return func(l *loadOpts) { l.opt.noLook = !on } }
 
 // WithResidualFold sets whether a fused run's o and down groups add their rows
 // into the residual as each worker makes them, rather than in an add of its

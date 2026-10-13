@@ -68,6 +68,7 @@ type elemSet struct {
 	scale   *cpu.Code
 	softcap *cpu.Code
 	clamp   *cpu.Code
+	pflines *cpu.Code // the fused runs' lookahead (lookahead.go)
 	xielu   *cpu.Code // Apertus's ungated activation, its numbers a buffer
 }
 
@@ -146,6 +147,7 @@ func (s *elemSet) init(em *cpu.Emitters) {
 	s.scale = mustEmit("scale")(em.Scale())
 	s.softcap = mustEmit("softcap")(em.Softcap())
 	s.clamp = mustEmit("clamp")(em.Clamp())
+	s.pflines = mustEmit("prefetch_lines")(em.PrefetchLines())
 	s.softmax = mustEmit("softmax")(em.Softmax())
 	s.logSm = mustEmit("logsoftmax")(em.LogSoftmax())
 	for i, k := range cpu.Gated {

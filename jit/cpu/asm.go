@@ -934,6 +934,10 @@ func (a *Buf) PREFETCHT0(m Mem) { a.prefetch(1, m) }
 // PREFETCHNTA loads without polluting the caches, for a stream read once.
 func (a *Buf) PREFETCHNTA(m Mem) { a.prefetch(0, m) }
 
+// PREFETCHT2 asks for a line into the outer levels (0F 18 /3): the fused
+// region's lookahead, whose lines another core reads.
+func (a *Buf) PREFETCHT2(m Mem) { a.prefetch(3, m) }
+
 func (a *Buf) prefetch(hint uint8, m Mem) {
 	idx := noIndex
 	if m.hasIndex() {

@@ -64,6 +64,7 @@ func emitterCalls() []emitterCall {
 		cs = append(cs, emitterCall{name, table, direct})
 	}
 	add("axpy", func(em *Emitters) ([]byte, error) { return em.Axpy() }, emitted(EmitAxpy()))
+	add("prefetch_lines", func(em *Emitters) ([]byte, error) { return em.PrefetchLines() }, emitted(EmitPrefetchLines()))
 	add("scale", func(em *Emitters) ([]byte, error) { return em.Scale() }, emitted(EmitScale()))
 	add("softcap", func(em *Emitters) ([]byte, error) { return em.Softcap() }, emitted(EmitSoftcap()))
 	add("softmax", func(em *Emitters) ([]byte, error) { return em.Softmax() }, emitted(EmitSoftmax()))
