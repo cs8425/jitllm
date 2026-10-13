@@ -33,35 +33,36 @@ import (
 // "qwen4exp".
 
 // q4eFault breaks one piece of the graph, set only by a gate
-// (Config.q4eFault) to show the fixture can see it.
-type q4eFault uint8
+// (Config.q4eFault) to show the fixture can see it. It is the device's type
+// (nn.Q4EPlan.Fault), so one violation reaches both tiers.
+type q4eFault = nn.Q4EFault
 
 const (
-	q4eFaultNone q4eFault = iota
+	q4eFaultNone = nn.Q4EFaultNone
 	// q4eFaultNoGate mixes the streams by their plain mean.
-	q4eFaultNoGate
+	q4eFaultNoGate = nn.Q4EFaultNoGate
 	// q4eFaultPlainPlace adds the sublayer output into every stream at
 	// weight one.
-	q4eFaultPlainPlace
+	q4eFaultPlainPlace = nn.Q4EFaultPlainPlace
 	// q4eFaultNoNGram drops the n-gram embedding.
-	q4eFaultNoNGram
+	q4eFaultNoNGram = nn.Q4EFaultNoNGram
 	// q4eFaultNoNGramConv drops its convolution.
-	q4eFaultNoNGramConv
+	q4eFaultNoNGramConv = nn.Q4EFaultNoNGramConv
 	// q4eFaultNoEOSReset hashes across an end-of-sequence token.
-	q4eFaultNoEOSReset
+	q4eFaultNoEOSReset = nn.Q4EFaultNoEOSReset
 	// q4eFaultDenseQSA attends every key on the QSA blocks.
-	q4eFaultDenseQSA
+	q4eFaultDenseQSA = nn.Q4EFaultDenseQSA
 	// q4eFaultQSAFirstKey scores a QSA block by its first key, unpooled.
-	q4eFaultQSAFirstKey
+	q4eFaultQSAFirstKey = nn.Q4EFaultQSAFirstKey
 	// q4eFaultNoTail drops the incomplete tail from a QSA selection.
-	q4eFaultNoTail
+	q4eFaultNoTail = nn.Q4EFaultNoTail
 	// q4eFaultSiLUGate gates the delta rule's output by silu, qwen3next's.
-	q4eFaultSiLUGate
+	q4eFaultSiLUGate = nn.Q4EFaultSiLUGate
 	// q4eFaultUnscaledGate drops the 1/H before the gate's silu.
-	q4eFaultUnscaledGate
+	q4eFaultUnscaledGate = nn.Q4EFaultUnscaledGate
 	// q4eFaultHalfPlace places at sigmoid(inject/H), without the factor of
 	// two that centres a weight on one.
-	q4eFaultHalfPlace
+	q4eFaultHalfPlace = nn.Q4EFaultHalfPlace
 )
 
 // Q4E reports that the model is Qwen3.8-Flash-Next's graph: low-rank gated

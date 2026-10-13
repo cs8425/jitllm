@@ -191,7 +191,7 @@ def convert(d, dst):
             return json.load(f)
 
     ModelBase.load_hparams = staticmethod(published)
-    sys.argv = ["convert_hf_to_gguf.py", d, "--outtype", "f32", "--outfile", dst]
+    sys.argv = ["convert_hf_to_gguf.py", d, "--outtype", "f32", "--no-mtp", "--outfile", dst]
     lcpp.main()
 
 
