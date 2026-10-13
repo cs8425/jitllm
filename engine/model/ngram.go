@@ -135,7 +135,7 @@ func (s *State) ngramApply(li int, l *layer, x []float32, n int, order []int,
 			if err := s.m.ngram.f.ReadRow(s.m.ngram.e, row, g.raw, g.scr); err != nil {
 				return err
 			}
-			if err := ngramRow(g.emb[r*w+hh*rd:r*w+(hh+1)*rd], s.m.ngram.typ, g.raw); err != nil {
+			if err := ngramRow(g.emb[r*w+hh*rd:r*w+(hh+1)*rd], s.m.ngram.typ, g.raw, g.scr); err != nil {
 				return err
 			}
 		}
@@ -210,10 +210,13 @@ func (s *State) ngramApply(li int, l *layer, x []float32, n int, order []int,
 }
 
 // ngramRow decodes one table row into dst.
-func ngramRow(dst []float32, t quant.Type, raw []byte) error {
+func ngramRow(dst []float32, t quant.Type, raw, scratch []byte) error {
 	switch t {
 	case quant.F32, quant.F16, quant.BF16:
 		nn.Row32JIT(dst, t, raw, 0, len(dst))
+		return nil
+	case quant.IQ4_NL:
+		nn.RowIQ4NL32JIT(dst, raw, scratch)
 		return nil
 	}
 	return fmt.Errorf("model: an n-gram table row of %v", t)
