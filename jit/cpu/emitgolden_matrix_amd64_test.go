@@ -46,6 +46,35 @@ func TestAVX2MatrixEmittersAreByteStable(t *testing.T) {
 	m.check("avx2_matrix")
 }
 
+// BenchmarkMatrixEmission is the cold emission cost of the amd64 packed
+// family: every format's fused kernel, the tiled kernel at a real shape and
+// the stationary GEMM, once each per iteration, under the host's dot
+// sequence. A measurement, not a gate (RULE 4).
+func BenchmarkMatrixEmission(b *testing.B) {
+	for b.Loop() {
+		for _, q := range quant.PackedTypes {
+			EmitPackedMatVecFusedAhead(q, DotVNNI, 2)
+			EmitPackedMatMulTiled(q, 4096, 4096, 2, DotVNNI)
+			EmitPackedMatMulStationary(q, 4096, 4096, 256, DotVEX)
+			EmitGEMMWindow(q, 4, 2, 16, 256)
+		}
+	}
+}
+
+// BenchmarkNEONMatrixEmission is BenchmarkMatrixEmission's arm64 twin.
+func BenchmarkNEONMatrixEmission(b *testing.B) {
+	neonDot(true, func() {
+		for b.Loop() {
+			for _, q := range quant.PackedTypes {
+				EmitA64PackedMatVecFused(q, PackedFusedGroupOf(q), 2)
+				EmitA64PackedMatMulTiled(q, 4096, 4096, 2)
+				EmitA64PackedMatMulStationary(q, 4096, 4096, 256)
+				emitGEMMA64K(q, 4, 2, 16, 256)
+			}
+		}
+	})
+}
+
 // TestSSEMatrixEmittersAreByteStable pins the SSE tier's side: its packed and
 // fused kernels, and the refusals standing for the prefetch, tile and
 // stationary forms (sse_refuse.go), so a port lands as a recorded change.
