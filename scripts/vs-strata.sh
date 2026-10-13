@@ -48,6 +48,28 @@ IDS="$("$JITLLM" tokenize "$JITLLM_PATH" "$PROMPT" 2>&1 | sed -n 's/^[0-9]* toke
 [ -n "$IDS" ] || { echo "could not tokenize the prompt" >&2; exit 1; }
 
 psi() { awk '/^some/{split($2,a,"="); print a[2]}' /proc/pressure/cpu 2>/dev/null || echo 0; }
+# The node's CPUs, which both engines' host experts run on, and how busy they
+# are before a sample (corebusy.py): PSI cannot see a tenant on a box with
+# CPUs to spare (RULE 2), and a tenant on these cores is a cliff.
+CPUS="$(numactl -H | sed -n "s/^node $NODE cpus: //p" | tr ' ' ',')"
+BUSYMAX="${STRATA_VS_BUSY:-20}"
+busy() { "$(dirname "$0")/corebusy.py" "$CPUS" 2>/dev/null || echo 0; }
+# Waits for the node to go quiet (STRATA_VS_WAIT seconds at most), so a
+# tenant that started first is outlasted rather than measured.
+quiet() {
+  local waited=0 b g
+  while :; do
+    b="$(busy)"
+    g="$(nvidia-smi -i "$GPU" --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')"
+    awk -v b="$b" -v m="$BUSYMAX" -v g="${g:-0}" 'BEGIN{exit !(b <= m && g < 600)}' && return 0
+    if [ "$waited" -ge "${STRATA_VS_WAIT:-0}" ]; then
+      echo "node $NODE is ${b}% busy, GPU $GPU holds ${g} MiB, before a sample: refusing" >&2
+      return 1
+    fi
+    sleep 30
+    waited=$((waited + 30))
+  done
+}
 gpuclk() { nvidia-smi -i "$GPU" --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | tr -d ' '; }
 
 jitllm_run() {
@@ -79,11 +101,13 @@ fi
 echo "jitllm $(basename "$JITLLM_PATH") ($JITLLM_ENV) vs $NAME_B on GPU $GPU, node $NODE: decode $N tokens after the prompt [$IDS], $ROUNDS ABBA rounds; log $LOG"
 nvidia-smi -i "$GPU" --query-gpu=name,driver_version --format=csv,noheader
 # The soak: one sample of each, unused.
+quiet || exit 75
 echo ">> soak"
 $A >/dev/null || true
 $B >/dev/null || true
 ratios=()
 for r in $(seq 1 "$ROUNDS"); do
+  quiet || exit 75
   p="$(psi)"
   if awk -v p="$p" 'BEGIN{exit !(p > 25)}'; then
     echo "round $r: PSI some avg10 $p > 25: the box is busy, refusing" >&2
