@@ -55,6 +55,65 @@ message ChatPrompt {
   optional string system = 2;
   bool add_generation_prompt = 3;
   string template_name = 4;
+
+  // Functions the model may call, handed to its chat template as the OpenAI
+  // API's `tools`. Withheld when `tool_choice` is NONE.
+  repeated Tool tools = 5;
+  ToolChoice tool_choice = 6;
+}
+
+// Tool is one function the model may call: the OpenAI API's
+// {"type": "function", "function": {name, description, parameters, strict}}.
+message Tool {
+  string name = 1;
+  string description = 2;
+  // The parameters as a JSON Schema document, text, its key order kept.
+  string parameters_json = 3;
+  // Passed to the template as the API's `strict`.
+  optional bool strict = 4;
+}
+
+enum ToolChoiceMode {
+  TOOL_CHOICE_MODE_UNSPECIFIED = 0;
+  // No calls; the tools are withheld from the template.
+  TOOL_CHOICE_MODE_NONE = 1;
+  TOOL_CHOICE_MODE_AUTO = 2;
+  // At least one call to a declared tool, held to the model's own tool-call
+  // syntax by a grammar.
+  TOOL_CHOICE_MODE_REQUIRED = 3;
+  // A call to the tool `name`.
+  TOOL_CHOICE_MODE_FUNCTION = 4;
+}
+
+message ToolChoice {
+  ToolChoiceMode mode = 1;
+  // The tool a FUNCTION choice names; it must be one of `tools`.
+  string name = 2;
+  // At most one call in the reply (the API's parallel_tool_calls false).
+  bool single_call = 3;
+}
+
+// ResponseFormat is the OpenAI API's response_format. It is turned into a
+// grammar by the code the HTTP surface runs, so a schema either surface
+// builds the other builds, and one it refuses the other refuses in the same
+// words.
+message ResponseFormat {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    // No constraint.
+    TYPE_TEXT = 1;
+    // Any JSON object.
+    TYPE_JSON_OBJECT = 2;
+    // A sentence of `json_schema`.
+    TYPE_JSON_SCHEMA = 3;
+  }
+  Type type = 1;
+  // The schema document, for TYPE_JSON_SCHEMA.
+  string json_schema = 2;
+  string name = 3;
+  // Accepted for compatibility: the grammar always holds the reply to the
+  // schema, so there is no non-strict mode to select.
+  optional bool strict = 4;
 }
 
 message GenerateRequest {
@@ -106,6 +165,30 @@ message GenerateRequest {
   // llama.cpp's json-schema-to-grammar builds, anything else refused by
   // name. Not with `grammar`.
   string json_schema = 32;
+
+  // The OpenAI API's response_format. Not with `grammar` or `json_schema`, and
+  // not with a forced tool call: each is one constraint.
+  ResponseFormat response_format = 33;
+
+  // The number of continuations of one prompt (the API's `n`), 0 or 1 for one.
+  // The prompt is prefilled once; choice i samples with seed + i of
+  // `sampling.seed` (a random base when unset). Events carry their `choice`.
+  int32 n = 34;
+
+  // Per-token log-probabilities of the model's raw distribution, before
+  // temperature, penalties and top-k/top-p/min-p, with the `top_logprobs`
+  // (0 to 20) most likely alternatives at each step. top_logprobs needs
+  // logprobs; neither is accepted with `echo_prompt`.
+  bool logprobs = 35;
+  optional int32 top_logprobs = 36;
+
+  // Send a GenerateUsage event once every choice has finished: the API's
+  // stream_options.include_usage. Complete always reports usage.
+  bool include_usage = 37;
+
+  // The request's claim on the host budget: "high" or "normal"; empty leaves
+  // it as it is (the OpenAI surface's jitllm_priority).
+  string priority = 38;
 }
 
 // GenerateResponse is one event. The oneof is deliberate: a token stream that
@@ -116,7 +199,49 @@ message GenerateResponse {
     GenerateStarted started = 1;
     GenerateToken token = 2;
     GenerateFinished finished = 3;
+    // Tool calls the reply made, each sent as soon as its markup closes.
+    GenerateToolCalls tool_calls = 4;
+    // Sent once, last, when the request set include_usage.
+    GenerateUsage usage = 5;
   }
+  // The continuation an event belongs to, 0 unless the request set n above 1.
+  int32 choice = 6;
+}
+
+message GenerateToolCalls {
+  repeated ToolCall calls = 1;
+  // The position of the first of `calls` among the choice's calls.
+  int32 first_index = 2;
+}
+
+// Usage is the OpenAI API's usage object. The prompt is counted once for the
+// request: every choice after the first restored it rather than ran it.
+message Usage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+  // Prompt tokens restored from the memory cache or a prompt store.
+  int32 cached_tokens = 4;
+}
+
+message GenerateUsage {
+  Usage usage = 1;
+}
+
+// TokenLogprob is a sampled token's log-probability and the most likely
+// alternatives at its step, most likely first.
+message TokenLogprob {
+  int32 token_id = 1;
+  // The token alone, decoded on its own: its bytes, which may be part of a rune.
+  string token = 2;
+  float logprob = 3;
+  repeated TopLogprob top = 4;
+}
+
+message TopLogprob {
+  int32 token_id = 1;
+  string token = 2;
+  float logprob = 3;
 }
 
 message GenerateStarted {
@@ -156,6 +281,8 @@ message GenerateToken {
   // partial UTF-8 sequence whose bytes are held back until it completes.
   string text = 2;
   int32 index = 3;
+  // Set when the request asked for logprobs.
+  TokenLogprob logprob = 4;
 }
 
 message GenerateFinished {
@@ -177,13 +304,37 @@ message GenerateFinished {
   // The session's position after this generation, so a caller continuing a
   // conversation knows where it is without a second call.
   int32 position = 9;
+
+  // Prompt tokens restored from the memory cache or a prompt store rather
+  // than computed: the API's prompt_tokens_details.cached_tokens.
+  int32 cached_tokens = 10;
 }
 
+// CompleteResponse is the accumulated generate. `started`, `text`,
+// `token_ids` and `finished` are the first choice's, as they were before
+// requests could ask for several; `choices` holds every choice, the first
+// again, and is where a reader of tool calls and logprobs looks.
 message CompleteResponse {
   GenerateStarted started = 1;
+  // The reply's text. When the request declared tools and the reply made
+  // calls, the text without the calls' markup.
   string text = 2;
   repeated int32 token_ids = 3;
   GenerateFinished finished = 4;
+  repeated CompleteChoice choices = 5;
+  Usage usage = 6;
+}
+
+message CompleteChoice {
+  int32 index = 1;
+  GenerateStarted started = 2;
+  string text = 3;
+  repeated int32 token_ids = 4;
+  repeated ToolCall tool_calls = 5;
+  // One per generated token, when the request asked for logprobs.
+  repeated TokenLogprob logprobs = 6;
+  // Its reason is TOOL_CALLS when the reply made calls.
+  GenerateFinished finished = 7;
 }
 
 message CancelRequest {

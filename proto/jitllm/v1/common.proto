@@ -84,6 +84,9 @@ enum FinishReason {
   FINISH_REASON_EOS = 3;
   FINISH_REASON_CANCELLED = 4;
   FINISH_REASON_ERROR = 5;
+  // The reply is one or more tool calls (the OpenAI surface's "tool_calls").
+  // The calls are in GenerateToolCalls events and CompleteChoice.tool_calls.
+  FINISH_REASON_TOOL_CALLS = 6;
 }
 
 // SamplingParams is the one sampler description every surface funnels into.
@@ -98,6 +101,11 @@ message SamplingParams {
   optional float repeat_penalty = 5;
   optional int32 repeat_last_n = 6;
   optional float min_p = 7;
+  // The engine's sampler has neither: a non-zero value is refused by name, as
+  // the OpenAI surface refuses it, and `repeat_penalty` is what to send. They
+  // exist so a request that carries them is answered, not silently run.
+  optional float presence_penalty = 8;
+  optional float frequency_penalty = 9;
 }
 
 // SpeculationParams turns on speculative decoding for a generate: a round

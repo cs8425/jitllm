@@ -149,5 +149,9 @@ func (s *TelemetryService) GetServerInfo(ctx context.Context, req *connect.Reque
 // Features names what this server does beyond the manifest, for a client to
 // switch its own features on by. A name is added, never renamed.
 func Features() []string {
-	return []string{"server_info", "model_aliases", "model_enable", "on_demand_load"}
+	return []string{"server_info", "model_aliases", "model_enable", "on_demand_load",
+		// The native generate path carries what the OpenAI routes do
+		// (docs/server.md, "The native API and the OpenAI routes").
+		"chat_tools", "response_format", "logprobs", "choices", "image_url", "stream_usage",
+		"model_capabilities"}
 }
