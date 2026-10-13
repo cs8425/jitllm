@@ -8,6 +8,10 @@ import (
 
 const q4eGoldScript = "scripts/qwen4expgold.py"
 
+func init() {
+	principleFixtures = append(principleFixtures, "synth-qwen4exp.gguf")
+}
+
 func openQ4E(t *testing.T, name string) (*Model, *c6Golden) {
 	t.Helper()
 	return openGolden(t, "qwen4exp", q4eGoldScript, name)

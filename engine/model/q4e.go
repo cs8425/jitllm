@@ -148,11 +148,13 @@ type q4eLayer struct {
 	ngNormK, ngNormQ, ngNormC, ngCv []float32
 }
 
-func (h *q4eHC) tensors() []*tensor { return []*tensor{&h.down, &h.up, &h.inj} }
+func (h *q4eHC) tensors() [3]*tensor { return [3]*tensor{&h.down, &h.up, &h.inj} }
 
-func (d *q4eLayer) tensors() []*tensor {
-	ts := append(d.attn.tensors(), d.ffn.tensors()...)
-	return append(ts, &d.ngKey, &d.ngVal)
+// tensors is every matrix of the block's, an array so binding them on the
+// decode path allocates nothing.
+func (d *q4eLayer) tensors() [8]*tensor {
+	return [8]*tensor{&d.attn.down, &d.attn.up, &d.attn.inj, &d.ffn.down, &d.ffn.up, &d.ffn.inj,
+		&d.ngKey, &d.ngVal}
 }
 
 // loadQ4EHC reads one hyper-connection's weights and checks their shapes.
