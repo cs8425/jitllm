@@ -44,7 +44,7 @@ python3 abstats.py $out.aa.tsv $win
 # accuracy: one full pass
 kill -CONT $J1; kill -STOP $J2
 echo "== accuracy jitllm (full pass, 233 words)"; ./decisionbench -url http://127.0.0.1:8081 -model $m -file centipedes-large.tsv -window 30m
-kill $J2; wait $J2 2>/dev/null; pids="$J1"
+kill -CONT $J2; kill $J2; wait $J2 2>/dev/null; pids="$J1"
 env $lenv $pin $L/llama-server -m $M/$m.gguf --port 8082 --host 127.0.0.1 -t 12 -c 8192 -np 1 $lng > $out.ll.log 2>&1 &
 LP=$!; pids="$J1 $LP"
 for i in $(seq 1 300); do curl -s localhost:8082/health | grep -q ok && break; sleep 1; done
