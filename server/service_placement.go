@@ -78,17 +78,18 @@ func (s *PlacementService) SetPlacement(ctx context.Context, req *connect.Reques
 	}), nil
 }
 
-// RelocateBlocks moves a contiguous block range between the host and the
-// device while serving. The engine's seam is a count (SetGPULayers(n): the
-// first n blocks are on the device), so a range that extends or trims the
-// device set is honoured. These are refused with their reason:
+// RelocateBlocks moves a contiguous block range while serving: between the
+// host and the devices, and between the devices of the session's tier.
+//
+// A range that is wholly on devices and names a device moves there, each
+// block's history with it (Engine.MoveBlocks). Otherwise the engine's seam is
+// a count (SetGPULayers(n): the first n blocks are on the device), so a range
+// that extends or trims the device set is honoured. These are refused with
+// their reason:
 //
 //	a hole in the middle   the seam is a count; there is no "blocks 3..7 on
 //	                       the card and 8..12 at home" to set.
-//	device -> device       the tier chooses which of its devices takes a
-//	                       block (fastest first) and exposes only the
-//	                       per-device COUNT. Naming a destination device per
-//	                       block would be a guess dressed as an API.
+//	a device not loaded    the tier owns the devices and is opened at load.
 //	a host-only model      there is no tier to move to.
 func (s *PlacementService) RelocateBlocks(ctx context.Context, req *connect.Request[v1.RelocateBlocksRequest]) (*connect.Response[v1.RelocateBlocksResponse], error) {
 	sess, err := s.E.Session(req.Msg.SessionId)
@@ -109,12 +110,13 @@ func (s *PlacementService) RelocateBlocks(ctx context.Context, req *connect.Requ
 			"session %q was loaded host-only; there is no device to move blocks to", sess.id))
 	}
 	if m.ToDeviceId != "" && !hasString(sess.lm.deviceIDs, m.ToDeviceId) {
-		return nil, unimplemented(
-			"relocate: this session's tier holds %v, and moving a block to %q would be a "+
-				"device-to-device move. The tier chooses which of its devices takes a block "+
-				"and exposes only the per-device count, so there is no per-block destination "+
-				"to set -- this is declined rather than approximated",
-			sess.lm.deviceIDs, m.ToDeviceId)
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf(
+			"relocate: session %q is on %v and %q is not one of them: the tier owns the "+
+				"devices and is opened at load. Load the model with every device you want "+
+				"to move between", sess.id, sess.lm.deviceIDs, m.ToDeviceId))
+	}
+	if m.ToDeviceId != "" && sess.onDevices(first, last) {
+		return s.moveBetweenDevices(sess, first, last, m.ToDeviceId)
 	}
 
 	start := time.Now()
@@ -282,4 +284,39 @@ func sameSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// moveBetweenDevices is RelocateBlocks for a range already on the session's
+// devices.
+func (s *PlacementService) moveBetweenDevices(sess *Session, first, last int, to string) (*connect.Response[v1.RelocateBlocksResponse], error) {
+	start := time.Now()
+	mv, err := s.E.MoveBlocks(sess, first, last, to)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	var declined []*v1.PlacementDecline
+	for _, li := range mv.Declined {
+		declined = append(declined, &v1.PlacementDecline{
+			BlockIndex: int32(li), DeviceId: to,
+			Reason: "the device refused the block; it stays where it was, with its history",
+		})
+	}
+	return connect.NewResponse(&v1.RelocateBlocksResponse{
+		Placement:   s.E.pbPlacement(sess),
+		BlocksMoved: int32(len(mv.Moved)),
+		Declined:    declined,
+		Millis:      millis(time.Since(start)),
+		Path:        pbRelocationPath(mv.Path),
+		History:     pbBytes(mv.KVBytes + mv.RecBytes),
+		HeadMoved:   mv.Head,
+	}), nil
+}
+
+// pbRelocationPath is model.BlockMove.Path on the wire.
+func pbRelocationPath(p string) v1.RelocationPath {
+	switch p {
+	case "host":
+		return v1.RelocationPath_RELOCATION_PATH_HOST
+	}
+	return v1.RelocationPath_RELOCATION_PATH_UNSPECIFIED
 }

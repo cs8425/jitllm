@@ -149,20 +149,7 @@ func (s *State) PositionBytes() uint64 { return s.historyAt(s.pos+1) - s.history
 func (s *State) historyAt(pos int) uint64 {
 	var b uint64
 	for li := s.kv.lo; li < len(s.kv.layers); li++ {
-		pg := &s.kv.layers[li]
-		if pg.p == 0 {
-			continue
-		}
-		n := pos
-		if pg.win > 0 && n > pg.win+pg.p {
-			n = pg.win + pg.p
-		}
-		per := uint64(pg.pp) * 4 / uint64(pg.p) // a key's and a value's row
-		if pg.latent {
-			b += uint64(n) * per
-		} else {
-			b += 2 * uint64(n) * per
-		}
+		b += s.blockHistoryAt(li, pos)
 	}
 	return b
 }

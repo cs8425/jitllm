@@ -3101,7 +3101,48 @@ under `numactl --membind=0`), `model.TestScoreRowsFollowTheReach` (sizing at
 the context fails it), `server.TestAServerUnderLoadStaysUnderItsBound` (the
 ledger of the 1B under 16 distinct prompts with 2 GiB available).
 
+## ★ 16e. A BLOCK MOVES BETWEEN TWO DEVICES AS A CALL OF ITS OWN, AND jitllmd NO LONGER REFUSES IT.
+
+`jitllmd place -move A:B -to DEV` (PlacementService.RelocateBlocks) refused a
+device destination the session was already on, with the reason "the tier
+exposes only the per-device count, so a per-block destination would be a guess
+dressed as an API". That was a choice of the code, not a limit (RULE 11e): the
+tier already placed a block by name (`PrepLayerOn`, WithPlacement) and said
+where each block was (`DeviceOf`). The only engine route between two cards was
+`State.SetDevice(b)`, which brings every block and all history home and offers
+the model again, so cuda:0 -> cuda:1 was cuda:0 -> host -> cuda:1.
+
+`State.MoveBlocks(lo, hi, to)` is the call: each block's history comes home
+(MigrateKV copies, so the source keeps its rows until the target has them),
+the target takes the block by name, which frees it on the source, and the
+history goes up; the projection follows when none of the State's blocks is
+left beside it, and the copy it leaves is freed (`devTier.dropHead`) instead of
+sitting on a card that serves none of the model. jitllmd's RelocateBlocks
+calls it for a range already on the session's devices; the CLI prints the
+history moved and its path, and the TUI's engine page moves every device block
+to the tier's next device on `d`.
+
+- **A block another session is using does not move.** The weights are the
+  model's and the route per block is one (`GPU.own`), so a move for one
+  session would take the block from under another. Refused by name; a route
+  per session would be the change that lifts it.
+- **`GPU.Layers`' head-on-another-device arm is reached now.** Moving the upper
+  half of the blocks leaves the projection on a device that no longer holds
+  the last block: `TestBlocksMoveBetweenDevices`' `upper` arm runs it,
+  teacher-forced against an unmoved control (the section below is why no
+  placement reached it before).
+- `TestBlocksMoveBetweenDevices` runs the relocation models (every principle
+  fixture and mixture, Llama-3.2-1B) on two devices of one tier
+  (`JITLLM_MOVE_DEVICES`, the laptop's card under CUDA and Vulkan by default):
+  zero prompt rows recomputed, every block on the target, the logits before
+  the move bit-identical, after it inside the two backends' band (largest
+  0.52 on Llama-3.2-1B), and bit-identical where both devices run the same
+  kernels. With the history's upload removed it fails at the first token after
+  the move (12.6 on Llama-3.2-1B).
+
 ## GPU.Layers' head-on-another-device arm is dead code
+
+(Moving blocks between devices reaches this arm now: 16e.)
 
 ★★★ **AND `GPU.Layers`' HEAD-ON-ANOTHER-DEVICE ARM IS DEAD CODE, ESTABLISHED
 BY THREE FAILED ROUTES RATHER THAN BY READING IT.** The arm issues

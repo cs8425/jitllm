@@ -921,8 +921,14 @@ func (g *GPU) PrepHeadOn(name string, h *nn.Head) (bool, error) {
 		return false, nil
 	}
 	g.mu.Lock()
+	prev := g.head
 	g.head = d
 	g.mu.Unlock()
+	// The copy the head moved from is freed when no block is left on that
+	// device to share its scratch (devTier.dropHead).
+	if prev != nil && prev != d {
+		prev.dropHead()
+	}
 	return true, nil
 }
 
