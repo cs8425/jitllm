@@ -153,10 +153,10 @@ var decisionDevViolations = map[string]decisionDevViolation{
 	}},
 	// The device reads which blocks are local from the plan (mb.local): every
 	// block global there attends over every row at the global base.
-	// The head's own epsilon is read when the device's head is built
-	// (clefDevHead): a norm epsilon of 1 there alone moves the answers.
-	"clef":         {"the device head's LayerNorm epsilon at 1", clefDevEps},
-	"clef-fixture": {"the device head's LayerNorm epsilon at 1", clefDevEps},
+	// The device reads its own copy of the head (clefDevHead): with the joint
+	// score gated off there, only the prior answers on the device.
+	"clef":         {"the device head's joint score gated off", clefDevGateOff},
+	"clef-fixture": {"the device head's joint score gated off", clefDevGateOff},
 	"laya": {"every block global on the device", func(m *Model) func() {
 		mb := m.enc.mb
 		was := mb.local
@@ -299,13 +299,14 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 	}
 }
 
-// clefDevEps builds the device's copy of Clef's head with a LayerNorm epsilon
-// of 1, which the host's head does not read.
-func clefDevEps(m *Model) func() {
+
+// clefDevGateOff hands the device a copy of Clef's head whose joint score is
+// gated off (the residual gate's value zero), which the host's head does not
+// read.
+func clefDevGateOff(m *Model) func() {
 	h := m.clefDevHead()
-	was := h.Eps
 	cp := *h
-	cp.Eps = 1
+	cp.Scales[2] = 0
 	m.bind.Lock()
 	m.clefDev = &cp
 	m.bind.Unlock()
@@ -313,6 +314,5 @@ func clefDevEps(m *Model) func() {
 		m.bind.Lock()
 		m.clefDev = h
 		m.bind.Unlock()
-		h.Eps = was
 	}
 }

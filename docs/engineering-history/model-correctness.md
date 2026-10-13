@@ -9315,3 +9315,22 @@ layer attended at the wrong width (layer 0 off from its first block); the
 encoder and the head now each hold the set for their own geometry
 (`JIT.AttnSetFor`). The real checkpoint could not have shown it: 1024 wide at
 16 heads, both widths are 64.
+
+### Clef-Flash
+
+Clef-Flash is qwen35 with a joint schema head (`jlm.DecisionClef`): one prompt
+per request, every row's final residual kept through the prefill
+(`State.rowTap`, under an embedding mode that pools nothing so no output
+projection runs), and the head over them -- on the host's generated kernels,
+or on the device holding the output projection as a program of
+`kernels.DH*` launches (`jit/gpu/tier/dechead.go`). The random fixture
+(`scripts/clefgold.py fixture`: the release's classes, every parameter and
+persistent buffer random) is held to Clef's own code to 1.7e-6 on a logit,
+and llama.cpp agrees with both to the reference's rounding.
+
+The one bug on the way was in the fixture, not the engine: randomising
+`named_buffers()` included the rotary's `inv_freq`, which is not persistent,
+so the in-memory model the first goldens came from was one no checkpoint can
+hold (0.16 of a logit off, every row but the first matching the reloaded
+backbone to 2e-5). The goldens now come from the checkpoint as written, read
+back as the release is read, and only persistent tensors are randomised.

@@ -2,6 +2,7 @@
 Cloudflare/clef-flash), for engine/model's decision gates.
 
     python -I scripts/clefgold.py fixture <clef_dir> <requests_dir> <out_dir>
+    python -I scripts/clefgold.py real    <clef_dir> <requests_dir> <out_dir>
 
 clef_dir holds the release's joint_schema_model.py, config.json,
 joint_head_config.json and its tokenizer (tokenizer.json,
@@ -32,8 +33,6 @@ import types
 
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import refenv  # noqa: E402
 
 
 def load_reference(clef_dir):
@@ -93,6 +92,8 @@ def fixture(clef_dir, requests_dir, out_dir):
     from safetensors.torch import save_file
     from transformers import AutoTokenizer, Qwen3_5Config, Qwen3_5ForConditionalGeneration
     jsm = load_reference(clef_dir)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import refenv
     lcpp = refenv.lcpp_src()
     work = os.path.join(out_dir, "clef-fixture.src")
     shutil.rmtree(work, ignore_errors=True)
@@ -157,8 +158,31 @@ def fixture(clef_dir, requests_dir, out_dir):
         print(path)
 
 
+def real(clef_dir, requests_dir, out_dir):
+    """The release (load_release_model's classes) in float32 on the CPU, with
+    the same goldens as the fixture's, as clef.<request>.reference.json."""
+    from safetensors.torch import load_file
+    from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
+    jsm = load_reference(clef_dir)
+    tok = AutoTokenizer.from_pretrained(clef_dir)
+    backbone = Qwen3_5ForConditionalGeneration.from_pretrained(clef_dir, dtype=torch.float32).eval()
+    with open(os.path.join(clef_dir, "joint_head_config.json")) as f:
+        head = jsm.JointSchemaHead(**json.load(f)).float().eval()
+    head.load_state_dict(load_file(os.path.join(clef_dir, "joint_head.safetensors")), strict=True)
+    head = head.float()
+    model = jsm.ClefModel(backbone, head).eval()
+    for name, body in requests(requests_dir):
+        g = goldens(jsm, model, tok, body)
+        path = os.path.join(out_dir, "clef.%s.reference.json" % name)
+        with open(path, "w") as f:
+            json.dump(g, f, indent=1)
+        print(path)
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 5 and sys.argv[1] == "fixture":
         fixture(*sys.argv[2:5])
+    elif len(sys.argv) == 5 and sys.argv[1] == "real":
+        real(*sys.argv[2:5])
     else:
         sys.exit(__doc__)
