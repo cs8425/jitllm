@@ -8588,7 +8588,8 @@ func (g *devTier) layersSession(s backend.Session) {
 	}
 	if pe != nil {
 		hr := g.bs.head
-		w(g.bs.embIds, embIDs(pe.ids, R, hr.nrows))
+		g.subBytes.embIDs = embIDs(g.subBytes.embIDs, pe.ids, R, hr.nrows)
+		w(g.bs.embIds, g.subBytes.embIDs)
 		if err == nil {
 			err = lc.launch(g.bs.embK, gatherN/128, 128, hr.qs, hr.d, hr.sc, g.bs.embIds, bs.x)
 		}
@@ -8768,6 +8769,7 @@ type stagingBytes struct {
 	pn, koffs, kposs, rposs []byte
 	tok                     []byte // a ragged step's tokens, read home
 	mlaPOff                 []byte // a batched latent attention's rotary key slots
+	embIDs                  []byte // a prompt chunk's ids for the gather on the card (embIDs)
 	one                     [4]byte
 }
 

@@ -340,7 +340,44 @@ its sessions go, `jitllm decide` and `jitllm embed` take `-devices`).
 | `TestDecisionOnEveryDevice` | each readout's answers with every block on each device, and with half, against the host; a feature removed from the device's plan must move them past the band (d1, lev: NORM pairs for NEOX; laya: every block global) |
 | `TestDecisionRelocatesMidPrompt`, `TestDecisionRelocatesBetweenDevices` | blocks onto a device a third into a prompt and home at two thirds (history and recurrent state with them), and a Decider moved host, each device, host; the violation is the recurrent state lost on the way |
 | `TestDecisionPagesWithTheSameAnswer`, `TestLayaPagesWithTheSameAnswer` | half the block pages (d1, lev) or one frame (Laya, host and with half the blocks placed): the resident answer bit for bit |
-| `TestDecisionEncodeDoesNotAllocate` | a warm Laya question: no engine allocation on the host or the devices |
+| `TestDecisionDoesNotAllocate` | a warm question's prompt run and readout (Laya's encoder, head and scorer; a decoder's prefill and label pick) at zero engine heap allocations, on the host and with a seam and every block on each device; writing the prompt (the template, the tokenizer) is the request's text work and sits outside the window |
+| `TestDecisionMovesBetweenCards` | every block moved card to card (`State.MoveBlocks`, the history and recurrent summaries copied peer to peer) a third into a decoder's prompt and back at two thirds, and every model's between two questions: no prompt row computed again, bit for bit the unmoved run on two cards of one backend; the violation is the recurrent state lost on the way |
+| `TestDecisionDistributes` | blocks split across two cards at once, and across the host and two cards, every block where the placement names it, against the host; the violation is the device feature cut |
+| `TestDecisionBatchMatchesAlone`, `server.TestSystemOneBatchesConcurrentRequests` | several requests in one `Decider.DecideBatch` (a decoder's prompts as rows of one batch session, more than one in a step) and concurrent `/v1/systemone` requests answered as one batch, each against itself alone; a request that fails its checks fails alone; the violation is prompt chunks at reversed positions |
 | `TestLayaMatchesReference`, `TestLayaFeaturesAreLoadBearing` | a device arm each: every block placed against Laya's own code, and each feature removed from what the device is handed |
 | `TestEmbeddingsOnEveryDevice` | every BERT-family embedding model on each device against the host and llama.cpp; the violation is BERT's output norm without its weight |
 | `TestEveryModelRunsGenerated` | answers a request on every decision model it finds (`auditRun`) |
+
+## 11. The five principles on the decision models
+
+Each principle has a gate that runs Laya, d1 and lev (section 10's table):
+JIT and no Go compute through `TestEveryModelRunsGenerated`; relocation
+host to device mid-prompt and between questions (`TestDecisionRelocatesMidPrompt`,
+`TestDecisionRelocatesBetweenDevices`), card to card
+(`TestDecisionMovesBetweenCards`) and distribution over two cards and the host
+(`TestDecisionDistributes`); paging (`TestDecisionPagesWithTheSameAnswer`,
+`TestLayaPagesWithTheSameAnswer`); allocation (`TestDecisionDoesNotAllocate`);
+batching (`TestDecisionBatchMatchesAlone`). Laya has no history, so its
+relocation is between questions; its mid-prompt arm would move nothing.
+
+What the allocation gate found, each fixed: a host prompt made a closure a
+token (`prefillInto`), one a chunk for the embedding rows and one a block for
+the attention rows (now pool regions on the State, as decode's are); a reset
+State handed its KV pages to the collector and made them again (`kvPages.keepOnReset`);
+the encoder's page-in listed its matrices and spans every block (`encoder.pages`),
+its float GEMM, norms, bias rows and attention made a closure a call (`hotRegions.floatMM`,
+`encRegions`); on a device, a reset uploaded and freed its zeros every prompt
+(`devTier.recZeros`), a CUDA copy made a closure (`cudaCopy`), the embedding
+gather's promise and ids were made each chunk, and Laya's non-causal set was
+rebuilt -- its kernels compiled -- whenever a question's length moved it past
+twice or half its rows, which the gates' two requests do at every question:
+it now shrinks only after `visShrinkCalls` calls in a row need half of it
+(`tier.TestATowerIsBuiltForItsPicture`).
+
+Batching is per readout: a decoder's prompts are rows of one batch session; an
+encoder's sequences run one encoder pass each, inside the same batch call,
+because its blocks attend over every row of a call and the device's
+non-causal set has one window list, not a sequence partition beside the local
+windows. Packing several Laya sequences into one pass is open. Clef is not a
+container this converter writes (no `clef` decision kind), so no gate runs it.
+

@@ -52,6 +52,8 @@ type SchedulerStats struct {
 	// stalled nobody. MaxChunk is the most rows one prompt put into a single
 	// step beside a decoding row.
 	PromptRows, MixedRows, MaxChunk int
+	// MaxSeqs is the most sequences one step carried rows of.
+	MaxSeqs int
 }
 
 // SchedulerOption configures a Scheduler (NewScheduler).
@@ -231,6 +233,7 @@ func (sc *Scheduler) stepMixed(done []*Seq) ([]*Seq, error) {
 		return done, err
 	}
 	sc.stats.Steps++
+	sc.stats.MaxSeqs = max(sc.stats.MaxSeqs, decoding+len(chunks))
 	for _, ch := range chunks {
 		ch.s.fed += ch.k
 		sc.stats.PromptRows += ch.k

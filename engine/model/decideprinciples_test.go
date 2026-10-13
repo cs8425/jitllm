@@ -83,6 +83,7 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 			// the violation: a migration that carried nothing.
 			moved := func(t *testing.T, g *tier.GPU, lose bool) ([]float32, int) {
 				d.st.Reset()
+				rows0 := d.st.PrefillRows()
 				if _, err := d.st.Prefill(ids[:a]); err != nil {
 					t.Fatal(err)
 				}
@@ -111,6 +112,11 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 				lg, err := d.st.Prefill(ids[b:])
 				if err != nil {
 					t.Fatal(err)
+				}
+				// Each row ran once: the moves carried the history rather
+				// than computing it again.
+				if got := d.st.PrefillRows() - rows0; got != len(ids) {
+					t.Fatalf("%d prompt rows run for a %d-token prompt", got, len(ids))
 				}
 				return labels(lg), placed
 			}

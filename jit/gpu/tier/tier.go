@@ -1538,6 +1538,9 @@ type devShared struct {
 	// visCap is the rows the non-causal set is built for and visMax the
 	// largest grid a tower placed here takes (visrows.go). Guarded by mu.
 	visCap, visMax int
+	// visSmall counts the calls in a row the set was more than twice what
+	// they needed (ReserveRows), which shrinks it at visShrinkCalls.
+	visSmall int
 	// scratch is the budget the device's own buffers hold -- the block
 	// scratches and the staging -- and explicit the running sum of what
 	// charge and refund moved, which a scratch window subtracts so a weight or
@@ -1594,6 +1597,14 @@ type devShared struct {
 	recNext      backend.Buf
 	recNextBytes uint64
 	recCopies    map[[2]int]backend.Kernel
+	// recZeros is the zeros a seat's zeroing copies from (recZeroLayers),
+	// uploaded at the widest zeroing and kept while there are pools: a
+	// prompt that resets its sequence's state made and freed it each time.
+	recZeros      backend.Buf
+	recZerosBytes uint64
+	// recLs is resetRecRows' list of the blocks it zeroes, kept between
+	// calls.
+	recLs []*layer
 	// headSrc is the first byte of the projection the resident head was
 	// uploaded from, and headNormHost the norm it was built with: what a
 	// second State's PrepHead is compared against (adoptHead). altNorms are
