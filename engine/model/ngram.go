@@ -89,10 +89,7 @@ func (s *State) growNGram(n int) {
 // and its convolution history, after every slot's delta-rule state.
 func (s *State) ngramState(li, slot int) (prev, hist []float32) {
 	c := s.m.Cfg
-	n := c.ngramStateLen()
-	nseq := len(s.rstate[li]) / (s.dg.deltaStateLen() + n)
-	base := nseq * s.dg.deltaStateLen()
-	st := s.rstate[li][base+slot*n : base+(slot+1)*n]
+	st := s.recTail(li, slot)
 	return st[:c.NGram-1], st[c.NGram-1:]
 }
 

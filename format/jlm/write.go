@@ -409,7 +409,7 @@ func layoutOf(src *Source, fp Fingerprint) (*layout, error) {
 		} else if e.Block > maxBlock {
 			maxBlock = e.Block
 		}
-		if !alwaysResident(&e) && !expertPaged(&e) {
+		if !alwaysResident(&e) && !expertPaged(&e) && !RowTable(&e) {
 			if e.Role.Vision() {
 				perVis[e.Block] += qs + d + sc
 			} else {

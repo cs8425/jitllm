@@ -201,6 +201,18 @@ func (s *State) ResetRecurrent(row int) {
 	}
 }
 
+// recTail is sequence slot's tail of layer li's recurrent state (recTailLen),
+// empty on a layer with none.
+func (s *State) recTail(li, slot int) []float32 {
+	t := s.c.recTailLen(li)
+	if t == 0 || s.rstate == nil || s.rstate[li] == nil {
+		return nil
+	}
+	n := s.dg.deltaStateLen()
+	nseq := len(s.rstate[li]) / (n + t)
+	return s.rstate[li][nseq*n+slot*t : nseq*n+(slot+1)*t]
+}
+
 // recTailLen is what layer li's recurrent state carries per sequence after
 // the delta rule's: Qwen3.8-Flash-Next's n-gram predecessors and convolution
 // history on its n-gram block (ngram.go), nothing anywhere else. Every
