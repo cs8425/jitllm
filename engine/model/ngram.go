@@ -42,10 +42,11 @@ type ngramScratch struct {
 	// per row: the hashed table rows, the gathered embedding, its key and
 	// value, the normed residual, the gate per stream and the gated value
 	// (normed in place for the convolution once added).
-	idx                         []uint64
+	idx, ids                    []uint64
+	konst                       []byte
+	hwin, hnext                 []uint32
 	emb, key, val, q, gate, gv  []float32
 	gvn, conv, tap              []float32
-	win                         []int32
 	raw, scr                    []byte
 	dot                         *nn.AttnSet
 }
@@ -59,7 +60,9 @@ func (s *State) allocNGram() {
 	g := &ngramScratch{}
 	s.q4.ng = g
 	g.idx = make([]uint64, c.ngramHeads())
-	g.win = make([]int32, c.NGram)
+	g.ids = make([]uint64, c.NGram)
+	g.hwin, g.hnext = make([]uint32, c.NGram), make([]uint32, c.NGram)
+	g.konst = nn.NGramConsts(uint64(c.NGramEOS), c.NGramMul, c.NGramOff, c.NGramVoc)
 	g.raw = make([]byte, s.m.ngram.rowBytes)
 	g.scr = jlm.RowScratch()
 	hd := c.HCMult * c.NEmbd
@@ -117,11 +120,17 @@ func (s *State) ngramApply(li int, l *layer, x []float32, n int, order []int,
 		if t < 0 {
 			t = c.NGramImage
 		}
-		ngramWindow(g.win, prev, t, c.NGramEOS, c.q4eFault != q4eFaultNoEOSReset)
-		ngramHash(g.idx, g.win, c.NGramMul, c.NGramOff, c.NGramVoc, c.NGramHeadsPer)
-		// The predecessors move up one, stored as id+1.
-		copy(prev[1:], prev[:len(prev)-1])
-		prev[0] = float32(t) + 1
+		// The window is the token and its predecessors, whose bits the state
+		// holds (id+1, zero for none); the kernel hashes it and writes the
+		// next position's predecessors back.
+		g.hwin[0] = uint32(t)
+		for s, p := range prev {
+			g.hwin[s+1] = math.Float32bits(p)
+		}
+		nn.NGramHashJIT(g.idx, g.hnext, g.hwin, g.konst, g.ids, c.NGramHeadsPer, c.q4eFault != q4eFaultNoEOSReset)
+		for s := range prev {
+			prev[s] = math.Float32frombits(g.hnext[s])
+		}
 		for hh, row := range g.idx {
 			if err := s.m.ngram.f.ReadRow(s.m.ngram.e, row, g.raw, g.scr); err != nil {
 				return err
@@ -208,47 +217,6 @@ func ngramRow(dst []float32, t quant.Type, raw []byte) error {
 		return nil
 	}
 	return fmt.Errorf("model: an n-gram table row of %v", t)
-}
-
-// ngramWindow fills win with the token t and its predecessors (prev, stored
-// as id+1, zero for none): a predecessor at or before an end-of-sequence
-// token, or before the sequence, reads as eos. The token's own end of
-// sequence does not cut its window.
-//
-// TEMPORARY: Go integer logic, to be replaced by the generated hash kernel.
-func ngramWindow(win []int32, prev []float32, t, eos int32, reset bool) {
-	win[0] = t
-	cut := false
-	for s := 1; s < len(win); s++ {
-		v := int32(prev[s-1]) - 1
-		if v < 0 {
-			v = eos
-		}
-		if cut {
-			v = eos
-		}
-		if reset && v == eos {
-			cut = true
-		}
-		win[s] = v
-	}
-}
-
-// ngramHash writes each head's table row for the window.
-//
-// TEMPORARY: Go integer arithmetic, to be replaced by the generated hash
-// kernel.
-func ngramHash(idx []uint64, win []int32, mul, off, voc []uint64, per int) {
-	for n := 2; n <= len(win); n++ {
-		mixed := uint64(win[0]) * mul[0]
-		for j := 1; j < n; j++ {
-			mixed ^= uint64(win[j]) * mul[j]
-		}
-		for k := 0; k < per; k++ {
-			h := (n-2)*per + k
-			idx[h] = mixed%voc[h] + off[h]
-		}
-	}
 }
 
 // ngramGate is sigmoid(sign(s) * sqrt(max(|s|, 1e-6))) in place.

@@ -100,6 +100,10 @@ type Emitters struct {
 	// HCMix and ColPool are DeepSeek V4's hyper-connection mixer and its
 	// compressor's pool over positions; hc_const.go has both contracts.
 	HCMix   func(iters int, head bool) ([]byte, error)
+	// NGramHash is Qwen3.8-Flash-Next's n-gram table rows for a position,
+	// integer code one emitter serves on both amd64 tiers (ngram_const.go has
+	// the contract).
+	NGramHash func(n, per int, reset bool) ([]byte, error)
 	ColPool func() ([]byte, error)
 
 	// ---- family 3: attention (attn.go). All six non-tiled kernels are
@@ -328,6 +332,7 @@ var primaryEmitters = Emitters{
 	NarrowF16: func() ([]byte, error) { return must("narrow_f16", EmitNarrowF16()) },
 	RopeTable: EmitRopeTable,
 	HCMix:     EmitHCMix,
+	NGramHash: EmitNGramHash,
 	ColPool:   func() ([]byte, error) { return must("colpool", EmitColPool()) },
 
 	AttnScores:      EmitAttnScores,
@@ -428,6 +433,7 @@ var sseEmitters = Emitters{
 	NarrowF16: EmitNarrowF16SSE,
 	RopeTable: EmitRopeTableSSE,
 	HCMix:     EmitHCMixSSE,
+	NGramHash: EmitNGramHash,
 	ColPool:   EmitColPoolSSE,
 
 	AttnScores:      EmitAttnScoresSSE,
