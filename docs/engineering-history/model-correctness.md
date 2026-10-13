@@ -9315,3 +9315,74 @@ layer attended at the wrong width (layer 0 off from its first block); the
 encoder and the head now each hold the set for their own geometry
 (`JIT.AttnSetFor`). The real checkpoint could not have shown it: 1024 wide at
 16 heads, both widths are 64.
+
+## qwen4exp: Qwen3.8-Flash-Next (plan, before the code)
+
+The graph, read off llama.cpp's `src/models/qwen4exp.cpp` and its converter
+(`conversion/qwen4exp.py`), transformers' `modeling_qwen4_exp.py` and the
+header of unsloth's UD-Q4_K_XL GGUF, before anything is written. The
+`llama-eval-callback` transcription of a real file replaces this reading once
+a file is converted (RULE 7: read the artefact).
+
+48 blocks, every fourth full attention, the rest qwen35's gated delta rule
+(16 key heads, 48 value heads of 128, conv 4). Per block:
+
+    [PLE, block 2 only]  res += gated + silu(dilated_conv(norm_conv(gated)))
+    in  = HC mix(res)            -> attention or delta rule
+    res = res + 2*sigmoid(inject/H) * out          (each stream its own weight)
+    in  = HC mix(res)            -> 512-expert softmax top-10 renormalised,
+                                    one sigmoid-gated shared expert (640 wide)
+    res = res + 2*sigmoid(inject/H) * out
+
+    HC mix:  xn   = per-stream RMSNorm of the H=4 streams (gamma folded 1+w)
+             gate = sigmoid(up(silu(down(xn)/H)))     low rank 320
+             in   = mean over streams of gate*xn
+    head:    the mix with no inject, then output (untied); no output norm.
+
+- **Delta rule**: qwen35's, but the gated norm's gate is sigmoid, not silu
+  (`output_gate_type`). Value heads grouped as qwen35 (the tiled pairing,
+  `FlagDeltaKeyTiled`, is a question the fixture answers, not an assumption).
+- **Attention**: qwen3next's gated double-width query, per-head q/k norm,
+  interleaved M-RoPE on a quarter of the 256-wide head (sections 11/11/10),
+  24 heads over 2 kv heads; plus QSA: a 4-head indexer of 128 whose raw key
+  per position is cached; per complete block of 4 visible positions the mean
+  key, RMSNormed and rotated at the block's first position; score =
+  sum_h relu(q_h . k_block); the top budget/4 blocks plus the incomplete tail
+  are the only keys the query attends. Under budget+3 visible positions
+  (2051 on the real file) every key is selected and QSA is dense attention.
+- **PLE**: one layer. 16 heads (2-grams and 3-grams, 8 each) hash the token
+  and its two predecessors (`(t0*m0)^(t1*m1)^(t2*m2) mod p_h + off_h`, an EOS
+  in the window or the sequence start reading as EOS), gather 160-wide rows of
+  a 320M-row table into 2560, then key (per stream) and value projections,
+  a signed-sqrt sigmoid gate per stream, and a depthwise causal conv of
+  kernel 4 dilated by 3 over the normed gated value, whose 9-position history
+  is per-sequence recurrent state.
+
+Reuse map:
+
+| feature | jitllm machinery | new |
+|---|---|---|
+| delta rule, conv, shared expert, gated query, M-RoPE | qwen35 / qwen3next (`nn.IMRopeRuns`) | the sigmoid gated-norm gate: a flag and a gate kind on every tier |
+| four streams, stream-major residual, seam/paging/step | deepseek4 and gemma3n (`Config.streamHead`, `rowStreams`) | the mixer is not V4's Sinkhorn: a low-rank sigmoid gate and a mean, and a 2*sigmoid placement with the identity comb -- a kernel per tier beside `cpu.EmitHCMix` |
+| QSA indexer and selection | minimax-m3's block selection (indexer key as one more cached head) and deepseek32/V4's relu-sum scorer | mean-pooled, normed, rotated block keys; the tail rule |
+| per-layer table | gemma3n/gemma4's per-layer embedding (`pleTok`, `State.spanTok`) | the n-gram hash (int64, a generated kernel or setup integer arithmetic -- to be settled against RULE 8 with the user), the token history as recurrent state, the dilated conv state |
+| the 29 GB table | the pager (O_DIRECT, static pages) | a row-granular page array: a token reads 16 rows of 90 bytes, so the table is pages of rows read on demand under the budget, never resident whole and never mapped |
+| vision | qwen3vl_merger (the tower is Qwen3-VL's, per the converter) | the image token id stands in for picture rows in the hash |
+
+Arch code: `ArchQwen4Exp = 51`, the next flagship.
+
+Quant: UD-Q4_K_XL is not K-quant only. Per tensor: experts Q4_K/Q5_K
+(gate, up) and Q5_1/Q8_0 (down), attention and projections Q8_0, the
+indexer BF16, norms and router F32, and `per_layer_token_embd` IQ4_NL
+(160 x 320,001,536, 28.8 GB). IQ4_NL is outside `quant.Dequantable`; only a
+row gather reads it, so the work is the oracle dequantizer, then a gather
+kernel per tier. The other route, repacking IQ4_NL to Q8_0 at conversion
+(exact: IQ4_NL's values are a scale times an int8 table), costs 25 GB more.
+Strata's IQ2_XS/IQ3_XXS/IQ3_S/Q2_0 files are a follow-up, each oracle first.
+
+References that part (RULE 7m), to be decided as the code meets them:
+the indexer's 1/sqrt(head_dim) (transformers scales, llama.cpp does not; a
+positive scale on a relu sum selects the same blocks), the PLE EOS id
+(transformers takes the first of a list, llama.cpp's converter the last; the
+release states one), and MTP (both drop it; unsloth publishes it as a
+separate GGUF).
