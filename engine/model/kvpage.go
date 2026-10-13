@@ -851,7 +851,33 @@ func (s *State) migrateRec(li int, toDevice bool) bool {
 	if s.ld == nil || s.rconv == nil || li >= len(s.rconv) || s.rconv[li] == nil {
 		return true // an attention block, or a session with no recurrence
 	}
-	return s.ld.MigrateRec(li, s.rconv[li], s.rstate[li], toDevice)
+	return s.migrateRecLayer(li, toDevice)
+}
+
+// migrateRecLayer is LayerDevice.MigrateRec on block li's host arrays, with
+// the one part of a recurrent state the host keeps for itself:
+// Qwen3.8-Flash-Next's n-gram predecessors, which the host hashes whichever
+// side runs the block, so the device's copy of them is never the live one
+// and a migration home keeps the host's.
+func (s *State) migrateRecLayer(li int, toDevice bool) bool {
+	if toDevice || !s.c.NGramAt(li) {
+		return s.ld.MigrateRec(li, s.rconv[li], s.rstate[li], toDevice)
+	}
+	nseq := len(s.rstate[li]) / s.dg.stateStride()
+	np := s.c.NGram - 1
+	keep := make([]float32, nseq*np)
+	for slot := 0; slot < nseq; slot++ {
+		prev, _ := s.ngramState(li, slot)
+		copy(keep[slot*np:], prev)
+	}
+	if !s.ld.MigrateRec(li, s.rconv[li], s.rstate[li], false) {
+		return false
+	}
+	for slot := 0; slot < nseq; slot++ {
+		prev, _ := s.ngramState(li, slot)
+		copy(prev, keep[slot*np:(slot+1)*np])
+	}
+	return true
 }
 
 // The paged read walk. Every attention read in model/ goes through these four,
@@ -1586,7 +1612,7 @@ func (s *State) syncRecFromDevice() error {
 		if s.rconv[li] == nil {
 			continue // not a linear block
 		}
-		if !s.ld.MigrateRec(li, s.rconv[li], s.rstate[li], false) {
+		if !s.migrateRecLayer(li, false) {
 			// A capability gap, not a wrong answer: nothing is cached for this
 			// run rather than a summary that did not come from it.
 			s.kv.syncFailed++
@@ -1606,7 +1632,7 @@ func (s *State) pushRecToDevice() bool {
 		if s.rconv[li] == nil {
 			continue
 		}
-		if !s.ld.MigrateRec(li, s.rconv[li], s.rstate[li], true) {
+		if !s.migrateRecLayer(li, true) {
 			return false
 		}
 	}

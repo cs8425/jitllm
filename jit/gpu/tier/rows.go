@@ -1551,13 +1551,24 @@ func (g *devTier) prepRagLinear(bs *blockScratch, n int) bool {
 		}},
 		{&rk.conv, func() (*ir.Kernel, error) { return kernels.Conv1dRowsRuns(r.Conv, r.Chans, n) }},
 		{&rk.shift, func() (*ir.Kernel, error) { return kernels.Conv1dShiftRuns(r.Conv, r.Chans, n) }},
+		{&rk.ngConv, func() (*ir.Kernel, error) {
+			// Qwen3.8-Flash-Next's n-gram convolution, each run's history
+			// moved on through its rows (q4e.go).
+			q := bs.p.Q4E
+			if q == nil || q.NGramWidth == 0 {
+				return nil, nil
+			}
+			hd, hist := q.HCMult*bs.p.NEmbd, q.NGramDil*(q.NGramConv-1)
+			return kernels.Q4ENGramConv(hd, q.NGramConv, q.NGramDil, n, r.StateLen, r.StateLen-hist*hd,
+				true, q.Fault == nn.Q4EFaultNoNGramConv)
+		}},
 	} {
 		var kk *ir.Kernel
 		if kk, err = k.mk(); err == nil && kk != nil {
 			*k.dst, err = g.dev.Compile(kk)
 		}
 		if err != nil {
-			for _, c := range []backend.Kernel{rk.conv, rk.shift, rk.delta} {
+			for _, c := range []backend.Kernel{rk.conv, rk.shift, rk.delta, rk.ngConv} {
 				if c != nil {
 					closeKern(c)
 				}
