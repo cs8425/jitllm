@@ -5703,7 +5703,7 @@ weight fragments with ldmatrix.
   arm, on an sm_75 card through the m8n8k16 forms alone; a swapped k-half
   and a dropped step offset each fail it.
 
-Tesla T4 (sm_75, 70 W, power-capped under load at 800-1250 MHz), Kaggle,
+Tesla T4 (sm_75, 70 W, power-capped under load at 800-1250 MHz), a rented card,
 `TestGemmDeepSweep` / `TestGemmMMQSweep`: Llama-3.1-8B Q4_K_M's
 projections at 512 rows, every arm interleaved in each of 24 rounds of 5
 launches, the median per-round ratio to the shipping tile (m4n4 w2x2, 32 of
