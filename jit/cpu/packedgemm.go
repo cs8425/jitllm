@@ -73,29 +73,25 @@ func StationaryIntAcc(t quant.Type, win int, dk DotKind) bool {
 // kernel may touch (R14 is g; RBP is not saved by the trampoline). Args is the
 // caller's per-call copy and none of those fields is read back.
 func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]byte, error) {
-	q, ok := kernels.QuantOf(t)
-	if !ok {
-		return nil, fmt.Errorf("jit: EmitPackedMatMulStationary: %s has no device layout", t)
+	const who = "EmitPackedMatMulStationary"
+	f, err := packedFormatOf(t, who)
+	if err != nil {
+		return nil, err
 	}
 	if dk == DotVEX {
 		if err := PreVNNIPacked(t); err != nil {
 			return nil, err
 		}
 	}
-	sub, bits, biasK, biasArray := kernels.Layout(q)
-	perSuper, scOff := kernels.ScaleLayout(q)
-	signed := kernels.SignedPayload(q)
-	hi := kernels.HiPlane(q)
-	codes, err := hasCodes(q)
-	if err != nil {
-		return nil, err
-	}
+	q := f.q
+	sub, bits, biasK, biasArray := f.sub, f.bits, f.biasK, f.biasArray
+	perSuper, scOff := f.perSuper, f.scOff
+	signed, hi, codes := f.signed, f.hi, f.codes
 	if bits != 4 && !signed {
 		return nil, fmt.Errorf("jit: EmitPackedMatMulStationary: %s: an unsigned 8-bit payload has no form here", t)
 	}
-	pw, hw := sub*bits/32, sub*hi/32
-	words := pw + hw
-	halfSub := sub / 2
+	pw, hw := f.pw, f.hw
+	halfSub := f.halfSub
 	const group = 8 // rows per YMM: one lane a row
 	if k <= 0 || k%(sub*perSuper) != 0 || nrows <= 0 || nrows%group != 0 {
 		return nil, fmt.Errorf("jit: EmitPackedMatMulStationary: k=%d nrows=%d", k, nrows)
@@ -134,7 +130,7 @@ func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]
 	asTok := int32(8*nb + GEMMPad)
 	oTok := int32(4*nrows + GEMMPad)
 	ahTok := int32(4*(k/16) + GEMMPad)
-	sub16 := sub == Q8Block/2
+	sub16 := f.sub16
 
 	var args Args
 	off := func(p unsafe.Pointer) int32 {
@@ -191,8 +187,7 @@ func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]
 		return nil, fmt.Errorf("jit: EmitPackedMatMulStationary: %s needs %d vector registers", t, next)
 	}
 
-	narrow := NarrowD(t)
-	e8 := E8M0D(t)
+	narrow, e8 := f.narrow, f.e8
 	a.MOVLoad(RCX, At(RDI, oOut))
 	a.MOVLoad(R13, At(RDI, oRowStr))
 	a.MOVLoad(RBX, At(RDI, oRows))
@@ -291,15 +286,15 @@ func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]
 	// Container v27's SC stream (scstream.go): a straddling field's next word
 	// is one plane stride on, reached by stepping the cursor there and back --
 	// no register is free to hold the address.
-	stream := kernels.ScStream(q)
+	stream := f.stream
 	nextSC := func(r Reg) {
 		a.ADDQ(R9, R13)
 		a.VMOVDQULoad(r, Idx(R9, R15, 1, 0))
 		a.SUBQ(R9, R13)
 	}
 	for sn := 0; sn < perSuper; sn++ {
-		pairOff := int32(sub * sn / Q8Block * 8)
-		sh := byte((sn % perWordOf(biasArray)) * strideOf(biasArray))
+		pairOff := f.pairOff(sn)
+		sh := f.scShift(sn)
 
 		// --- decode this row group's sub-block into W, once -------------
 		mask, aux, dtmp, dpay := pool[0], pool[1], pool[2], eT
@@ -345,32 +340,13 @@ func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]
 			}
 			a.ADDQ(RSI, R13)
 		}
-		lanes := 0
-		if hi != 0 {
-			lanes = 8 / hi
-		}
 		for hwi := 0; hwi < hw; hwi++ {
 			a.PREFETCHT0(Idx(RSI, R13, 8, 0))
 			a.VMOVDQULoad(dpay, At(RSI, 0))
-			for half := 0; half < 2; half++ {
-				for w := 0; w < pw; w++ {
-					gi := w + half*pw
-					if gi/lanes != hwi {
-						continue
-					}
-					switch s := hi * (gi % lanes); {
-					case s < 4:
-						a.VPSLLD(dtmp, dpay, byte(4-s))
-						a.VPAND(dtmp, dtmp, aux)
-					case s == 4:
-						a.VPAND(dtmp, dpay, aux)
-					default:
-						a.VPSRLD(dtmp, dpay, byte(s-4))
-						a.VPAND(dtmp, dtmp, aux)
-					}
-					a.VPOR(W[half*pw+w], W[half*pw+w], dtmp)
-				}
-			}
+			f.hiFields(hwi, func(half, w, s int) {
+				hiField(&a, dtmp, dpay, aux, s)
+				a.VPOR(W[half*pw+w], W[half*pw+w], dtmp)
+			})
 			a.ADDQ(RSI, R13)
 		}
 
@@ -382,16 +358,7 @@ func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]
 			// one, the (signed) scale itself for a 16-wide format.
 			scw := pool[0]
 			a.VMOVDQULoad(scw, Idx(R9, R15, 1, 0))
-			if stream {
-				scField(avxSC(&a), eT, scw, pool[1], sn, false, nextSC)
-			} else {
-				if 24-sh > 0 {
-					a.VPSLLD(eT, scw, 24-sh)
-				} else {
-					a.VMOVAPSReg(eT, scw)
-				}
-				a.VPSRLD(eT, eT, 24)
-			}
+			scScale(&a, &f, eT, scw, pool[1], sn, nextSC)
 			if scOff != 0 {
 				a.VPSUBD(eT, eT, eO)
 			}
@@ -402,8 +369,7 @@ func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]
 				scField(avxSC(&a), eM, scw, pool[1], sn, true, nextSC)
 				a.VCVTDQ2PS(eM, eM)
 			} else if biasArray {
-				a.VPSLLD(eM, scw, 16-sh)
-				a.VPSRLD(eM, eM, 24)
+				scMinByte(&a, eM, scw, sh)
 				a.VCVTDQ2PS(eM, eM)
 			} else {
 				a.VCVTDQ2PS(eM, eT)
@@ -415,16 +381,7 @@ func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]
 			if perSuper > 1 {
 				scw := pool[0]
 				a.VMOVDQULoad(scw, Idx(R9, R15, 1, 0))
-				if stream {
-					scField(avxSC(&a), eT, scw, pool[1], sn, false, nextSC)
-				} else {
-					if 24-sh > 0 {
-						a.VPSLLD(eT, scw, 24-sh)
-					} else {
-						a.VMOVAPSReg(eT, scw)
-					}
-					a.VPSRLD(eT, eT, 24)
-				}
+				scScale(&a, &f, eT, scw, pool[1], sn, nextSC)
 				if scOff != 0 {
 					a.VPSUBD(eT, eT, eO)
 				}
@@ -437,8 +394,7 @@ func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]
 					a.VMULPS(eM, eM, scw) // dmin * m
 				} else if biasArray {
 					a.VMOVDQULoad(eM, At(RSI, 32)) // dmin
-					a.VPSLLD(scw, scw, 16-sh)
-					a.VPSRLD(scw, scw, 24)
+					scMinByte(&a, scw, scw, sh)
 					a.VCVTDQ2PS(scw, scw)
 					a.VMULPS(eM, eM, scw) // dmin * m
 				}
@@ -675,33 +631,15 @@ func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]
 			a.MOVLoad(R10, At(RDI, sH))
 		}
 
-		for w := 0; w < words; w++ {
-			a.ADDQ(RDX, R13)
-		}
-		if stream && scStep(sn) || !stream && perSuper > 1 && sn%perWordOf(biasArray) == perWordOf(biasArray)-1 {
-			a.ADDQ(R9, R13)
-		}
+		packedSubStep(&a, &f, sn)
 	}
-	a.ADDimm(R11, int32(perSuper*sub))
-	a.ADDimm(R12, int32(perSuper*sub/Q8Block*8))
-	if sub16 {
-		a.ADDimm(R10, int32(perSuper*4))
-	}
-	if perSuper == 1 && !narrow {
-		a.ADDQ(R9, R13)
-	}
+	// A narrow format's R9 is the d plane's row offset, rebuilt per row group.
+	packedSuperStep(&a, &f, !narrow)
 	a.DECmem(At(RDI, sK))
 	a.JNZ(outer)
 
 	a.ADDimm(R15, group*4)
 	a.DEC(RBX)
 	a.JNZ(rowL)
-	a.VZEROUPPER()
-	a.RET()
-	code := a.Bytes()
-	if len(code) > PackedWideBudget {
-		return nil, fmt.Errorf("jit: EmitPackedMatMulStationary: %s is %d bytes, over the %d budget",
-			t, len(code), PackedWideBudget)
-	}
-	return code, nil
+	return packedCode(&a, who, t)
 }
