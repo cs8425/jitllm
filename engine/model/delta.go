@@ -131,7 +131,7 @@ func (s *State) allocRecurrent(nseq int) {
 			continue
 		}
 		s.rconv[i] = make([]float32, nseq*g.convStateLen())
-		s.rstate[i] = make([]float32, nseq*g.deltaStateLen())
+		s.rstate[i] = make([]float32, nseq*(g.deltaStateLen()+c.recTailLen(i)))
 	}
 	s.dMixed = make([]float32, g.chans)
 	if g.mamba1 {
@@ -194,7 +194,23 @@ func (s *State) ResetRecurrent(row int) {
 		clear(s.rconv[li][row*n : (row+1)*n])
 		n = s.dg.deltaStateLen()
 		clear(s.rstate[li][row*n : (row+1)*n])
+		if t := s.c.recTailLen(li); t > 0 {
+			nseq := len(s.rstate[li]) / (n + t)
+			clear(s.rstate[li][nseq*n+row*t : nseq*n+(row+1)*t])
+		}
 	}
+}
+
+// recTailLen is what layer li's recurrent state carries per sequence after
+// the delta rule's: Qwen3.8-Flash-Next's n-gram predecessors and convolution
+// history on its n-gram block (ngram.go), nothing anywhere else. Every
+// sequence's delta-rule state comes first and the tails follow, so a reader
+// of the delta rule's rows is unchanged.
+func (c *Config) recTailLen(li int) int {
+	if c.NGramAt(li) {
+		return c.ngramStateLen()
+	}
+	return 0
 }
 
 // linearAttn runs one token of one sequence through layer li's gated delta net.
@@ -334,6 +350,9 @@ func (s *State) linearAttn(li int, l *layer, row int, h, out []float32) error {
 	} else if g.chanDecay {
 		// KDA's gate is out*sigma(z) (KimiLinearRMSNormGated), where
 		// qwen3next's is SiLU(z)*out: they differ by a factor of z.
+		nn.SigmoidMul32JIT(s.dZ, s.dOut)
+	} else if c.q4eSigmoidGate() {
+		// Qwen3.8-Flash-Next's gate is sigmoid(z)*out (output_gate_type).
 		nn.SigmoidMul32JIT(s.dZ, s.dOut)
 	} else {
 		nn.ActMul32JIT(s.dZ, s.dOut, nn.ActSiLU)
