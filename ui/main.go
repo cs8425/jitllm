@@ -73,7 +73,8 @@ func main() {
 	}
 	// After Arm: the GPU it names is written beside crash.log.
 	tapAdapter()
-	app.UseEnv(app.Env{Models: os.Getenv("JITLLM_MODELS"), DataHome: os.Getenv("XDG_DATA_HOME")})
+	app.UseEnv(app.Env{Models: os.Getenv("JITLLM_MODELS"), DataHome: os.Getenv("XDG_DATA_HOME"),
+		APIKey: os.Getenv("JITLLM_API_KEY")})
 	cfg := app.LoadConfig()
 
 	gpuApp := gogpu.NewApp(gogpu.DefaultConfig().

@@ -6,8 +6,8 @@ are not in it: they live in a volume mounted at `/models`.
 | | |
 |---|---|
 | image | `ghcr.io/jitllm/jitllm:<version>` and `:latest`, linux/amd64 and linux/arm64 |
-| entrypoint | `jitllmd serve -addr :8080`; arguments to `docker run` are appended as more `serve` flags |
-| port | 8080: the OpenAI API (`/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`), the Anthropic API (`/v1/messages`), the ConnectRPC control plane and `/healthz` |
+| entrypoint | `jitllmd serve -addr :4242`; arguments to `docker run` are appended as more `serve` flags |
+| port | 4242: the OpenAI API (`/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`), the Anthropic API (`/v1/messages`), the ConnectRPC control plane and `/healthz` |
 | volume | `/models`, scanned by the server and written by `jitllm convert` (`JITLLM_MODELS=/models`) |
 | user | `jitllm`, uid and gid 10001, not root |
 | health | `jitllmd models -loaded`, the daemon's own client asking the server over the control plane |
@@ -59,11 +59,11 @@ a named volume is faster.
 
 ## Run on the CPU
 
-    docker run -d --name jitllm -p 8080:8080 -v jitllm-models:/models \
+    docker run -d --name jitllm -p 4242:4242 -v jitllm-models:/models \
       ghcr.io/jitllm/jitllm -load Qwen3-30B-A3B-Q4_K_M.jlm -id qwen3
 
-    curl localhost:8080/v1/models
-    curl localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+    curl localhost:4242/v1/models
+    curl localhost:4242/v1/chat/completions -H 'Content-Type: application/json' \
       -d '{"model":"qwen3","messages":[{"role":"user","content":"What is the capital of France?"}]}'
 
 `-load` is optional: a model can be loaded into a running server with the
@@ -83,8 +83,13 @@ The engine sizes itself from what the container is given:
   larger than the limit pages in and out of the container file rather than
   being killed.
 
-Change the published port with `-p 9000:8080` rather than `-addr`: the health
-check asks for port 8080.
+The container listens on every interface (`-addr :4242`), as a container must,
+so `serve` prints its no-key warning. Publish the port on loopback
+(`-p localhost:4242:4242`) or set a key with `-e JITLLM_API_KEY=...`; the
+health check then sends the same key.
+
+Change the published port with `-p 9000:4242` rather than `-addr`: the health
+check asks for port 4242.
 
 Every `serve` flag is available (`docker run --rm ghcr.io/jitllm/jitllm -h`).
 The whole CLI is there too, for example a one-off decode:
@@ -100,7 +105,7 @@ container starts. The host needs the NVIDIA driver and the
 registered with Docker (`sudo nvidia-ctk runtime configure --runtime=docker`,
 then restart Docker). Then add `--gpus all`:
 
-    docker run -d --name jitllm --gpus all -p 8080:8080 -v jitllm-models:/models \
+    docker run -d --name jitllm --gpus all -p 4242:4242 -v jitllm-models:/models \
       ghcr.io/jitllm/jitllm -load Qwen3-30B-A3B-Q4_K_M.jlm -id qwen3 -devices cuda
 
     docker run --rm --gpus all --entrypoint jitllm ghcr.io/jitllm/jitllm hardware
@@ -136,7 +141,7 @@ extend the image with Mesa's drivers and pass the render node:
     USER 10001:10001
 
     docker run -d --device /dev/dri --group-add "$(getent group render | cut -d: -f3)" \
-      -p 8080:8080 -v jitllm-models:/models my-jitllm -load NAME.jlm -devices vulkan
+      -p 4242:4242 -v jitllm-models:/models my-jitllm -load NAME.jlm -devices vulkan
 
 Mesa's package also carries lavapipe, a Vulkan device that runs on the CPU. It
 exercises the Vulkan path on a machine with no GPU and is slower than the

@@ -11,13 +11,14 @@ import (
 // empty) while this front end runs an embedded engine, and returns it with
 // the warning to show. Ask it before the front end's own API starts, or the
 // probe finds the app itself.
-func Beside(ctx context.Context, addr string) (in localserver.Info, warning string, ok bool) {
+func Beside(ctx context.Context, addr string, opts ...localserver.Option) (in localserver.Info, warning string, ok bool) {
 	if addr == "" {
 		addr = localserver.DefaultAddr
 	}
-	// An incompatible jitllmd is still a second engine on the GPU.
-	in, err := localserver.Probe(ctx, addr)
-	if err != nil && !errors.Is(err, localserver.ErrIncompatible) {
+	// An incompatible jitllmd, or one that wants a key, is still a second
+	// engine on the GPU.
+	in, err := localserver.Locate(ctx, addr, opts...)
+	if err != nil && !errors.Is(err, localserver.ErrIncompatible) && !errors.Is(err, localserver.ErrUnauthorized) {
 		return in, "", false
 	}
 	return in, SharesMemory(in), true

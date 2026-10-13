@@ -10,7 +10,6 @@ package api
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"time"
 
@@ -22,6 +21,22 @@ import (
 // network unless the address says so.
 const DefaultAddr = localserver.DefaultAddr
 
+// Option configures a Server.
+type Option func(*settings)
+
+type settings struct {
+	key     string
+	origins []string
+}
+
+// WithKey makes every route but /healthz require key as a bearer token.
+func WithKey(key string) Option { return func(s *settings) { s.key = key } }
+
+// WithOrigins lets these browser origins call the API cross-origin.
+func WithOrigins(origins ...string) Option {
+	return func(s *settings) { s.origins = append(s.origins, origins...) }
+}
+
 // Server is a running API.
 type Server struct {
 	srv  *http.Server
@@ -29,28 +44,41 @@ type Server struct {
 	// asked is the address as the setting spells it, so Toggle can tell a
 	// changed setting from the one already served.
 	asked string
+	// key is the API key it requires, so a changed key restarts it.
+	key string
 }
 
 // Start listens on addr and serves e. The listen happens before it returns,
 // so an address in use is its error.
-func Start(addr string, e *server.Engine) (*Server, error) {
+//
+// The API is guarded as jitllmd's is (server.Guard): a loopback listener
+// refuses a Host header that is not its own, a browser origin that is not
+// loopback or listed, and, with WithKey, a request without the key.
+func Start(addr string, e *server.Engine, opts ...Option) (*Server, error) {
 	if addr == "" {
 		addr = DefaultAddr
 	}
-	ln, err := net.Listen("tcp", addr)
+	var o settings
+	for _, f := range opts {
+		f(&o)
+	}
+	lns, err := server.Listen(addr)
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{addr: ln.Addr().String(), asked: addr, srv: &http.Server{
-		Handler: e.Handler(),
+	g := server.Guard{APIKey: o.key, Addr: addr, AllowOrigins: o.origins}
+	s := &Server{addr: lns[0].Addr().String(), asked: addr, key: o.key, srv: &http.Server{
+		Handler: g.Wrap(e.Handler()),
 		// No WriteTimeout, as jitllmd: a streaming generate can run for minutes.
 		ReadHeaderTimeout: 20 * time.Second,
 	}}
-	go func() {
-		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			ln.Close()
-		}
-	}()
+	for _, ln := range lns {
+		go func() {
+			if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				ln.Close()
+			}
+		}()
+	}
 	return s, nil
 }
 
@@ -73,11 +101,15 @@ func (s *Server) Close() {
 // on one machine share its GPU memory, and the app would be a second engine
 // nobody asked for. held is that service, so the front end can offer to
 // connect to it instead; it is the zero Info otherwise.
-func Toggle(cur *Server, on bool, addr string, e *server.Engine) (s *Server, msg string, held localserver.Info) {
+func Toggle(cur *Server, on bool, addr string, e *server.Engine, opts ...Option) (s *Server, msg string, held localserver.Info) {
 	if addr == "" {
 		addr = DefaultAddr
 	}
-	if cur != nil && on && cur.asked == addr {
+	var o settings
+	for _, f := range opts {
+		f(&o)
+	}
+	if cur != nil && on && cur.asked == addr && cur.key == o.key {
 		return cur, "API on http://" + cur.Addr(), held
 	}
 	if cur != nil {
@@ -89,10 +121,14 @@ func Toggle(cur *Server, on bool, addr string, e *server.Engine) (s *Server, msg
 		}
 		return nil, "API off", held
 	}
-	if in, err := localserver.Probe(context.Background(), addr); err == nil || errors.Is(err, localserver.ErrIncompatible) {
+	if in, err := localserver.Probe(context.Background(), addr, localserver.WithAPIKey(o.key)); err == nil ||
+		errors.Is(err, localserver.ErrIncompatible) || errors.Is(err, localserver.ErrUnauthorized) {
+		if in.Addr == "" {
+			in.Addr = addr
+		}
 		return nil, Refusal(in), in
 	}
-	s, err := Start(addr, e)
+	s, err := Start(addr, e, opts...)
 	if err != nil {
 		return nil, "API not started: " + err.Error(), held
 	}

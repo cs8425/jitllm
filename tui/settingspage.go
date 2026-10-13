@@ -130,7 +130,7 @@ func (p *settingsPage) rebuild() {
 			huh.NewInput().Title("API address").Description("host:port · 127.0.0.1 keeps it on this machine").
 				Value(&d.apiAddr).Validate(func(s string) error {
 				if _, _, err := net.SplitHostPort(strings.TrimSpace(s)); err != nil {
-					return errors.New("host:port, e.g. 127.0.0.1:8080")
+					return errors.New("host:port, e.g. localhost:4242")
 				}
 				return nil
 			}),

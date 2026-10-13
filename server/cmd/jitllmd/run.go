@@ -70,7 +70,7 @@ func cmdRun(ctx context.Context, c cli, args []string) error {
 			"render, and a raw completion of a system message is fluent and meaningless")
 	}
 
-	cn, err := dial(*addr)
+	cn, err := target(ctx, c, fs, *addr)
 	if err != nil {
 		return err
 	}

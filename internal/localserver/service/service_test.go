@@ -22,7 +22,7 @@ func TestUnitRunsTheServerOnLoopback(t *testing.T) {
 	s := Service{GOOS: "linux", Home: "/srv/p"}
 	u := s.Render(Args("/opt/jitllm bin/jitllmd", "/srv/p/50%/models", ""))
 	for _, want := range []string{
-		`ExecStart="/opt/jitllm bin/jitllmd" "serve" "-addr" "127.0.0.1:8080" "-models" "/srv/p/50%%/models"`,
+		`ExecStart="/opt/jitllm bin/jitllmd" "serve" "-addr" "localhost:4242" "-models" "/srv/p/50%%/models"`,
 		"Restart=on-failure",
 		"WantedBy=default.target",
 	} {
@@ -49,7 +49,7 @@ func TestPlistIsTheAgentTheAppInstalls(t *testing.T) {
 	if err := xml.Unmarshal([]byte(p), &doc); err != nil {
 		t.Fatalf("not XML: %v\n%s", err, p)
 	}
-	want := []string{"/Applications/jitllm.app/Contents/Resources/bin/jitllmd", "serve", "-addr", "127.0.0.1:8080", "-models", "/m<x>"}
+	want := []string{"/Applications/jitllm.app/Contents/Resources/bin/jitllmd", "serve", "-addr", "localhost:4242", "-models", "/m<x>"}
 	if strings.Join(doc.Strings, "|") != strings.Join(want, "|") {
 		t.Errorf("arguments %q, want %q", doc.Strings, want)
 	}
@@ -66,7 +66,7 @@ func TestPlistIsTheAgentTheAppInstalls(t *testing.T) {
 func TestWindowsScriptStartsHidden(t *testing.T) {
 	s := Service{GOOS: "windows", Home: `C:\Users\p`, LocalAppData: `C:\Users\p\AppData\Local`}
 	v := s.Render(Args(`C:\Program Files\jitllm\jitllmd.exe`, `C:\Users\p\AppData\Local\jitllm\models`, ""))
-	want := `CreateObject("WScript.Shell").Run "cmd /c """"C:\Program Files\jitllm\jitllmd.exe"" ""serve"" ""-addr"" ""127.0.0.1:8080"" ""-models"" ""C:\Users\p\AppData\Local\jitllm\models"" >> ""C:\Users\p\AppData\Local\jitllm\jitllmd.log"" 2>&1""", 0, False` + "\r\n"
+	want := `CreateObject("WScript.Shell").Run "cmd /c """"C:\Program Files\jitllm\jitllmd.exe"" ""serve"" ""-addr"" ""localhost:4242"" ""-models"" ""C:\Users\p\AppData\Local\jitllm\models"" >> ""C:\Users\p\AppData\Local\jitllm\jitllmd.log"" 2>&1""", 0, False` + "\r\n"
 	if v != want {
 		t.Errorf("script\n%s\nwant\n%s", v, want)
 	}
@@ -108,7 +108,7 @@ func TestInstallIntoATemporaryHome(t *testing.T) {
 				t.Fatalf("not installed at %s", s.File())
 			}
 			b, err := os.ReadFile(s.File())
-			if err != nil || !strings.Contains(string(b), "127.0.0.1:8080") {
+			if err != nil || !strings.Contains(string(b), "localhost:4242") {
 				t.Fatalf("file %s: %v\n%s", s.File(), err, b)
 			}
 			checkPrefixes(t, "install", r.cmds, c.cmds)

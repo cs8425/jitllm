@@ -47,7 +47,7 @@ func TestRunUsesTheServiceWhenOneAnswers(t *testing.T) {
 	var got map[string]any
 	s := fakeService(t, localserver.APIVersion, &got)
 	var note bytes.Buffer
-	svc, path, err := runTarget(context.Background(), "qwen3", s.URL, false, nil, &note)
+	svc, path, err := runTarget(context.Background(), "qwen3", s.URL, "", false, nil, &note)
 	if err != nil || svc == nil || path != "" {
 		t.Fatalf("runTarget: %v %q %v", svc, path, err)
 	}
@@ -58,7 +58,7 @@ func TestRunUsesTheServiceWhenOneAnswers(t *testing.T) {
 	fs.Float64("temp", 0, "")
 	fs.Parse([]string{"-temp", "0.5"})
 	var out bytes.Buffer
-	r := newRemoteRun(s.URL, "qwen3", 5, "", fs, samplingFlags{temp: 0.5})
+	r := newRemoteRun(s.URL, "", "qwen3", 5, "", fs, samplingFlags{temp: 0.5})
 	if err := r.once(false, "hello", &out); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestConvertByCatalogNameKeepsTheName(t *testing.T) {
 func TestRunRefusesAnIncompatibleService(t *testing.T) {
 	var got map[string]any
 	s := fakeService(t, localserver.APIVersion+1, &got)
-	if _, _, err := runTarget(context.Background(), "qwen3", s.URL, false, nil, &bytes.Buffer{}); err == nil {
+	if _, _, err := runTarget(context.Background(), "qwen3", s.URL, "", false, nil, &bytes.Buffer{}); err == nil {
 		t.Fatal("an incompatible service was bypassed")
 	}
 }
@@ -120,27 +120,27 @@ func TestRunFallsBackToTheModelsFolder(t *testing.T) {
 	t.Setenv("JITLLM_MODELS", dir)
 	none := "127.0.0.1:1"
 	var note bytes.Buffer
-	svc, path, err := runTarget(context.Background(), "story", none, false, nil, &note)
+	svc, path, err := runTarget(context.Background(), "story", none, "", false, nil, &note)
 	if err != nil || svc != nil || path != filepath.Join(dir, "stories260K.jlm") {
 		t.Fatalf("runTarget: %v %q %v", svc, path, err)
 	}
 	if !strings.Contains(note.String(), "no service answers at "+none) {
 		t.Errorf("stderr: %q", note.String())
 	}
-	if _, _, err := runTarget(context.Background(), "nope", none, false, nil, &bytes.Buffer{}); err == nil ||
+	if _, _, err := runTarget(context.Background(), "nope", none, "", false, nil, &bytes.Buffer{}); err == nil ||
 		!strings.Contains(err.Error(), dir) {
 		t.Errorf("an unknown name: %v", err)
 	}
 
 	var got map[string]any
 	s := fakeService(t, localserver.APIVersion, &got)
-	if svc, path, _ := runTarget(context.Background(), filepath.Join(dir, "stories260K.jlm"), s.URL, false, nil, &bytes.Buffer{}); svc != nil || path == "" {
+	if svc, path, _ := runTarget(context.Background(), filepath.Join(dir, "stories260K.jlm"), s.URL, "", false, nil, &bytes.Buffer{}); svc != nil || path == "" {
 		t.Errorf("a path went to the service")
 	}
-	if svc, _, _ := runTarget(context.Background(), "story", s.URL, false, []string{"-devices"}, &bytes.Buffer{}); svc != nil {
+	if svc, _, _ := runTarget(context.Background(), "story", s.URL, "", false, []string{"-devices"}, &bytes.Buffer{}); svc != nil {
 		t.Errorf("-devices went to the service")
 	}
-	if svc, _, _ := runTarget(context.Background(), "story", s.URL, true, nil, &bytes.Buffer{}); svc != nil {
+	if svc, _, _ := runTarget(context.Background(), "story", s.URL, "", true, nil, &bytes.Buffer{}); svc != nil {
 		t.Errorf("-embedded went to the service")
 	}
 

@@ -9,6 +9,7 @@ package main
 // request and response is a generated message from server/gen/jitllm/v1.
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -73,12 +74,12 @@ type conn struct {
 // is there a ResponseHeaderTimeout: the wait for the first byte is the device
 // queue, which queue_timeout_millis already controls. A generate is bounded by
 // the context, cancelled on ^C.
-func dial(addr string) (*conn, error) {
+func dial(addr, key string) (*conn, error) {
 	base, err := baseURL(addr)
 	if err != nil {
 		return nil, err
 	}
-	h := &http.Client{}
+	h := &http.Client{Transport: localserver.KeyTransport(key, nil)}
 	return &conn{
 		base:      base,
 		Model:     jitllmv1connect.NewModelServiceClient(h, base),
@@ -90,7 +91,35 @@ func dial(addr string) (*conn, error) {
 	}, nil
 }
 
-// baseURL turns what a person types into what connect-go wants. `-addr :8080`
+// addrOpts lets a gate stand in other default and old-default addresses
+// (localserver.WithDefaults), so it does not depend on what runs on this box.
+var addrOpts []localserver.Option
+
+// target is dial for a verb: it sends the verb's -api-key (else
+// $JITLLM_API_KEY), and when the address is the default and no jitllmd
+// answers there it uses one on the old default port, saying so on stderr.
+func target(ctx context.Context, c cli, fs *flag.FlagSet, addr string) (*conn, error) {
+	key := keyOf(fs)
+	a := strings.TrimSpace(addr)
+	opts := append([]localserver.Option{localserver.WithAPIKey(key)}, addrOpts...)
+	if _, ok := localserver.LegacyFor(a, opts...); ok {
+		if in, _ := localserver.Locate(ctx, a, opts...); in.Legacy {
+			fmt.Fprintf(c.err, "jitllmd: %s\n", localserver.LegacyNotice)
+			a = in.Addr
+		}
+	}
+	return dial(a, key)
+}
+
+// keyOf is the API key a verb sends: its -api-key flag, else $JITLLM_API_KEY.
+func keyOf(fs *flag.FlagSet) string {
+	if f := fs.Lookup("api-key"); f != nil && f.Value.String() != "" {
+		return f.Value.String()
+	}
+	return os.Getenv("JITLLM_API_KEY")
+}
+
+// baseURL turns what a person types into what connect-go wants. `-addr :4242`
 // means "this host", as it does for `jitllmd serve`.
 func baseURL(addr string) (string, error) {
 	a := strings.TrimSpace(addr)
@@ -143,6 +172,9 @@ func clientError(what string, base string, err error) error {
 		return fmt.Errorf("%s: %v", what, err)
 	}
 	msg := fmt.Sprintf("%s: %s: %s", what, ce.Code(), ce.Message())
+	if ce.Code() == connect.CodeUnauthenticated {
+		msg += "\n  this jitllmd wants an API key -- pass -api-key KEY, or set JITLLM_API_KEY"
+	}
 	if ce.Code() == connect.CodeUnavailable {
 		// The transport reached nothing, so the client says which address it
 		// tried.
@@ -155,6 +187,7 @@ func clientError(what string, base string, err error) error {
 // ---------------------------------------------------------------- flags
 
 func addrFlag(fs *flag.FlagSet) *string {
+	fs.String("api-key", "", "the API key the jitllmd wants, if it has one (default: $JITLLM_API_KEY)")
 	return fs.String("addr", defaultAddr,
 		"the jitllmd to talk to: host:port, :port, or a full http(s) URL")
 }

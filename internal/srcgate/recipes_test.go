@@ -98,7 +98,7 @@ func TestRecipeRunnerFails(t *testing.T) {
 		{"```sh\nfalse\n```\n", "exited 1, want 0"},
 		{"<!-- test: instead true -->\n```sh\nrm -rf models\n```\n", "only a download"},
 		{"<!-- test: frobnicate -->\n```sh\ntrue\n```\n", "unknown directive"},
-		{"```sh\ncurl -s localhost:8080\n```\n", "127.0.0.1"},
+		{"```sh\ncurl -s localhost:4242\n```\n", "127.0.0.1"},
 	} {
 		blocks, err := parseRecipe(c.md)
 		if err == nil {
@@ -109,7 +109,7 @@ func TestRecipeRunnerFails(t *testing.T) {
 		}
 	}
 	// And the control: a block that does what it says passes.
-	blocks, err := parseRecipe("<!-- test: exit 3 -->\n```sh\necho 127.0.0.1:8080; exit 3\n```\n<!-- test: expect 127.0.0.1: -->\n")
+	blocks, err := parseRecipe("<!-- test: exit 3 -->\n```sh\necho 127.0.0.1:4242; exit 3\n```\n<!-- test: expect 127.0.0.1: -->\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,8 +118,8 @@ func TestRecipeRunnerFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a block that meets its expectations failed: %v", err)
 	}
-	if strings.Contains(out, ":8080") || ports["8080"] == "" {
-		t.Fatalf("127.0.0.1:8080 was not rewritten to a free port: %q, %v", out, ports)
+	if strings.Contains(out, ":4242") || ports["4242"] == "" {
+		t.Fatalf("127.0.0.1:4242 was not rewritten to a free port: %q, %v", out, ports)
 	}
 }
 
@@ -138,7 +138,7 @@ type recipeBlock struct {
 
 var (
 	directiveRE = regexp.MustCompile(`^<!-- test: ([a-z]+)(?: (.*?))? -->$`)
-	loopbackRE  = regexp.MustCompile(`127\.0\.0\.1:(80\d\d)\b`)
+	loopbackRE  = regexp.MustCompile(`127\.0\.0\.1:(4242|80\d\d)\b`)
 )
 
 // parseRecipe reads md's fenced blocks and their directives.
@@ -270,13 +270,13 @@ func runRecipe(t *testing.T, blocks []recipeBlock, env []string) int {
 
 func runnable(lang string) bool { return lang == "sh" || lang == "python" || lang == "js" }
 
-// rewrite puts each 127.0.0.1:80NN on a free port, the same one for the same
+// rewrite puts each 127.0.0.1:4242 (the default) and 127.0.0.1:80NN on a free port, the same one for the same
 // address throughout the recipe, and refuses any other spelling of a local
 // server, which the rewrite would miss.
 func rewrite(s string, ports map[string]string) (string, error) {
 	rest := loopbackRE.ReplaceAllString(s, "")
-	if strings.Contains(rest, "localhost:") || regexp.MustCompile(`[^0-9.]:80\d\d\b`).MatchString(rest) {
-		return "", errors.New("a recipe addresses its server as 127.0.0.1:80NN, which the test rewrites to a free port; this block spells it otherwise")
+	if strings.Contains(rest, "localhost:") || regexp.MustCompile(`[^0-9.]:(4242|80\d\d)\b`).MatchString(rest) {
+		return "", errors.New("a recipe addresses its server as 127.0.0.1:4242 or 127.0.0.1:80NN, which the test rewrites to a free port; this block spells it otherwise")
 	}
 	var err error
 	out := loopbackRE.ReplaceAllStringFunc(s, func(m string) string {

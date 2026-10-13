@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/jitllm/jitllm/internal/localserver"
 	"github.com/jitllm/jitllm/server/client"
 	"github.com/muesli/termenv"
 )
@@ -43,7 +44,7 @@ func runDemo(args []string) int {
 	if devices != "" {
 		opt.Devices = strings.Split(devices, ",")
 	}
-	conn, err := client.Discover(context.Background(), opt.Addr)
+	conn, err := client.Discover(context.Background(), opt.Addr, localserver.WithAPIKey(os.Getenv("JITLLM_API_KEY")))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "no jitllmd answers at %s: %v\nstart one with: jitllmd serve -load <model>.jlm -devices cuda:0,vulkan:1\n", opt.Addr, err)
 		return 1

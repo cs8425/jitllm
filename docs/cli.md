@@ -85,7 +85,7 @@ file on stdin is read whole as the prompt instead.
 ## Run by name, through the service
 
 `jitllm run NAME` (and `jitllm embed NAME`) asks the local service first. When
-a jitllmd answers on `127.0.0.1:8080` (`-addr` names another), the service
+a jitllmd answers on `localhost:4242` (`-addr` names another), the service
 resolves NAME -- a file name in its models folder, an alias, a loaded id --
 loads it if it is not loaded, and streams the answer; no second engine starts.
 With no prompt and a terminal, it is the same interactive chat as in-process.
@@ -96,9 +96,15 @@ process. A path always runs in this process, and so does a run with
 `-placement`, `-kv-cache`, `-image`, ...). One line on stderr says which:
 
 ```text
-jitllm: using the service at http://127.0.0.1:8080 (jitllmd v0.4.0) for qwen3
-jitllm: running /home/me/.local/share/jitllm/models/Qwen3-8B-Q4_K_M.jlm in this process (no service answers at 127.0.0.1:8080)
+jitllm: using the service at http://localhost:4242 (jitllmd v0.4.0) for qwen3
+jitllm: running /home/me/.local/share/jitllm/models/Qwen3-8B-Q4_K_M.jlm in this process (no service answers at localhost:4242)
 ```
+
+A service started with an API key is used with `-api-key KEY` (default
+`JITLLM_API_KEY`) and refused by name without it. When nothing answers on
+`localhost:4242`, a service on the old default port `127.0.0.1:8080` is used
+and one more line says so (`jitllmd service install` moves it); an `-addr` you
+type is never swapped for it.
 
 A service of another API version is refused with a message rather than
 bypassed. The measuring commands (`speed`, `bench`, `batch`, `verify`) and

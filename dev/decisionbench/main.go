@@ -182,7 +182,7 @@ func run(c config, items []item, client *http.Client) (result, error) {
 }
 
 func main() {
-	url := flag.String("url", "http://127.0.0.1:8080", "the server's base URL")
+	url := flag.String("url", "http://localhost:4242", "the server's base URL")
 	model := flag.String("model", "", "the model field of each request")
 	file := flag.String("file", "", "the labelled words, word<TAB>label per line")
 	question := flag.String("question", `{"type": "noul", "instructions": "Is this the name of a centipede?"}`,

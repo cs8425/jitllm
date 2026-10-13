@@ -116,7 +116,7 @@ $(formula_os linux amd64)
 
   # brew services start jitllm: jitllmd on loopback, over Homebrew's models folder.
   service do
-    run [opt_bin/"jitllmd", "serve", "-addr", "127.0.0.1:8080", "-models", var/"jitllm/models"]
+    run [opt_bin/"jitllmd", "serve", "-addr", "localhost:4242", "-models", var/"jitllm/models"]
     keep_alive successful_exit: false
     log_path var/"log/jitllmd.log"
     error_log_path var/"log/jitllmd.log"

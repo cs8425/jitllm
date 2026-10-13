@@ -5,6 +5,7 @@ import (
 
 	core "github.com/jitllm/jitllm/common/engine"
 	"github.com/jitllm/jitllm/common/session"
+	"github.com/jitllm/jitllm/internal/localserver"
 	"github.com/jitllm/jitllm/ui/app"
 	"github.com/jitllm/jitllm/ui/screen"
 )
@@ -32,7 +33,7 @@ func Start(sh *app.Shell) *Engines {
 		e.Apply()
 	}
 	sh.ApplyEngine = e.Apply
-	e.install(core.Choose(context.Background(), sh.Store.EngineMode.Get(), sh.Store.ServiceAddr.Get()))
+	e.install(core.Choose(context.Background(), sh.Store.EngineMode.Get(), sh.Store.ServiceAddr.Get(), localserver.WithAPIKey(sh.Cfg.ServiceAPIKey())))
 	sh.OnShutdown(e.Close)
 	return e
 }
@@ -48,7 +49,7 @@ func (e *Engines) Apply() {
 	mode, addr := e.sh.Store.EngineMode.Get(), e.sh.Store.ServiceAddr.Get()
 	e.sh.SetStatus("choosing the engine…")
 	go func() {
-		ch := core.Choose(context.Background(), mode, addr)
+		ch := core.Choose(context.Background(), mode, addr, localserver.WithAPIKey(e.sh.Cfg.ServiceAPIKey()))
 		e.sh.Post(func() { e.install(ch) })
 	}()
 }

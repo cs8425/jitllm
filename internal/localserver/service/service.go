@@ -139,12 +139,13 @@ func (s Service) Installed() bool {
 }
 
 // Args is what the service runs: jitllmd serve on addr (DefaultAddr when
-// empty) over the models folder.
-func Args(jitllmd, models, addr string) []string {
+// empty) over the models folder, then any further serve flags (such as
+// "-api-key", KEY).
+func Args(jitllmd, models, addr string, serveFlags ...string) []string {
 	if addr == "" {
 		addr = localserver.DefaultAddr
 	}
-	return []string{jitllmd, "serve", "-addr", addr, "-models", models}
+	return append([]string{jitllmd, "serve", "-addr", addr, "-models", models}, serveFlags...)
 }
 
 // Render is the service's file for these arguments.
@@ -265,7 +266,8 @@ func (s Service) Install(args []string) error {
 		// Not loaded is not a failure: the file can outlive a session.
 		s.run("launchctl", "bootout", s.domain()+"/"+s.name())
 	}
-	if err := os.WriteFile(s.File(), []byte(s.Render(args)), 0o644); err != nil {
+	// 0600: the arguments may carry the service's API key.
+	if err := os.WriteFile(s.File(), []byte(s.Render(args)), 0o600); err != nil {
 		return err
 	}
 	switch s.GOOS {

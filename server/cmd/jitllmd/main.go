@@ -5,13 +5,13 @@
 // three are projections of the same server.Engine; there is no second
 // inference path behind any of them.
 //
-//	jitllmd serve -addr :8080 -models /path/to/models
+//	jitllmd serve -models /path/to/models
 //	jitllmd serve -load Llama-3.2-1B-Instruct-Q4_K_M.jlm -devices cuda:0
 //
 // The other verbs are a client of that same control plane, through the same
 // generated stubs:
 //
-//	jitllmd run -addr box:8080 -n 64 "the capital of France is"
+//	jitllmd run -addr box:4242 -n 64 "the capital of France is"
 //	jitllmd devices           jitllmd models          jitllmd stats -watch
 //	jitllmd sessions -new -model m-1 -devices cuda:0
 //	jitllmd place -session s-1 -gpu-layers 22
@@ -140,7 +140,15 @@ func defaultModels() string {
 
 func serve(args []string) {
 	fs := flag.NewFlagSet("jitllmd serve", flag.ExitOnError)
-	addr := fs.String("addr", ":8080", "listen address")
+	addr := fs.String("addr", defaultAddr,
+		"listen address; loopback by default, so nothing off this machine reaches it. "+
+			"An address with no host (:4242) or a non-loopback one opens it to the network: give -api-key then")
+	apiKey := fs.String("api-key", "",
+		"require this key on every route but /healthz, as Authorization: Bearer KEY (x-api-key on /v1/messages too); "+
+			"default: $JITLLM_API_KEY, else no key")
+	allowOrigin := fs.String("allow-origin", "",
+		"comma-separated browser origins (https://app.example.com) that may call the server cross-origin; "+
+			"loopback pages and clients that send no Origin are unaffected, any other origin is refused")
 	models := fs.String("models", defaultModels(),
 		"directory scanned by ListModels and used to resolve a bare model name (JITLLM_MODELS sets the default)")
 	load := fs.String("load", "",
@@ -353,9 +361,23 @@ func serve(args []string) {
 		fmt.Fprintf(os.Stderr, "loaded %s in %s\n", lm.ID(), time.Since(start).Round(time.Millisecond))
 	}
 
+	key := *apiKey
+	if key == "" {
+		key = os.Getenv("JITLLM_API_KEY")
+	}
+	guard := server.Guard{APIKey: key, Addr: *addr}
+	for _, o := range strings.Split(*allowOrigin, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			guard.AllowOrigins = append(guard.AllowOrigins, o)
+		}
+	}
+	if w := exposure(*addr, key); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
+
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: e.Handler(),
+		Handler: guard.Wrap(e.Handler()),
 		// No WriteTimeout: a streaming generate on an over-committed model
 		// can run for minutes. The write side is bounded by the client's
 		// context.
@@ -365,14 +387,21 @@ func serve(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errc := make(chan error, 1)
-	go func() {
-		fmt.Fprintf(os.Stderr, "jitllmd on %s\n", *addr)
-		fmt.Fprintf(os.Stderr, "  connect   http://%s/jitllm.v1.ModelService/ListModels\n", hostOf(*addr))
-		fmt.Fprintf(os.Stderr, "  openai    http://%s/v1/chat/completions\n", hostOf(*addr))
-		fmt.Fprintf(os.Stderr, "  anthropic http://%s/v1/messages\n", hostOf(*addr))
-		errc <- srv.ListenAndServe()
-	}()
+	lns, err := server.Listen(*addr)
+	if err != nil {
+		fatal("%v", err)
+	}
+	errc := make(chan error, len(lns))
+	for _, ln := range lns {
+		go func() { errc <- srv.Serve(ln) }()
+	}
+	fmt.Fprintf(os.Stderr, "jitllmd on %s\n", *addr)
+	for _, ln := range lns {
+		fmt.Fprintf(os.Stderr, "  listening %s\n", ln.Addr())
+	}
+	fmt.Fprintf(os.Stderr, "  connect   http://%s/jitllm.v1.ModelService/ListModels\n", hostOf(*addr))
+	fmt.Fprintf(os.Stderr, "  openai    http://%s/v1/chat/completions\n", hostOf(*addr))
+	fmt.Fprintf(os.Stderr, "  anthropic http://%s/v1/messages\n", hostOf(*addr))
 
 	select {
 	case err := <-errc:
@@ -408,6 +437,17 @@ func misplacedFlag(fs *flag.FlagSet) error {
 		}
 	}
 	return nil
+}
+
+// exposure is the warning for a server that listens beyond loopback with no
+// API key, and "" for one that does not.
+func exposure(addr, key string) string {
+	if server.Loopback(addr) || key != "" {
+		return ""
+	}
+	return "jitllmd: WARNING: listening on " + addr + ", which is not loopback, with no -api-key: " +
+		"anyone who can reach this port can use the engine and its models. " +
+		"Set -api-key (or JITLLM_API_KEY), or bind to " + defaultAddr + "."
 }
 
 func hostOf(addr string) string {

@@ -40,6 +40,8 @@ func cmdService(ctx context.Context, c cli, args []string) error {
 	addr := fs.String("addr", defaultAddr, "the address the service listens on; loopback by default")
 	models := fs.String("models", defaultModels(), "the models folder the service serves (JITLLM_MODELS sets the default)")
 	exe := fs.String("jitllmd", "", "the jitllmd the service runs (default: this one)")
+	fs.String("api-key", "", "install: the API key the service requires (default: $JITLLM_API_KEY); "+
+		"the other actions: the key to ask the service with")
 	if err := parse(c, fs, args); err != nil {
 		return err
 	}
@@ -65,12 +67,17 @@ func cmdService(ctx context.Context, c cli, args []string) error {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("the models folder %s: %w", dir, err)
 		}
-		if err := s.Install(service.Args(bin, dir, *addr)); err != nil {
+		key := keyOf(fs)
+		var extra []string
+		if key != "" {
+			extra = []string{"-api-key", key}
+		}
+		if err := s.Install(service.Args(bin, dir, *addr, extra...)); err != nil {
 			return err
 		}
 		fmt.Fprintf(c.out, "installed %s (%s)\n", s.Manager(), s.File())
 		fmt.Fprintf(c.out, "models    %s\nlog       %s\n", dir, s.Log())
-		return waitFor(ctx, c, *addr)
+		return waitFor(ctx, c, *addr, keyOf(fs), false)
 	case "uninstall":
 		if !s.Installed() {
 			fmt.Fprintf(c.out, "not installed (%s)\n", s.File())
@@ -85,7 +92,9 @@ func cmdService(ctx context.Context, c cli, args []string) error {
 		if err := s.Start(); err != nil {
 			return err
 		}
-		return waitFor(ctx, c, *addr)
+		// A unit installed before the default moved still listens on the old
+		// port, and start brings it back as it was.
+		return waitFor(ctx, c, *addr, keyOf(fs), true)
 	case "stop":
 		if err := s.Stop(); err != nil {
 			return err
@@ -93,21 +102,30 @@ func cmdService(ctx context.Context, c cli, args []string) error {
 		fmt.Fprintf(c.out, "stopped %s\n", s.Manager())
 		return nil
 	case "status":
-		return serviceStatus(ctx, c, s, *addr)
+		return serviceStatus(ctx, c, s, *addr, keyOf(fs))
 	}
 	return usagef("service: unknown action %q: give install, uninstall, status, start or stop", what)
 }
 
 // waitFor waits for a jitllmd to answer on addr and says so.
-func waitFor(ctx context.Context, c cli, addr string) error {
+// With legacy it also accepts a service on the old default port, which is
+// where a unit written before the default moved listens.
+func waitFor(ctx context.Context, c cli, addr, key string, legacy bool) error {
 	end := time.Now().Add(waitUp)
+	probe := localserver.Probe
+	if legacy {
+		probe = localserver.Locate
+	}
 	for {
-		in, err := localserver.Probe(ctx, addr)
+		in, err := probe(ctx, addr, localserver.WithAPIKey(key))
 		if err == nil {
-			fmt.Fprintf(c.out, "running   http://%s (jitllmd %s)\n", hostOf(addr), in.Version)
+			fmt.Fprintf(c.out, "running   http://%s (jitllmd %s)\n", hostOf(in.Addr), in.Version)
+			if in.Legacy {
+				fmt.Fprintf(c.out, "note      %s\n", localserver.LegacyNotice)
+			}
 			return nil
 		}
-		if errors.Is(err, localserver.ErrIncompatible) || time.Now().After(end) {
+		if errors.Is(err, localserver.ErrIncompatible) || errors.Is(err, localserver.ErrUnauthorized) || time.Now().After(end) {
 			return fmt.Errorf("the service did not answer on %s: %w", addr, err)
 		}
 		select {
@@ -120,16 +138,24 @@ func waitFor(ctx context.Context, c cli, addr string) error {
 
 // serviceStatus prints whether the service is installed, whether a jitllmd
 // answers on addr, and what it serves.
-func serviceStatus(ctx context.Context, c cli, s service.Service, addr string) error {
+func serviceStatus(ctx context.Context, c cli, s service.Service, addr, key string) error {
 	inst := "not installed"
 	if s.Installed() {
 		inst = "installed (" + s.File() + ")"
 	}
 	fmt.Fprintf(c.out, "service   %s: %s\nlog       %s\n", s.Manager(), inst, s.Log())
-	cn, err := client.Discover(ctx, addr)
+	cn, err := client.Discover(ctx, addr, localserver.WithAPIKey(key))
+	if errors.Is(err, localserver.ErrUnauthorized) {
+		fmt.Fprintf(c.out, "address   %s: answers, and wants an API key (-api-key, or JITLLM_API_KEY)\n", addr)
+		return nil
+	}
 	if err != nil && !errors.Is(err, localserver.ErrIncompatible) {
 		fmt.Fprintf(c.out, "address   %s: nothing answers\n", addr)
 		return nil
+	}
+	if cn.Legacy {
+		addr = strings.TrimPrefix(cn.Base, "http://")
+		fmt.Fprintf(c.out, "note      %s\n", localserver.LegacyNotice)
 	}
 	i := cn.Info
 	fmt.Fprintf(c.out, "address   http://%s\nversion   jitllmd %s (%s, api %d)\n", hostOf(addr), i.GetVersion(), i.GetRevision(), i.GetApiVersion())
