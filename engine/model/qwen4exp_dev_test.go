@@ -3,6 +3,7 @@ package model
 import (
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
 
@@ -161,4 +162,18 @@ func TestQwen4ExpQSATurnsByTheMarks(t *testing.T) {
 	if ran == 0 {
 		t.Skip("no device on this host")
 	}
+}
+
+// TestBatchSeamMovesCarryEveryRowQwen4Exp is the batch seam gate on
+// Qwen3.8-Flash-Next: every move carries each row's linear blocks' state slot
+// (the delta rule's and the n-gram block's history after it), its QSA blocks'
+// cached rows with the raw indexer key, and the streams across the seam.
+func TestBatchSeamMovesCarryEveryRowQwen4Exp(t *testing.T) {
+	defer fusedRunsCheck(t, false)()
+	p, ok := existingModel(testmodels.Path("synth-qwen4exp.gguf"))
+	if !ok {
+		testmodels.Missing(t, "%s", "MODEL MISSING: "+testmodels.Path("synth-qwen4exp.gguf")+
+			" (set JITLLM_MODELS to the model directory) -- run "+q4eGoldScript+" (RULE 11)")
+	}
+	batchSeamMoves(t, p, 1e-3, true)
 }
