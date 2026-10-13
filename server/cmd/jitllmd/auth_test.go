@@ -26,7 +26,7 @@ func TestTheDaemonListensOnLoopbackByDefault(t *testing.T) {
 }
 
 func TestBindingBeyondLoopbackWithoutAKeyWarns(t *testing.T) {
-	for _, addr := range []string{":4242", "0.0.0.0:4242", "192.168.1.9:4242"} {
+	for _, addr := range []string{":4242", "0.0.0.0:4242", "192.0.2.9:4242"} {
 		w := exposure(addr, "")
 		if !strings.Contains(w, "WARNING") || !strings.Contains(w, "-api-key") || !strings.Contains(w, addr) {
 			t.Errorf("%s: warning %q", addr, w)

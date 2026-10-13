@@ -215,7 +215,7 @@ func TestGuardHostAndOriginRules(t *testing.T) {
 func TestLoopback(t *testing.T) {
 	for addr, want := range map[string]bool{
 		"127.0.0.1:4242": true, "localhost:4242": true, "[::1]:4242": true,
-		":4242": false, "0.0.0.0:4242": false, "192.168.1.5:4242": false, "[::]:4242": false,
+		":4242": false, "0.0.0.0:4242": false, "192.0.2.5:4242": false, "[::]:4242": false,
 	} {
 		if got := Loopback(addr); got != want {
 			t.Errorf("Loopback(%q) = %v", addr, got)

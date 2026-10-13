@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"net"
@@ -54,7 +56,19 @@ func loopbackHost(host string) bool {
 
 // Wrap returns h behind the guard.
 func (g Guard) Wrap(h http.Handler) http.Handler {
-	keyHash := sha256.Sum256([]byte(g.APIKey))
+	// The keys are compared as MACs under a key made for this process: equal
+	// length whatever the key's, so the comparison leaks neither. This is not
+	// password storage; nothing is kept but the one configured key.
+	macKey := make([]byte, 32)
+	if _, err := rand.Read(macKey); err != nil {
+		panic(err)
+	}
+	mac := func(s string) []byte {
+		h := hmac.New(sha256.New, macKey)
+		h.Write([]byte(s))
+		return h.Sum(nil)
+	}
+	keyHash := mac(g.APIKey)
 	loop := Loopback(g.Addr)
 	allow := map[string]bool{}
 	for _, o := range g.AllowOrigins {
@@ -84,7 +98,7 @@ func (g Guard) Wrap(h http.Handler) http.Handler {
 				}
 			}
 		}
-		if g.APIKey != "" && !openRoute(r.URL.Path) && !keyOK(r, keyHash) {
+		if g.APIKey != "" && !openRoute(r.URL.Path) && !keyOK(r, keyHash, mac) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="jitllmd"`)
 			guardFail(w, r, http.StatusUnauthorized, "unauthenticated",
 				"missing or wrong API key; send Authorization: Bearer <key>")
@@ -147,15 +161,14 @@ func anthropicRoute(path string) bool {
 
 // keyOK compares the key a request carries with the configured one in
 // constant time (over their hashes, so the length does not leak either).
-func keyOK(r *http.Request, want [sha256.Size]byte) bool {
+func keyOK(r *http.Request, want []byte, mac func(string) []byte) bool {
 	var got string
 	if a := r.Header.Get("Authorization"); len(a) > 7 && strings.EqualFold(a[:7], "Bearer ") {
 		got = strings.TrimSpace(a[7:])
 	} else if anthropicRoute(r.URL.Path) {
 		got = r.Header.Get("x-api-key")
 	}
-	sum := sha256.Sum256([]byte(got))
-	return got != "" && subtle.ConstantTimeCompare(sum[:], want[:]) == 1
+	return got != "" && subtle.ConstantTimeCompare(mac(got), want) == 1
 }
 
 // guardFail answers in the error shape of the API the path belongs to, so a
