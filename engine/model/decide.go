@@ -323,6 +323,21 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 		}
 		defer func() { h.Pick, h.PickVals = nil, nil }()
 	}
+	// Where the head runs on the host, the same pick there: the labels'
+	// rows alone (State.pickOnHost).
+	if d.violation != "no-pick" {
+		if cap(d.pickVals) < len(flat) {
+			d.pickVals = make([]float32, len(flat))
+		}
+		d.st.HostPick, d.st.HostPickVals = flat, d.pickVals[:len(flat)]
+		if d.violation == "pick-off-by-one" {
+			d.st.HostPick = make([]int32, len(flat))
+			for i, id := range flat {
+				d.st.HostPick[i] = id + 1
+			}
+		}
+		defer func() { d.st.HostPick, d.st.HostPickVals, d.st.HostPicked = nil, nil, false }()
+	}
 	lg, err := d.st.Prefill(ids)
 	if err != nil {
 		return nil, err
@@ -331,6 +346,10 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 	if h != nil && h.Picked {
 		d.picked++
 		return d.labelScoresOf(h.PickVals, groups)
+	}
+	if d.st.HostPicked {
+		d.picked++
+		return d.labelScoresOf(d.st.HostPickVals, groups)
 	}
 	vals := d.pickVals[:0]
 	for _, id := range flat {
