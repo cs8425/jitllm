@@ -405,8 +405,15 @@ func msaDesc(rows, blk, k, page int, m selMode) (*ir.Kernel, error) {
 // gate's violation) every complete block scores +inf too. The score is
 // written for each of groups kv groups, which QSAGatherK/V read the
 // selection per. One thread per (row, block) of nb blocks a row (the
-// complete blocks of tcap and the tail's). Parameters: pQ (rows x heads x
-// dim), pK (the pool), pTab, pRow, pCS (nb x nRot), pW (dim), pOut (rows x
+// complete blocks of tcap and the tail's).
+//
+// A picture moves the rotary position of the text after it (M-RoPE): a
+// block starting at p turns by p plus the delta of the last of its row's
+// marks at or before p. pMark is the rows' marks: rows+1 offsets into the
+// marks, then each mark's position with the delta's sign in bit 31; pDCS is
+// a RopeTable over the marks' |delta|, mark-major, and the block's turn is
+// pCS's composed with it. Parameters: pQ (rows x heads x dim), pK (the
+// pool), pTab, pRow, pCS (nb x nRot), pW (dim), pMark, pDCS, pOut (rows x
 // groups x nb).
 func QSAScores(rows, heads, dim, nb, blk, groups, page, kvRow, koff, nRot int, neox bool, eps float32,
 	firstKey, dense bool) (*ir.Kernel, error) {
@@ -425,6 +432,8 @@ func QSAScores(rows, heads, dim, nb, blk, groups, page, kvRow, koff, nRot int, n
 	pRow := b.Param("pRow", ir.U32)
 	pCS := b.Param("pCS", ir.F32)
 	pW := b.Param("pW", ir.F32)
+	pMark := b.Param("pMark", ir.U32)
+	pDCS := b.Param("pDCS", ir.F32)
 	pOut := b.Param("pOut", ir.F32)
 	u := func(v int) ir.Value { return b.Const(ir.U32, int64(v)) }
 	flat := b.Min(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, b.CTAID(), b.NTID()), b.TID()), u(rows*nb-1))
@@ -457,6 +466,25 @@ func QSAScores(rows, heads, dim, nb, blk, groups, page, kvRow, koff, nRot int, n
 		return acc
 	}
 	zu, zf := u(0), b.ConstF32(0)
+	// The row's last mark at or before the block's start, its index into pDCS
+	// (none: the mark count, which selects no turn below).
+	m0 := b.Load(ir.U32, pMark, r, 0)
+	nm := b.Sub(ir.U32, b.Load(ir.U32, pMark, r, 1), m0)
+	start := b.Mul(ir.U32, bi, u(blk))
+	none := u(0x7FFFFFFF)
+	sign := u(0x80000000)
+	b.LoopN(nm)
+	mi := b.Phi(ir.U32, zu)
+	sel := b.Phi(ir.U32, none)
+	w := b.Load(ir.U32, pMark, b.Add(ir.U32, b.Add(ir.U32, m0, mi), u(rows+1)), 0)
+	at := b.And(ir.U32, w, u(0x7FFFFFFF))
+	b.SetPhi(sel, b.Select(ir.U32, b.Lt(ir.U32, start, at), sel, b.Add(ir.U32, m0, mi)))
+	b.SetPhi(mi, b.Add(ir.U32, mi, one))
+	b.EndLoop()
+	marked := b.Lt(ir.U32, sel, none)
+	selC := b.Select(ir.U32, marked, sel, zu)
+	neg := b.Lt(ir.U32, zu, b.And(ir.U32, b.Load(ir.U32, pMark, b.Add(ir.U32, selC, u(rows+1)), 0), sign))
+	dsign := b.Select(ir.F32, neg, b.ConstF32(-1), b.ConstF32(1))
 	// The norm's sum of squares.
 	b.Loop(int64(dim))
 	i := b.Phi(ir.U32, zu)
@@ -486,8 +514,14 @@ func QSAScores(rows, heads, dim, nb, blk, groups, page, kvRow, koff, nRot int, n
 			ia, ib = p, b.Add(ir.U32, p, u(np))
 		}
 		va, vb := nv(ia), nv(ib)
-		c := b.Load(ir.F32, pCS, b.Add(ir.U32, csb, b.Add(ir.U32, p, p)), 0)
-		s := b.Load(ir.F32, pCS, b.Add(ir.U32, csb, b.Add(ir.U32, p, p)), 1)
+		c1 := b.Load(ir.F32, pCS, b.Add(ir.U32, csb, b.Add(ir.U32, p, p)), 0)
+		s1 := b.Load(ir.F32, pCS, b.Add(ir.U32, csb, b.Add(ir.U32, p, p)), 1)
+		// The mark's turn after the block start's: cos(a+b), sin(a+b).
+		db := b.Add(ir.U32, b.Mul(ir.U32, selC, u(nRot)), b.Add(ir.U32, p, p))
+		c2 := b.Select(ir.F32, marked, b.Load(ir.F32, pDCS, db, 0), b.ConstF32(1))
+		s2 := b.Select(ir.F32, marked, b.Mul(ir.F32, dsign, b.Load(ir.F32, pDCS, db, 1)), zf)
+		c := b.Sub(ir.F32, b.Mul(ir.F32, c1, c2), b.Mul(ir.F32, s1, s2))
+		s := b.Add(ir.F32, b.Mul(ir.F32, s1, c2), b.Mul(ir.F32, c1, s2))
 		ra := b.Sub(ir.F32, b.Mul(ir.F32, va, c), b.Mul(ir.F32, vb, s))
 		rb := b.Add(ir.F32, b.Mul(ir.F32, va, s), b.Mul(ir.F32, vb, c))
 		for h := range ph {

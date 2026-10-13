@@ -123,12 +123,12 @@ func (g *devTier) prepQ4E(l *layer, li int, p *nn.LayerPlan, w *nn.LayerWeights,
 type q4eScratch struct {
 	h, rank, width int
 	// The hyper-connections.
-	xn, gate, lo, lo2, mix     backend.Buf
-	inj, w                    backend.Buf
-	aHD, axHD, aLR, axLR      backend.Buf
-	normS, quantHD, quantLR   backend.Kernel
-	silu, gateMix, injK       backend.Kernel
-	place                     backend.Kernel
+	xn, gate, lo, lo2, mix  backend.Buf
+	inj, w                  backend.Buf
+	aHD, axHD, aLR, axLR    backend.Buf
+	normS, quantHD, quantLR backend.Kernel
+	silu, gateMix, injK     backend.Kernel
+	place                   backend.Kernel
 	// The n-gram block.
 	emb, aW, axW, key, val     backend.Buf
 	kn, qn, dot, gv, gvn, conv backend.Buf

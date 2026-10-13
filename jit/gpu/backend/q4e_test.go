@@ -30,8 +30,8 @@ func TestQ4EKernelsMatchTheLoops(t *testing.T) {
 		return v
 	}
 	sig := func(x float64) float64 { return 1 / (1 + math.Exp(-x)) }
-	x := val(h*rows*d, 0.37)  // the streams, stream-major
-	w := val(h*d, 0.11)       // a grouped norm
+	x := val(h*rows*d, 0.37) // the streams, stream-major
+	w := val(h*d, 0.11)      // a grouped norm
 	gate := val(rows*h*d, 0.23)
 	y := val(rows*d, 0.53)
 	inj := val(rows*h, 0.71)
@@ -85,13 +85,13 @@ func TestQ4EKernelsMatchTheLoops(t *testing.T) {
 		}
 	}
 	type job struct {
-		name    string
-		k       func() (*ir.Kernel, error)
-		grid    int
-		width   int
-		in      [][]float32
-		want    []float64
-		tol     float64
+		name  string
+		k     func() (*ir.Kernel, error)
+		grid  int
+		width int
+		in    [][]float32
+		want  []float64
+		tol   float64
 	}
 	jobs := []job{
 		{"group norm, stream-major", func() (*ir.Kernel, error) { return kernels.Q4EGroupNorm(d, h, rows, eps, true) },

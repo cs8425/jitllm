@@ -636,6 +636,14 @@ type NGramDevice interface {
 	SetNGramRows(rows []float32)
 }
 
+// QSADevice is a device that runs Qwen3.8-Flash-Next's QSA blocks: before a
+// call the host hands over each row's rotary marks (where a picture moved the
+// positions after it, and by how much), in the call's row order: the row's
+// count, then its (position, delta) pairs.
+type QSADevice interface {
+	SetRopeMarks(marks []int32)
+}
+
 // K3Fault names a piece of Kimi-K3's graph a gate takes out.
 type K3Fault uint8
 

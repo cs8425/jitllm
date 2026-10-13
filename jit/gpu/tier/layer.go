@@ -110,9 +110,9 @@ type layer struct {
 	// MiniMax Sparse Attention (nn.LayerPlan.MSA, msa.go): msa says the block
 	// selects its key blocks; idxQ/mvMQ is its indexer query and nIdxQ that
 	// query's per-head norm, the key being idxK/mvIK with nIdxK.
-	msa   bool
+	msa bool
 	// qsa is a Qwen3.8-Flash-Next attention block's QSA selection (qsa.go).
-	qsa bool
+	qsa   bool
 	idxQ  *resident
 	mvMQ  mv
 	nIdxQ backend.Buf
@@ -133,11 +133,11 @@ type layer struct {
 	// Qwen3.8-Flash-Next (nn.LayerPlan.Q4E, q4e.go): the two
 	// hyper-connections' down, up and placement projections (slots 39..44),
 	// the n-gram key and value (45, 46), and the block's vectors.
-	hcAD, hcAU, hcAI, hcFD, hcFU, hcFI    *resident
-	ngKey, ngVal                          *resident
+	hcAD, hcAU, hcAI, hcFD, hcFU, hcFI       *resident
+	ngKey, ngVal                             *resident
 	mvHAD, mvHAU, mvHAI, mvHFD, mvHFU, mvHFI mv
-	mvNGK, mvNGV                          mv
-	q4e                                   *q4eBlock
+	mvNGK, mvNGV                             mv
+	q4e                                      *q4eBlock
 
 	nAttn, nFFN backend.Buf // norm weights, f32
 	// nPostAttn and nPostFFN are gemma2/gemma3's two extra RMSNorms, applied to
@@ -6538,6 +6538,12 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	}
 	ropeDev := bs.ropeTable != nil && !g.RopeTableHost && rrows >= 1 &&
 		pos >= 0 && top <= kernels.RopeTabMaxPos
+	// QSA's marks, each row's pictures (qsa.go).
+	if bs.pkv != nil {
+		if e := g.qsaStage(bs.pkv.qsa, R); e != nil {
+			return refuse("QSA: %v", e)
+		}
+	}
 	// DeepSeek V4's entries rotate at positions of their own, which only the
 	// device's table builds; its keys are read through the paged pool.
 	if bs.ds4 != nil && lo < hi {
@@ -8740,6 +8746,9 @@ func (g *devTier) layersSession(s backend.Session) {
 		w(bs.kpos, kposs)
 	}
 	bs.ds4.ds4Writes(w)
+	if bs.pkv != nil {
+		bs.pkv.qsa.qsaWrites(w)
+	}
 	g.q4eWrites(bs.q4e, w)
 	if pk := bs.pkv; pk != nil && pk.cur != nil {
 		w(pk.pRow, u32view(pk.desc))

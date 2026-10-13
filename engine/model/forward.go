@@ -283,6 +283,8 @@ type State struct {
 	ldTokens nn.TokenDevice
 	// ldNGram is its n-gram face (nn.NGramDevice), Qwen3.8-Flash-Next's.
 	ldNGram nn.NGramDevice
+	// ldQSA is its QSA face (nn.QSADevice), Qwen3.8-Flash-Next's.
+	ldQSA nn.QSADevice
 	// dmoe is Gemma 4's mixture block's scratch (Config.DenseMoE): the
 	// router's input and the mixture's sum, each NEmbd wide. See denseMoE.
 	dmoe [2][]float32
@@ -4392,6 +4394,7 @@ func (s *State) setLD(ld nn.LayerDevice) {
 	s.ldInputs, _ = ld.(nn.LayerInputDevice)
 	s.ldTokens, _ = ld.(nn.TokenDevice)
 	s.ldNGram, _ = ld.(nn.NGramDevice)
+	s.ldQSA, _ = ld.(nn.QSADevice)
 }
 
 // layerInputs hands the device the rows' per-layer embedding inputs for the

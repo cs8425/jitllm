@@ -55,6 +55,8 @@ type gpuSession struct {
 	ids []int32
 	// ng is the rows' n-gram table rows (SetNGramRows).
 	ng []float32
+	// marks is the rows' rotary marks (SetRopeMarks).
+	marks []int32
 }
 
 // PlanBlocks forwards the placement's block count; see GPU.PlanBlocks.

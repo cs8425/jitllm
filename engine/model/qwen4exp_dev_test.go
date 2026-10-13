@@ -83,3 +83,82 @@ func TestQwen4ExpDeviceRunsTheChunkWhole(t *testing.T) {
 		t.Skip("no device on this host")
 	}
 }
+
+// TestQwen4ExpQSATurnsByTheMarks holds the device's QSA to the host where a
+// picture has moved the positions after it (M-RoPE's marks): the pooled keys
+// of the blocks past the mark turn by their position plus its delta, a turn
+// the device composes from two tables. A mark is set on both arms at
+// position 6, ahead of the decode that selects (from position 12), once
+// moving the positions back and once forward; each must move the host's
+// logits, or the comparison could not see the device ignore it.
+func TestQwen4ExpQSATurnsByTheMarks(t *testing.T) {
+	m, g := openQ4E(t, "synth-qwen4exp")
+	defer m.Close()
+	const at = 6
+	run := func(st *State, delta int) [][]float32 {
+		var out [][]float32
+		for p, id := range g.IDs {
+			if p == at && delta != 0 {
+				st.markRope(0, at, delta)
+			}
+			lg, err := st.Forward(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, append([]float32(nil), lg...))
+		}
+		return out
+	}
+	nmse := func(a, b [][]float32) float64 {
+		w := 0.0
+		for p := range a {
+			var num, den float64
+			for i := range a[p] {
+				d := float64(a[p][i] - b[p][i])
+				num, den = num+d*d, den+float64(a[p][i])*float64(a[p][i])
+			}
+			w = max(w, num/den)
+		}
+		return w
+	}
+	host := func(delta int) [][]float32 {
+		st := m.NewState(len(g.IDs) + 1)
+		defer st.Close()
+		return run(st, delta)
+	}
+	plain := host(0)
+	ran := 0
+	for _, spec := range stepDevices() {
+		gpu, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(spec),
+			tier.WithDeviceTune(tier.TuneOff)}, testTierOpts(t)...)...)
+		if err != nil || gpu == nil {
+			t.Logf("%s: not present (%v)", spec, err)
+			continue
+		}
+		ran++
+		t.Run(spec, func(t *testing.T) {
+			defer gpu.Close()
+			for _, delta := range []int{-3, 5} {
+				want := host(delta)
+				if moved := nmse(plain, want); !(moved > 1e-4) {
+					t.Fatalf("delta %d: the mark moves the host's logits by %.3e, which no gate could see", delta, moved)
+				}
+				st := m.NewState(len(g.IDs) + 1)
+				st.SetDeviceLayers(gpu, -1)
+				if st.GPULayers() != m.Cfg.NLayer {
+					t.Fatalf("placed %d of %d blocks: %v", st.GPULayers(), m.Cfg.NLayer, gpu.Err())
+				}
+				got := run(st, delta)
+				st.Close()
+				if w := nmse(want, got); !(w < 1e-6) {
+					t.Fatalf("delta %d: worst logit NMSE %.3e against the host", delta, w)
+				} else {
+					t.Logf("delta %d: worst logit NMSE %.3e", delta, w)
+				}
+			}
+		})
+	}
+	if ran == 0 {
+		t.Skip("no device on this host")
+	}
+}
