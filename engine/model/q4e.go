@@ -296,6 +296,17 @@ type q4eScratch struct {
 	twos []float32
 	ng   *ngramScratch
 	qsa  *qsaScratch
+	// rid is each row's token id for the n-gram block, -1 for a row with
+	// none (q4eRowIDs).
+	rid []int32
+}
+
+// q4eRowIDs records each of n rows' token ids for the n-gram block.
+func (s *State) q4eRowIDs(n int, id func(i int) int32) {
+	s.growQ4E(n)
+	for i := 0; i < n; i++ {
+		s.q4.rid[i] = id(i)
+	}
 }
 
 // allocQ4E sizes a State's buffers for one row, and its streams.
@@ -328,6 +339,7 @@ func (s *State) growQ4E(n int) {
 	g.lo = make([]float32, n*c.HCLowRank)
 	g.mix, g.out = make([]float32, n*d), make([]float32, n*d)
 	g.w = make([]float32, n*h)
+	g.rid = make([]int32, n)
 	if len(g.twos) < n*h {
 		g.twos = make([]float32, n*h)
 		for i := range g.twos {
@@ -335,6 +347,7 @@ func (s *State) growQ4E(n int) {
 		}
 	}
 	s.growNGram(n)
+	s.growQSARows(n)
 }
 
 // q4eExpand copies each row's embedding (stream 0) into the other streams:

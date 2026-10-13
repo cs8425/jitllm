@@ -94,18 +94,25 @@ func (s *State) ngramState(li, slot int) (prev, hist []float32) {
 }
 
 // ngramApply adds the n-gram embedding into n rows of x in block li. Row r is
-// sequence slot(r)'s next position with token tok(r) (-1 for a row with no
-// token, which hashes as the picture placeholder); rows of one slot are in
-// order.
-func (s *State) ngramApply(li int, l *layer, x []float32, n int, slot func(r int) int, tok func(r int) int32) error {
+// the next position of sequence slot of the State owner(r) returns, with
+// token tok(r) (-1 for a row with no token, which hashes as the picture
+// placeholder). order is the rows in each sequence's position order (nil for
+// 0..n-1), since each row moves its sequence's state on.
+func (s *State) ngramApply(li int, l *layer, x []float32, n int, order []int,
+	owner func(r int) (*State, int), tok func(r int) int32) error {
 	c, g, d := s.m.Cfg, s.q4.ng, l.q4e
 	if c.q4eFault == q4eFaultNoNGram {
 		return nil
 	}
 	h, e := c.HCMult, c.NEmbd
 	hd, w, rd := h*e, c.NGramWidth(), c.NGramRowDim
-	for r := 0; r < n; r++ {
-		prev, _ := s.ngramState(li, slot(r))
+	for oi := 0; oi < n; oi++ {
+		r := oi
+		if order != nil {
+			r = order[oi]
+		}
+		o, sl := owner(r)
+		prev, _ := o.ngramState(li, sl)
 		t := tok(r)
 		if t < 0 {
 			t = c.NGramImage
@@ -153,8 +160,13 @@ func (s *State) ngramApply(li int, l *layer, x []float32, n int, slot func(r int
 	}
 	s.jit.NewInput()
 	hist := c.ngramHist()
-	for r := 0; r < n; r++ {
-		_, hs := s.ngramState(li, slot(r))
+	for oi := 0; oi < n; oi++ {
+		r := oi
+		if order != nil {
+			r = order[oi]
+		}
+		o, sl := owner(r)
+		_, hs := o.ngramState(li, sl)
 		cur := g.gvn[r*hd : (r+1)*hd]
 		// Tap t reads (NGramConv-1-t)*NGram positions back: the last tap is
 		// the row itself, the others the history, oldest first.

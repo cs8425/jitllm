@@ -140,7 +140,10 @@ func (s *State) qsaQueryRest(q []float32, l *layer, cs []float32) {
 // the first n cached positions of sequence slot in layer li's history, and
 // returns it, or nil when every position is read. The window's pages must be
 // resident (kvEnsureWindow).
-func (s *State) qsaMask(li, slot, n int, q, bias []float32, l *layer) []float32 {
+//
+// The history read is o's, the scratch s's: a step's rows may be other
+// sessions' sequences.
+func (s *State) qsaMask(o *State, li, slot, n int, q, bias []float32, l *layer) []float32 {
 	c, g := s.m.Cfg, s.qsa()
 	R, d := c.QSARatio, c.IdxHeadDim
 	nb := n / R
@@ -155,10 +158,10 @@ func (s *State) qsaMask(li, slot, n int, q, bias []float32, l *layer) []float32 
 	// its first position.
 	for b := 0; b < nb; b++ {
 		p := g.pooled[b*d : (b+1)*d]
-		s.qsaKeyAt(li, slot, b*R, p)
+		o.qsaKeyAt(li, slot, b*R, p)
 		if c.q4eFault != q4eFaultQSAFirstKey {
 			for t := 1; t < R; t++ {
-				s.qsaAddKey(li, slot, b*R+t, p)
+				o.qsaAddKey(li, slot, b*R+t, p)
 			}
 			s.scale(p, 1/float32(R))
 		}
@@ -223,4 +226,49 @@ func (s *State) qsaAddKey(li, slot, pos int, dst []float32) {
 	c := s.m.Cfg
 	k, _ := s.kv.layers[li].at(s.kvlAt(li), slot, pos, c.NKVHead)
 	s.axpy(dst, k[:len(dst)], 1)
+}
+
+// qsaProjectRows fills every row's raw key (bk, padded to HeadDim) and query
+// heads (bq, normed and rotated at the row's table) from a chunk's n block
+// inputs in bh.
+func (s *State) qsaProjectRows(l *layer, n int, cs, csSWA []float32, li int) error {
+	c, g := s.m.Cfg, s.qsa()
+	d, hq := c.IdxHeadDim, c.IdxHeads*c.IdxHeadDim
+	s.growQSARows(n)
+	clear(g.bk[:n*c.HeadDim])
+	for i := 0; i < n; i++ {
+		if err := s.mv(g.bk[i*c.HeadDim:i*c.HeadDim+d], l.idxK, s.bh[i*c.NEmbd:(i+1)*c.NEmbd]); err != nil {
+			return err
+		}
+	}
+	if err := s.mm(g.bq[:n*hq], l.idxQ, s.bh, n); err != nil {
+		return err
+	}
+	for i := 0; i < n; i++ {
+		s.qsaQueryRest(g.bq[i*hq:(i+1)*hq], l, s.ropeTable(li, cs, csSWA, i))
+	}
+	return nil
+}
+
+// qsaRowOf is row i's cache vectors for a QSA block, assembled in kc and vc
+// from its k and v and its raw indexer key in bk.
+func (s *State) qsaRowOf(li, i int, k, v []float32) ([]float32, []float32) {
+	c, g := s.m.Cfg, s.qsa()
+	kvr := c.KVRowAt(li)
+	msaRow(s.kc[:kvr], s.vc[:kvr], k, v, g.bk[i*c.HeadDim:(i+1)*c.HeadDim])
+	return s.kc[:kvr], s.vc[:kvr]
+}
+
+// qsaRows computes the selection for each of n rows before a batched
+// attention: row i's query heads are in bq, its history is slot(i)'s first
+// win(i) positions of layer li, and its mask lands in bbias at i*attStride
+// (masks[i], nil for a dense row).
+func (s *State) qsaRows(li int, l *layer, n int, owner func(i int) (*State, int), win func(i int) int,
+	masks [][]float32) {
+	c, g := s.m.Cfg, s.qsa()
+	hq := c.IdxHeads * c.IdxHeadDim
+	for i := 0; i < n; i++ {
+		o, slot := owner(i)
+		masks[i] = s.qsaMask(o, li, slot, win(i), g.bq[i*hq:(i+1)*hq], g.bbias[i*s.attStride:(i+1)*s.attStride], l)
+	}
 }

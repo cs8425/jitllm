@@ -3599,7 +3599,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			// every sublayer reads its hyper-connection's mix (q4e.go).
 			if c.NGramAt(li) {
 				tok := s.tok
-				if err := s.ngramApply(li, l, s.xa, 1, func(int) int { return 0 },
+				if err := s.ngramApply(li, l, s.xa, 1, nil, func(int) (*State, int) { return s, 0 },
 					func(int) int32 { return tok }); err != nil {
 					return nil, err
 				}
@@ -3785,7 +3785,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			}
 			if c.QSAAt(li) {
 				g := s.qsa()
-				j.bias = s.qsaMask(kvli, 0, j.w0+j.an, g.q, g.bias, l)
+				j.bias = s.qsaMask(s, kvli, 0, j.w0+j.an, g.q, g.bias, l)
 			}
 			if j.fn == nil {
 				j.fn = s.attnHeads

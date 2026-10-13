@@ -592,6 +592,16 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 				return nil
 			}
 		}
+		if c.Q4E() {
+			fill := refill
+			refill = func() error {
+				if err := fill(); err != nil {
+					return err
+				}
+				s.q4eExpand(s.bx[:n*c.ResidW()], n)
+				return nil
+			}
+		}
 		// A learned position table (starcoder) is added inside refill, so every
 		// restart gets its positions back; serially, since one scratch row
 		// serves the loop.
@@ -818,6 +828,16 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 					}
 				}
 			}
+			// Qwen3.8-Flash-Next's n-gram block hashes the chunk's tokens
+			// (-1 for a supplied embedding).
+			if c.NGramAt(li) {
+				s.q4eRowIDs(n, func(i int) int32 {
+					if rowIDs != nil {
+						return rowIDs[base+i]
+					}
+					return -1
+				})
+			}
 			// A host block needs the host's rows, which a device-only prompt
 			// did not allocate (growDeviceBatch); a demotion lands here.
 			if err := s.hostRows(li, slot, base, p0, n, chunkRows, bidir); err != nil {
@@ -856,6 +876,12 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 		}
 		if c.ResAttn() && base+n == len(src) {
 			if err := s.k3Collapse(s.bx[:n*c.ResidW()], n); err != nil {
+				return nil, err
+			}
+			copy(s.x, s.bx[(n-1)*c.NEmbd:n*c.NEmbd])
+		}
+		if c.Q4E() && base+n == len(src) {
+			if err := s.q4eCollapse(s.bx[:n*c.ResidW()], n); err != nil {
 				return nil, err
 			}
 			copy(s.x, s.bx[(n-1)*c.NEmbd:n*c.NEmbd])
@@ -1191,6 +1217,22 @@ func (s *State) hostRows(li, slot, base, p0, n, chunkRows int, bidir bool) error
 	tn := s.tick()
 	// Kimi-K3's attention reads its mix over the bank (k3.go).
 	attnIn := s.bx
+	if c.Q4E() {
+		// The n-gram embedding, then the attention's hyper-connection mix
+		// (q4e.go).
+		s.growQ4E(chunkRows)
+		x := s.bx[:n*c.ResidW()]
+		if c.NGramAt(li) {
+			if err := s.ngramApply(li, l, x, n, nil, func(int) (*State, int) { return s, slot },
+				func(i int) int32 { return s.q4.rid[i] }); err != nil {
+				return err
+			}
+		}
+		if err := s.hcMix(x, n, &l.q4e.attn); err != nil {
+			return err
+		}
+		attnIn = s.q4.mix
+	}
 	if c.ResAttn() {
 		var err error
 		if attnIn, err = s.k3AttnIn(li, l, s.bx[:n*c.ResidW()], n); err != nil {
@@ -1302,6 +1344,12 @@ func (s *State) hostRows(li, slot, base, p0, n, chunkRows int, bidir bool) error
 				return err
 			}
 		}
+		qsa := c.QSAAt(li)
+		if qsa {
+			if err := s.qsaProjectRows(l, n, s.bcs, s.bcsSWA, li); err != nil {
+				return err
+			}
+		}
 
 		// RoPE and the cache write must both finish for the WHOLE chunk
 		// before any attention runs: token i attends to earlier tokens of
@@ -1317,6 +1365,9 @@ func (s *State) hostRows(li, slot, base, p0, n, chunkRows int, bidir bool) error
 			k, v := s.bk[i*kvDim:(i+1)*kvDim], s.bv[i*kvDim:(i+1)*kvDim]
 			if msa {
 				k, v = s.msaRowOf(li, i, k, v)
+			}
+			if qsa {
+				k, v = s.qsaRowOf(li, i, k, v)
 			}
 			// This row's rotary table, built once above and exactly NRot
 			// wide, shared by all heads of this token.
@@ -1373,6 +1424,10 @@ attend:
 				// The masks are laid out at the State's own stride (msa.go).
 				masks, mstride = s.msaMasks, s.attStride
 				s.msaRows(kvli, n, func(int) int { return slot }, func(i int) int { return p0 + i + 1 }, masks)
+			}
+			if c.QSAAt(li) {
+				masks, mstride = s.qsa().masks, 0
+				s.qsaRows(kvli, l, n, func(int) (*State, int) { return s, slot }, func(i int) int { return p0 + i + 1 }, masks)
 			}
 			s.jit.Parallel(n, 1, func(lo, hi int) {
 				for i := lo; i < hi; i++ {
@@ -1468,7 +1523,9 @@ attend:
 		s.tock(opRMSNorm, tn)
 	}
 	tr := s.tick()
-	if c.ResAttn() {
+	if c.Q4E() {
+		s.hcPlace(s.bx[:n*c.ResidW()], n, s.bh)
+	} else if c.ResAttn() {
 		s.k3Resid(li, s.bx, s.bh, n)
 	} else {
 		s.addInto(s.bx[:n*c.NEmbd], s.bh[:n*c.NEmbd])
@@ -1493,6 +1550,11 @@ attend:
 			return err
 		}
 		s.batchNormB(s.bh, in, l.ffnNorm, l.ffnNormB, c.NEmbd, n)
+	} else if c.Q4E() {
+		if err := s.hcMix(s.bx[:n*c.ResidW()], n, &l.q4e.ffn); err != nil {
+			return err
+		}
+		copy(s.bh[:n*c.NEmbd], s.q4.mix[:n*c.NEmbd])
 	} else {
 		s.batchNormB(s.bh, s.bx, l.ffnNorm, l.ffnNormB, c.NEmbd, n)
 	}
@@ -1507,6 +1569,13 @@ attend:
 		if err := s.k3MoEBatch(li, l, ffnIn, s.bx, n); err != nil {
 			return err
 		}
+	} else if l.router.data != nil && c.Q4E() {
+		out := s.q4.out[:n*c.NEmbd]
+		clear(out)
+		if err := s.moeBatch(li, l, ffnIn, out, n); err != nil {
+			return err
+		}
+		s.hcPlace(s.bx[:n*c.ResidW()], n, out)
 	} else if l.router.data != nil {
 		if err := s.moeBatch(li, l, ffnIn, s.bx, n); err != nil {
 			return err
