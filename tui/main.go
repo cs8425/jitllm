@@ -7,6 +7,11 @@
 // answers at the configured address (the login service's by default) and the
 // app's own only when none does; --connect and --embedded force one. With no model it opens on the
 // models screen.
+//
+//	tui demo relocate [-connect addr] [-model name] [-devices ids] [-auto]
+//
+// is the relocation demo (demo.go): a model's blocks and their history moving
+// between the host and the devices of a running jitllmd while a reply streams.
 package main
 
 import (
@@ -22,6 +27,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "demo" {
+		os.Exit(runDemo(os.Args[2:]))
+	}
 	config.UseEnv(config.Env{Models: os.Getenv("JITLLM_MODELS"), DataHome: os.Getenv("XDG_DATA_HOME")})
 	cfg := config.LoadConfig()
 	chat := flag.Bool("chat", cfg.Chat, "apply the model's chat template")

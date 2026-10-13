@@ -389,3 +389,27 @@ func (s *State) recBytesOf(li int) uint64 {
 	}
 	return uint64(len(s.rconv[li])+len(s.rstate[li])) * 4
 }
+
+// BlockHistory is what block li's history costs, so a caller can say how much
+// of it a move carries at any position: a recurrent summary's bytes (fixed)
+// and the bytes each kept position adds, which a windowed block stops adding
+// once `window` positions are held (zero keeps every position). It is
+// blockHistoryAt's arithmetic in its two parts.
+func (s *State) BlockHistory(li int) (perPos uint64, window int, state uint64) {
+	state = s.recBytesOf(li)
+	if li < s.kv.lo || li >= len(s.kv.layers) {
+		return 0, 0, state
+	}
+	pg := &s.kv.layers[li]
+	if pg.p == 0 {
+		return 0, 0, state
+	}
+	perPos = uint64(pg.pp) * 4 / uint64(pg.p)
+	if !pg.latent {
+		perPos *= 2
+	}
+	if pg.win > 0 {
+		window = pg.win + pg.p
+	}
+	return perPos, window, state
+}

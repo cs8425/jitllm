@@ -86,6 +86,17 @@ The [catalog](/docs/reference/models/#the-catalog), ranked for this machine afte
 
 Every block of the open model and where it runs, the decode rate over the last seconds with its bandwidth and bytes per token, how full each memory is, and what the pager has read. `→` moves one more block onto the device and `←` brings one home; `home` puts every block on the host and `end` every block on the device. The conversation keeps going across a move: the KV cache and any recurrent state move with the blocks. See [Devices and placement](/docs/guides/devices/) and [Memory and paging](/docs/guides/memory/).
 
+## The relocation demo
+
+`jitllm-tui demo relocate` connects to a running `jitllmd` and shows, while a reply streams, a column for the host and one for each device the model was loaded on, with the model's blocks in the column they run in and a bar on each for the history it holds. Moving blocks makes them slide to their new column; a banner reports what the service said about the move (blocks, history moved, the pause between two tokens, the path, whether the output projection followed) and how many prompt rows were recomputed, which is the growth of the session's `tokens_prefilled` across the call.
+
+```sh
+jitllmd serve -load model.jlm -devices cuda:0,vulkan:1
+jitllm-tui demo relocate -model model.jlm
+```
+
+`m` moves every device block to the next device, `h` brings them home, `1`-`9` move one ninth of the blocks, `a` streams a long reply and moves at tokens 80 and 160, `g` streams one without moving, `s` stops it. A move to or from the host waits for the reply to end, as the service takes the session for it.
+
 ## Settings
 
 The same settings as the desktop app, in the same file: sampling, the seed, the chat template, the system prompt, the prompt cache on disk, the devices, the context and the model folders (the first is where conversions go). `tab` and `shift+tab` move between fields, `enter` on the last field saves, and `esc` throws the changes away.
