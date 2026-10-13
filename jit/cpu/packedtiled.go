@@ -113,18 +113,16 @@ func EmitPackedMatMulTiled(t quant.Type, k, nrows, tok int, dk DotKind) ([]byte,
 	if tok < 2 || tok > maxTok {
 		return nil, fmt.Errorf("jit: EmitPackedMatMulTiled: %s tok=%d out of range 2..%d", t, tok, maxTok)
 	}
-	sub, bits, biasK, biasArray := kernels.Layout(q)
-	perSuper, scOff := kernels.ScaleLayout(q)
-	signed := kernels.SignedPayload(q)
-	minD := kernels.MinInD(q)
-	hi := kernels.HiPlane(q)
-	codes, err := hasCodes(q)
+	const who = "EmitPackedMatMulTiled"
+	f, err := packedFormatK(q, t)
 	if err != nil {
 		return nil, err
 	}
-	pw, hw := sub*bits/32, sub*hi/32
-	words := pw + hw
-	halfSub := sub / 2
+	sub, bits, biasK, biasArray := f.sub, f.bits, f.biasK, f.biasArray
+	perSuper, scOff := f.perSuper, f.scOff
+	signed, minD, hi, codes := f.signed, f.minD, f.hi, f.codes
+	pw, hw := f.pw, f.hw
+	halfSub := f.halfSub
 	const vec = 32
 	grp := PackedFusedGroupOf(t) / 8
 
@@ -194,109 +192,35 @@ func EmitPackedMatMulTiled(t quant.Type, k, nrows, tok int, dk DotKind) ([]byte,
 	}
 	eD, eSC, eS, eO, eC, eT := pool[0], pool[1], pool[2], pool[3], pool[4], pool[5]
 
-	a.MOVLoad(RCX, At(RDI, 0))  // Out
-	a.MOVLoad(R11, At(RDI, 16)) // A
-	a.MOVLoad(R12, At(RDI, 24)) // AScale
-	a.MOVLoad(R13, At(RDI, 48)) // RowStr
-	a.MOVLoad(RBX, At(RDI, 56)) // Scr
-	if biasArray {
-		a.MOVLoad(R10, At(RDI, 112)) // Q32 -> the minimum scratch
-	} else {
-		a.MOVLoad(R10, At(RDI, 64)) // AHalf
-	}
+	packedArgs(&a, &f)
 	if bits == 4 {
 		a.VMOVDQULoad(mask, At(RBX, 0))
 	} else if signed {
 		a.VMOVDQULoad(mask, At(RBX, 192))
 	}
-	if scOff != 0 {
-		a.VMOVDQULoad(scOffV, At(RBX, 224+int32(scOffSlot(scOff))))
-	}
-	if hi != 0 {
-		a.VMOVDQULoad(hiMask, At(RBX, hiMaskSlot(hi)))
-	}
-	if codes {
-		a.VMOVDQULoad(lut, At(RBX, codesSlot))
-	}
+	packedConsts(&a, &f, scOffV, hiMask, lut)
 
-	rowLoop := func(body func()) {
-		a.MOVLoad(RBX, At(RDI, 32))
-		a.SUBQ(R15, R15)
-		l := a.Label()
-		a.Bind(l)
-		body()
-		a.ADDimm(R15, int32(group*4))
-		a.DEC(RBX)
-		a.JNZ(l)
-	}
+	rowLoop := func(body func()) { packedRowLoop(&a, group, body) }
 
-	a.MOVLoad(RDX, At(RDI, 8)) // QS
 	// R9 is the SC cursor, and a narrow format has no SC plane, so there it
 	// carries the d plane's own row offset (DRowBytes per row).
-	narrow := NarrowD(t)
-	e8 := E8M0D(t)
-	stream := kernels.ScStream(q)
-	if !narrow {
-		a.MOVLoad(R9, At(RDI, 152)) // SC
-	}
-	a.MOVLoad(RAX, At(RDI, 40)) // K, in super-blocks
-	a.MOVLoad(R8, At(RDI, 144)) // D
+	stream := f.stream
+	packedCursors(&a, &f)
 
 	outer := a.Label()
 	a.Bind(outer)
 
 	// --- this super-block's row scales, f16 -> f32 into Scratch ------------
+	// One temporary for both shuffles: the stores are sequential, and a second
+	// register would collide with the epilogue pool on formats whose pool is
+	// only seven deep (Q5_K at tok=4).
 	shufLo, shufHi := act[0], act[1]
-	a.MOVLoad(RBX, At(RDI, 56))
-	a.MOVLoad(RSI, At(RDI, 72))
-	a.VMOVDQULoad(shufLo, At(RBX, 64))
-	if biasArray {
-		a.VMOVDQULoad(shufHi, At(RBX, 96))
-	}
-	if narrow {
-		a.SUBQ(R9, R9)
-	}
-	rowLoop(func() {
-		for g := 0; g < grp; g++ {
-			off := int32(g * vec)
-			// One temporary for both shuffles: the stores are sequential,
-			// and a second register would collide with the epilogue pool on
-			// formats whose pool is only seven deep (Q5_K at tok=4).
-			if e8 {
-				// MXFP4's E8M0 byte shifted left 23 is the f32; see
-				// kernels.DSlots and packedfused.go's twin.
-				a.VPMOVZXBD(tmp, Idx(R8, R9, 1, off/4))
-				a.VPSLLD(tmp, tmp, 23)
-			} else if narrow {
-				a.VCVTPH2PS(tmp, Idx(R8, R9, 1, off/2))
-			} else {
-				a.VMOVDQULoad(payv[0], Idx(R8, R15, 1, off))
-				a.VPSHUFB(tmp, payv[0], shufLo)
-				a.VPERMQ(tmp, tmp, 0xD8)
-				a.VCVTPH2PSReg(tmp, tmp)
-			}
-			a.VMOVDQUStore(Idx(RSI, R15, 1, off), tmp)
-			if biasArray {
-				a.VPSHUFB(tmp, payv[0], shufHi)
-				a.VPERMQ(tmp, tmp, 0xD8)
-				a.VCVTPH2PSReg(tmp, tmp)
-				a.VMOVDQUStore(Idx(R10, R15, 1, off), tmp)
-			}
-		}
-		if narrow {
-			a.ADDimm(R9, int32(group*DRowBytes(t)))
-		}
-	})
-	if narrow {
-		a.ADDQmem(R8, At(RDI, 160)) // half the payload's stride; see DSuperBytes
-	} else {
-		a.ADDQ(R8, R13)
-	}
+	packedScalePass(&a, &f, t, group, grp, shufLo, shufHi, payv[0], tmp, tmp, false)
 
 	// --- the sub-blocks ---------------------------------------------------
 	for sn := 0; sn < perSuper; sn++ {
-		pairOff := int32(sub * sn / Q8Block * 8)
-		sh := byte((sn % perWordOf(biasArray)) * strideOf(biasArray))
+		pairOff := f.pairOff(sn)
+		sh := f.scShift(sn)
 		// The correction constant is loaded in the epilogue, not hoisted: above
 		// the row loop it would sit in a register the broadcasts clobber (the
 		// epilogue pool), and loading it from RBX inside the body clobbers the row
@@ -365,39 +289,20 @@ func EmitPackedMatMulTiled(t quant.Type, k, nrows, tok int, dk DotKind) ([]byte,
 				a.ADDQ(RSI, R13)
 			}
 			// --- the secondary plane ---
-			lanes := 0
-			if hi != 0 {
-				lanes = 8 / hi
-			}
 			for hwi := 0; hwi < hw; hwi++ {
 				for g := 0; g < grp; g++ {
 					a.VMOVDQULoad(payv[g%payR], Idx(RSI, R15, 1, int32(g*vec)))
-					for half := 0; half < 2; half++ {
-						for w := 0; w < pw; w++ {
-							gi := w + half*pw
-							if gi/lanes != hwi {
-								continue
-							}
-							switch s := hi * (gi % lanes); {
-							case s < 4:
-								a.VPSLLD(tmp, payv[g%payR], byte(4-s))
-								a.VPAND(tmp, tmp, hiMask)
-							case s == 4:
-								a.VPAND(tmp, payv[g%payR], hiMask)
-							default:
-								a.VPSRLD(tmp, payv[g%payR], byte(s-4))
-								a.VPAND(tmp, tmp, hiMask)
-							}
-							base := int32(sub*sn + 4*w)
-							if half == 1 {
-								base = int32(sub*sn + halfSub + 4*w)
-							}
-							for i := 0; i < tok; i++ {
-								a.VPBROADCASTD(act[i], At(R11, base+int32(i)*aTok))
-								a.VPDPBUSD(iac[g][i], tmp, act[i])
-							}
+					f.hiFields(hwi, func(half, w, s int) {
+						hiField(&a, tmp, payv[g%payR], hiMask, s)
+						base := int32(sub*sn + 4*w)
+						if half == 1 {
+							base = int32(sub*sn + halfSub + 4*w)
 						}
-					}
+						for i := 0; i < tok; i++ {
+							a.VPBROADCASTD(act[i], At(R11, base+int32(i)*aTok))
+							a.VPDPBUSD(iac[g][i], tmp, act[i])
+						}
+					})
 				}
 				a.ADDQ(RSI, R13)
 			}
@@ -433,12 +338,7 @@ func EmitPackedMatMulTiled(t quant.Type, k, nrows, tok int, dk DotKind) ([]byte,
 					a.VCVTDQ2PS(eSC, eSC)
 				} else if perSuper > 1 {
 					a.VMOVDQULoad(eSC, Idx(R9, R15, 1, off))
-					if 24-sh > 0 {
-						a.VPSLLD(eT, eSC, 24-sh)
-					} else {
-						a.VMOVAPSReg(eT, eSC)
-					}
-					a.VPSRLD(eT, eT, 24)
+					scByte(&a, eT, eSC, sh)
 					if scOff != 0 {
 						a.VPSUBD(eT, eT, scOffV)
 					}
@@ -466,8 +366,7 @@ func EmitPackedMatMulTiled(t quant.Type, k, nrows, tok int, dk DotKind) ([]byte,
 						if stream {
 							a.VMULPS(eS, eS, eSC) // * m, extracted above
 						} else if !minD { // Q5_1's m is one, and it has no sc word
-							a.VPSLLD(eSC, eSC, 16-sh)
-							a.VPSRLD(eSC, eSC, 24)
+							scMinByte(&a, eSC, eSC, sh)
 							a.VCVTDQ2PS(eSC, eSC)
 							a.VMULPS(eS, eS, eSC)
 							a.VMOVDQULoad(eSC, Idx(R9, R15, 1, off)) // restore the word
@@ -489,30 +388,10 @@ func EmitPackedMatMulTiled(t quant.Type, k, nrows, tok int, dk DotKind) ([]byte,
 				}
 			}
 		})
-		for w := 0; w < words; w++ {
-			a.ADDQ(RDX, R13)
-		}
-		if stream && scStep(sn) || !stream && perSuper > 1 && sn%perWordOf(biasArray) == perWordOf(biasArray)-1 {
-			a.ADDQ(R9, R13)
-		}
+		packedSubStep(&a, &f, sn)
 	}
-	a.ADDimm(R11, int32(perSuper*sub))
-	a.ADDimm(R12, int32(perSuper*sub/Q8Block*8))
-	if sub == Q8Block/2 {
-		a.ADDimm(R10, int32(perSuper*4))
-	}
-	if perSuper == 1 {
-		a.ADDQ(R9, R13)
-	}
+	packedSuperStep(&a, &f, true)
 	a.DEC(RAX)
 	a.JNZ(outer)
-
-	a.VZEROUPPER()
-	a.RET()
-	code := a.Bytes()
-	if len(code) > PackedWideBudget {
-		return nil, fmt.Errorf("jit: EmitPackedMatMulTiled: %s is %d bytes, over the %d budget",
-			t, len(code), PackedWideBudget)
-	}
-	return code, nil
+	return packedCode(&a, who, t)
 }
