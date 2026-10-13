@@ -1570,18 +1570,19 @@ func (g *devTier) resetRecRows(sid uint64, rows []int) bool {
 	if !seated || len(rows) == 0 {
 		return true
 	}
+	var ls []*layer
 	for _, l := range g.layers {
-		if l == nil || !l.linear || l.recOf(sid) == nil {
-			continue
+		if l != nil && l.linear && l.recOf(sid) != nil {
+			ls = append(ls, l)
 		}
-		for _, row := range rows {
-			if row < 0 || row >= st.rows {
-				continue // a row the batch has not grown to holds nothing yet
-			}
-			if err := g.recZero(l, st.base+row, 1); err != nil {
-				g.LastErr = "rows: " + err.Error()
-				return false
-			}
+	}
+	for _, row := range rows {
+		if row < 0 || row >= st.rows {
+			continue // a row the batch has not grown to holds nothing yet
+		}
+		if err := g.recZeroLayers(ls, st.base+row, 1); err != nil {
+			g.LastErr = "rows: " + err.Error()
+			return false
 		}
 	}
 	return true

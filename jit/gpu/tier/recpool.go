@@ -245,7 +245,26 @@ func (g *devTier) recZero(l *layer, base, rows int) error {
 	if l == nil {
 		ls = g.recPools()
 	}
-	zs := make([]byte, rows*max(g.recS, g.recC)*4)
+	return g.recZeroLayers(ls, base, rows)
+}
+
+// recZeroLayers is recZero over the pools of ls. The zeros are uploaded once,
+// into a device buffer each half is copied from (Device.Copy): a write from
+// the host per buffer put one upload of the whole slot -- 2 MiB a delta-rule
+// state on a 4B qwen35 -- on the bus for every half of every block, about 30
+// ms of a reset on a V100, where a copy on the card is microseconds. Callers
+// hold g.mu, outside a session.
+func (g *devTier) recZeroLayers(ls []*layer, base, rows int) error {
+	n := rows * max(g.recS, g.recC) * 4
+	if n == 0 {
+		return nil
+	}
+	var zb backend.Buf
+	defer func() {
+		if zb != nil {
+			zb.Free()
+		}
+	}()
 	for _, l := range ls {
 		if l == nil || l.pool == nil {
 			continue
@@ -258,7 +277,13 @@ func (g *devTier) recZero(l *layer, base, rows int) error {
 				if b.buf == nil || b.w == 0 {
 					continue
 				}
-				if err := b.buf.WriteAt(base*b.w*4, zs[:rows*b.w*4]); err != nil {
+				if zb == nil {
+					var err error
+					if zb, err = g.allocBytes(make([]byte, n)); err != nil {
+						return err
+					}
+				}
+				if err := g.dev.Copy(b.buf, base*b.w*4, zb, 0, rows*b.w*4); err != nil {
 					return err
 				}
 			}
