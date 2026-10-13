@@ -49,6 +49,9 @@ type ngramScratch struct {
 	gvn, conv, tap             []float32
 	raw, scr                   []byte
 	dot                        *nn.AttnSet
+	// undo and undoPrev are what ngramToDevice moved on, for ngramUndoRows.
+	undo     []ngramUndo
+	undoPrev []float32
 }
 
 // allocNGram sizes the n-gram buffers for one row.
@@ -82,6 +85,8 @@ func (s *State) growNGram(n int) {
 	g.emb = make([]float32, n*c.NGramWidth())
 	g.key, g.q, g.gv, g.gvn = make([]float32, n*hd), make([]float32, n*hd), make([]float32, n*hd), make([]float32, n*hd)
 	g.val = make([]float32, n*c.NEmbd)
+	g.undo = make([]ngramUndo, 0, n)
+	g.undoPrev = make([]float32, n*(c.NGram-1))
 	g.gate = make([]float32, n*c.HCMult)
 }
 
@@ -105,37 +110,9 @@ func (s *State) ngramApply(li int, l *layer, x []float32, n int, order []int,
 		return nil
 	}
 	h, e := c.HCMult, c.NEmbd
-	hd, w, rd := h*e, c.NGramWidth(), c.NGramRowDim
-	for oi := 0; oi < n; oi++ {
-		r := oi
-		if order != nil {
-			r = order[oi]
-		}
-		o, sl := owner(r)
-		prev, _ := o.ngramState(li, sl)
-		t := tok(r)
-		if t < 0 {
-			t = c.NGramImage
-		}
-		// The window is the token and its predecessors, whose bits the state
-		// holds (id+1, zero for none); the kernel hashes it and writes the
-		// next position's predecessors back.
-		g.hwin[0] = uint32(t)
-		for s, p := range prev {
-			g.hwin[s+1] = math.Float32bits(p)
-		}
-		nn.NGramHashJIT(g.idx, g.hnext, g.hwin, g.konst, g.ids, c.NGramHeadsPer, c.q4eFault != q4eFaultNoEOSReset)
-		for s := range prev {
-			prev[s] = math.Float32frombits(g.hnext[s])
-		}
-		for hh, row := range g.idx {
-			if err := s.m.ngram.f.ReadRow(s.m.ngram.e, row, g.raw, g.scr); err != nil {
-				return err
-			}
-			if err := ngramRow(g.emb[r*w+hh*rd:r*w+(hh+1)*rd], s.m.ngram.typ, g.raw, g.scr); err != nil {
-				return err
-			}
-		}
+	hd, w := h*e, c.NGramWidth()
+	if err := s.ngramRows(li, n, order, owner, tok); err != nil {
+		return err
 	}
 	s.jit.NewInput()
 	if err := s.mm(g.key[:n*hd], d.ngKey, g.emb[:n*w], n); err != nil {
@@ -199,6 +176,49 @@ func (s *State) ngramApply(li int, l *layer, x []float32, n int, order []int,
 			s.axpy(xk, g.gv[(r*h+k)*e:(r*h+k+1)*e], 1)
 			if c.q4eFault != q4eFaultNoNGramConv {
 				s.axpy(xk, g.conv[k*e:(k+1)*e], 1)
+			}
+		}
+	}
+	s.jit.NewInput()
+	return nil
+}
+
+// ngramRows hashes each of n rows' n-gram and gathers its table rows into
+// g.emb, NGramWidth a row, moving each sequence's predecessors on: row r is
+// the next position of sequence slot of the State owner(r) returns, with
+// token tok(r) (-1 for none, which hashes as the picture placeholder), and
+// order is the rows in each sequence's position order (nil for 0..n-1).
+func (s *State) ngramRows(li, n int, order []int, owner func(r int) (*State, int), tok func(r int) int32) error {
+	c, g := s.m.Cfg, s.q4.ng
+	w, rd := c.NGramWidth(), c.NGramRowDim
+	for oi := 0; oi < n; oi++ {
+		r := oi
+		if order != nil {
+			r = order[oi]
+		}
+		o, sl := owner(r)
+		prev, _ := o.ngramState(li, sl)
+		t := tok(r)
+		if t < 0 {
+			t = c.NGramImage
+		}
+		// The window is the token and its predecessors, whose bits the state
+		// holds (id+1, zero for none); the kernel hashes it and writes the
+		// next position's predecessors back.
+		g.hwin[0] = uint32(t)
+		for i, p := range prev {
+			g.hwin[i+1] = math.Float32bits(p)
+		}
+		nn.NGramHashJIT(g.idx, g.hnext, g.hwin, g.konst, g.ids, c.NGramHeadsPer, c.q4eFault != q4eFaultNoEOSReset)
+		for i := range prev {
+			prev[i] = math.Float32frombits(g.hnext[i])
+		}
+		for hh, row := range g.idx {
+			if err := s.m.ngram.f.ReadRow(s.m.ngram.e, row, g.raw, g.scr); err != nil {
+				return err
+			}
+			if err := ngramRow(g.emb[r*w+hh*rd:r*w+(hh+1)*rd], s.m.ngram.typ, g.raw, g.scr); err != nil {
+				return err
 			}
 		}
 	}

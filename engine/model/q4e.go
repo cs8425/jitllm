@@ -307,6 +307,13 @@ type q4eScratch struct {
 	// rid is each row's token id for the n-gram block, -1 for a row with
 	// none (q4eRowIDs).
 	rid []int32
+	// callState, callSlot and callIDs are a device call's rows (setCall).
+	callState *State
+	callSlot  int
+	callIDs   []int32
+	callSeq   []int
+	callPos   []int
+	callSlots []int
 }
 
 // q4eRowIDs records each of n rows' token ids for the n-gram block.

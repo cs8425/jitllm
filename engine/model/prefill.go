@@ -659,6 +659,12 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 					cids = rowIDs[base : base+n]
 				}
 				s.tokenIDs(cids)
+				// Qwen3.8-Flash-Next's n-gram rows, when the run holds its
+				// n-gram block; every failure below puts the predecessors back.
+				s.q4.setCall(s, slot, cids)
+				if err := s.ngramToDevice(li, hi, n, nil, s.q4.callOwner, s.q4.callTok); err != nil {
+					return nil, err
+				}
 				if s.batched {
 					pos, sl := make([]int, n), make([]int, n)
 					for j := range pos {
@@ -711,6 +717,10 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 					if err := refill(); err != nil {
 						return nil, err
 					}
+					s.ngramUndoRows()
+					if err := s.ngramToDevice(li, hi, n, nil, s.q4.callOwner, s.q4.callTok); err != nil {
+						return nil, err
+					}
 				}
 				s.layerInputs(s.bple[:n*c.pleWidth()])
 				if s.bidirTell(p0, n) && s.ld.Layers(li, hi, p0, n, s.bx[:n*c.ResidW()], s.bcs[:n*c.RopeW()],
@@ -720,6 +730,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 					li = hi - 1
 					continue
 				}
+				s.ngramUndoRows()
 				// A hybrid's speculation step is rolled back as one pass, and a
 				// recurrent block run row by row could not be: the device's
 				// refusal is the step's error. Any other model's step takes the
@@ -755,6 +766,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 					if err := refill(); err != nil {
 						return nil, err
 					}
+					s.ngramUndoRows()
 					done := true
 					for i := 0; i < n; i++ {
 						row := s.bx[i*c.NEmbd : (i+1)*c.NEmbd]
@@ -765,6 +777,10 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 						if cids != nil {
 							s.tokenIDs(cids[i : i+1])
 						}
+						s.q4.setCall(s, slot, cids[min(i, len(cids)):min(i+1, len(cids))])
+						if err := s.ngramToDevice(li, hi, 1, nil, s.q4.callOwner, s.q4.callTok); err != nil {
+							return nil, err
+						}
 						if s.ld.Layers(li, hi, p0+i, 1, row,
 							s.bcs[i*c.RopeW():(i+1)*c.RopeW()],
 							s.bswaTableAt(i, c.NRotSWA), nil) {
@@ -773,6 +789,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 							}
 							continue
 						}
+						s.ngramUndoRows()
 						if !s.devFallback {
 							return nil, errDevice{0, s.devWhy()}
 						}

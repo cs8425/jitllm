@@ -55,7 +55,7 @@ type rowsOut struct {
 
 // recSnap is one copy of every linear block's recurrent state for one row,
 // indexed by block; nil for an attention block.
-type recSnap struct{ conv, state, tail [][]float32 }
+type recSnap struct{ conv, state [][]float32 }
 
 // hiddenOf points a head's hidden readback at the step's destination for the
 // duration of one call, and returns what puts it back. Callable on a nil
@@ -323,11 +323,10 @@ func (r *rowsOut) snapRow(s *State, li, slot, row int) {
 		return
 	}
 	g := s.dg
-	nc, ns := g.convStateLen(), g.deltaStateLen()
+	nc, ns := g.convStateLen(), g.stateStride()
 	sn := &r.snap[row]
 	copy(sn.conv[li], s.rconv[li][slot*nc:(slot+1)*nc])
 	copy(sn.state[li], s.rstate[li][slot*ns:(slot+1)*ns])
-	copy(sn.tail[li], s.recTail(li, slot))
 }
 
 // newRecSnap allocates one snapshot of every host linear block's state for
@@ -337,13 +336,11 @@ func (s *State) newRecSnap() recSnap {
 		return recSnap{}
 	}
 	g := s.dg
-	sn := recSnap{conv: make([][]float32, len(s.rconv)), state: make([][]float32, len(s.rstate)),
-		tail: make([][]float32, len(s.rstate))}
+	sn := recSnap{conv: make([][]float32, len(s.rconv)), state: make([][]float32, len(s.rstate))}
 	for li := range s.rconv {
 		if s.rconv[li] != nil {
 			sn.conv[li] = make([]float32, g.convStateLen())
-			sn.state[li] = make([]float32, g.deltaStateLen())
-			sn.tail[li] = make([]float32, s.c.recTailLen(li))
+			sn.state[li] = make([]float32, g.stateStride())
 		}
 	}
 	return sn
@@ -358,7 +355,7 @@ func (s *State) loadRec(sn *recSnap) { s.copyRec(sn, false) }
 
 func (s *State) copyRec(sn *recSnap, save bool) {
 	g := s.dg
-	nc, ns := g.convStateLen(), g.deltaStateLen()
+	nc, ns := g.convStateLen(), g.stateStride()
 	for li := range s.rconv {
 		if s.rconv[li] == nil || !s.c.LayerKind(li).Recurrent() || s.devAt(li) {
 			continue
@@ -366,11 +363,9 @@ func (s *State) copyRec(sn *recSnap, save bool) {
 		if save {
 			copy(sn.conv[li], s.rconv[li][:nc])
 			copy(sn.state[li], s.rstate[li][:ns])
-			copy(sn.tail[li], s.recTail(li, 0))
 		} else {
 			copy(s.rconv[li][:nc], sn.conv[li])
 			copy(s.rstate[li][:ns], sn.state[li])
-			copy(s.recTail(li, 0), sn.tail[li])
 		}
 	}
 }

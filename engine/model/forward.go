@@ -1544,6 +1544,7 @@ func (s *State) layerWeightsAt(li int) nn.LayerWeights {
 		w.IdxQNorm, w.IdxKNorm = l.idxQNorm, l.idxKNorm
 	}
 	s.ds4Weights(li, &w)
+	s.q4eWeights(li, &w)
 	w.ResAttn, w.ResFFN = l.resAttn, l.resFFN
 	w.MLAGate, w.RoutedDown, w.RoutedUp, w.RoutedNorm = wt(l.mlaGate), wt(l.routedDown), wt(l.routedUp), l.routedNorm
 	return w
@@ -1989,6 +1990,7 @@ func (s *State) planFor(li int) *nn.LayerPlan {
 		}
 	}
 	s.k3Plan(li, &plan)
+	s.q4ePlan(li, &plan)
 	return &plan
 }
 
@@ -3514,7 +3516,13 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			s.layerInputs(s.ple)
 			s.tok1[0] = s.tok
 			s.tokenIDs(s.tok1[:])
+			// Qwen3.8-Flash-Next's n-gram rows, when the run holds its n-gram
+			// block (q4edev.go).
+			if err := s.ngramToDevice(li, hi, 1, nil, s.selfSlot0, s.tok1At); err != nil {
+				return nil, err
+			}
 			if !s.ld.Layers(li, hi, s.pos, 1, s.resid(), s.cs[:c.RopeW()], s.swaTable(c.NRotSWA), fold) {
+				s.ngramUndoRows()
 				// A failed run demotes everything and restarts the token on the
 				// host from the embeddings (Layers may have written part of the
 				// residual), unless SetDeviceFallback(false) asked for the

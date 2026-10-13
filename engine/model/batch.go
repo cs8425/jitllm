@@ -245,6 +245,14 @@ func (s *State) rowsHost(tokens []int32, seq, pos []int, nlogit, seqs int) ([]fl
 			}
 			withHead := headOnDev && hi == s.hi
 			s.tokenIDs(tokens)
+			// Qwen3.8-Flash-Next's n-gram rows, when the run holds its n-gram
+			// block, each sequence's in position order.
+			if c.NGramBlock != 0 {
+				s.q4.setRows(s, seq, tokens)
+				if err := s.ngramToDevice(li, hi, n, causal, s.q4.rowsOwner, s.q4.callTok); err != nil {
+					return nil, err
+				}
+			}
 			if err := s.rowsRun(li, hi, pos, devSlot, s.bx[:n*c.ResidW()], cs, csSWA,
 				withHead, s.blogits[:nlogit*c.NVocab], nlogit); err != nil {
 				return nil, err

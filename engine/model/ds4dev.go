@@ -26,6 +26,10 @@ func (s *State) expandStreams(x []float32, n int) error {
 		s.k3Expand(x, n)
 		return nil
 	}
+	if s.m.Cfg.Q4E() {
+		s.q4eExpand(x, n)
+		return nil
+	}
 	return s.altExpand(x, n)
 }
 
@@ -36,6 +40,9 @@ func (s *State) collapseStreams(x []float32, n int) error {
 	}
 	if s.m.Cfg.ResAttn() {
 		return s.k3Collapse(x, n)
+	}
+	if s.m.Cfg.Q4E() {
+		return s.q4eCollapse(x, n)
 	}
 	return s.altCollapse(x, n)
 }
