@@ -35,6 +35,163 @@ so a second process on the same card times nothing; on the RTX 3050 Ti
 (Llama-3.2-1B, pp415, CUDA) that took attach from 1289 ms to 313 ms and
 `speed -ttft`'s open-to-first-token from 2152 ms to 941-1115 ms.
 
+## Decision models: `/v1/systemone`, jitllm against llama.cpp
+
+The first latency rows for the decision models (`docs/design/decision-models.md`,
+sections 5 and 6). The harness is `dev/decisionbench`: a stream of single-word
+requests, each a `POST /v1/systemone` with a noul question ("Is this the name of
+a centipede?") and the word as the state, against any server that speaks the
+endpoint. The same labelled file and the same question go to both engines
+(`dev/decisionbench/testdata/centipedes-large.tsv`: 233 words, 104 centipede
+genera, species, orders and common names against 129 millipedes, other
+arthropods, near-miss spellings and plain words).
+
+**What was measured.** jitllm: `jitllmd serve` built from main at 585c3e9f
+(`-load MODEL.jlm -devices cpu` or `-devices cuda:0`, every other flag its
+default), the `.jlm` converted from the GGUF the other arm reads. llama.cpp:
+`llama-server` b11514 (`-np 1 -c 8192 -t 12`; `-ngl 0` on the CPU rows, `-ngl 99`
+on the CUDA rows), the official CPU release for the CPU rows and the same tag
+built from source with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=70` (CUDA 12.0)
+for the CUDA rows. Both read the same file: Laya BF16 (`ggml-org/Laya-GGUF`,
+ModernBERT, 421M), d1-3B Q8_0 (`LiquidAI/d1-3B-GGUF`, LFM2, 2.7B), Lev 4B Q8_0
+(`ggml-org/lev-GGUF`, Qwen3.5 with the adapter merged). All three run on both
+engines; none is missing.
+
+**Hosts.** A Xeon E5-2680 v4 server (2 sockets, 14 cores each, hyper-threads on,
+no other work on it, load average 0.0 before the run, `/proc/pressure/cpu` some
+avg10 0.00 before every A/B run). CPU rows: one socket, cores 0-11, under
+`numactl --membind=0`, 12 threads in both engines (`llama-server -t 12`; jitllm's
+pool takes the taskset's width). CUDA rows: one Tesla V100-SXM2-16GB (sm_70),
+both engines on that card (`CUDA_VISIBLE_DEVICES=0`, the process still pinned to
+the same cores), the other seven cards idle. Benchmark hosts run bare (no
+`scripts/cap`).
+
+**Method (RULE 1, RULE 2).** Per model and backend, serially, nothing else
+running: both servers loaded and warmed; then the A/A self-control on the same
+harness (two `jitllmd` instances, same model); then one full pass of the file per
+engine for accuracy; then two complete A/B runs of 20 rounds. A round is one
+timed sample per arm, the order alternating by round (AB, BA, ...), each sample
+`decisionbench -cycle` over a window after a discarded one-second burst. The
+server not being timed is SIGSTOPped, so an idle pool's spinning workers share no
+core with the arm under test. Reported: the median of the 20 per-round ratios and
+its IQR/median (reject above 0.10; none came near). The ratios read as jitllm over
+llama.cpp, above 1 meaning jitllm is faster: the p50 ratio is llama.cpp's p50 over
+jitllm's, the words ratio is jitllm's words in the window over llama.cpp's.
+
+**"Words in 32 s" is scaled, not measured over 32 s.** A 32-second window per
+sample would make a 20-round A/B run an hour, so the window is 8 s (Laya, and
+every CUDA row), 12 s (d1 on the CPU) or 16 s (Lev on the CPU) and the count is
+scaled by 4, 2.67 or 2. The count is an integer in a short window (Lev on the CPU
+answers about nine words in 16 s), so its ratio is coarse: 1.125 is 18 words
+against 16. The p50 is the finer number.
+
+### CPU: a Xeon E5-2680 v4 server, one socket, 12 threads (jitllm CPU backend, llama.cpp CPU backend)
+
+| model | jitllm p50 | llama.cpp p50 | p50 ratio, run 1 / run 2 (IQR/median) | words in 32 s, jitllm / llama.cpp | words ratio, run 1 / run 2 | A/A p50 ratio, words ratio |
+|---|---|---|---|---|---|---|
+| Laya BF16 | 81.5 ms | 118.7 ms | 1.455 / 1.456 (0.007, 0.010) | 376-380 / 264 | 1.428 / 1.439 | 1.006, 1.011 |
+| d1-3B Q8_0 | 323 ms | 398 ms | 1.232 / 1.234 (0.006, 0.005) | 96 / 77 | 1.241 / 1.241 | 0.997, 1.000 |
+| Lev 4B Q8_0 | 1.665 s | 1.955 s | 1.174 / 1.175 (0.006, 0.004) | 18 / 16 | 1.125 / 1.125 | 0.971, 1.000 |
+
+The Lev A/A control reads 0.971 with an IQR of 0.003: the second `jitllmd`
+instance is 3% faster than the first, a property of the instance and not of the
+slot, since the order alternates. The A arm of every A/B run is the first
+instance, so Lev's 1.17 carries that 3% against jitllm, if the bias transfers.
+The other controls are within 1.1% of 1.
+
+### CUDA: the same server's V100, one card (jitllm CUDA backend, llama.cpp CUDA backend)
+
+| model | jitllm p50 | llama.cpp p50 | p50 ratio, run 1 / run 2 (IQR/median) | words in 32 s, jitllm / llama.cpp | words ratio, run 1 / run 2 | A/A p50 ratio, words ratio |
+|---|---|---|---|---|---|---|
+| Laya BF16 | 37.0 ms | 14.0 ms | 0.378 / 0.379 (0.002, 0.002) | 860-864 / 2204-2208 | 0.390 / 0.391 | 1.002, 1.000 |
+| d1-3B Q8_0 | 29.9 ms | 16.3 ms | 0.544 / 0.544 (0.005, 0.004) | 1092-1096 / 1956 | 0.560 / 0.558 | 1.002, 1.000 |
+| Lev 4B Q8_0 | 70.8 ms | 53.8 ms | 0.761 / 0.755 (0.018, 0.029) | 436-438 / 584 | 0.750 / 0.747 | 1.008, 1.000 |
+
+On the card jitllm is slower than llama.cpp on every model, by 2.6x (Laya), 1.8x
+(d1) and 1.3x (Lev). Each of the six runs reproduces the other to within 1% on
+the ratio. The gap shrinks as the model grows, which is what a per-request cost
+that does not scale with the model looks like (30-37 ms is jitllm's floor on the
+two small models, and Laya and d1 differ ten-fold in size). **This was not
+diagnosed**: it was not checked how many blocks the card held, where the
+request's time goes, or whether the readout (the head's logits come home whole,
+`decision-models.md` section 10) is the cost. The A/A controls say the harness
+sees nothing of it; the rows are a work list, RULE 6 ordering and not a verdict.
+
+### Accuracy, caught and wrong picks (one full pass of the 233 words, threshold P(yes) 0.5)
+
+| backend | model | jitllm accuracy | caught | wrong picks | llama.cpp accuracy | caught | wrong picks |
+|---|---|---|---|---|---|---|---|
+| CPU | Laya BF16 | 0.562 (131/233) | 26/104 | 24 | 0.567 (132/233) | 27/104 | 24 |
+| CPU | d1-3B Q8_0 | 0.815 (190/233) | 79/104 | 18 | 0.824 (192/233) | 80/104 | 17 |
+| CPU | Lev 4B Q8_0 | 0.815 (190/233) | 76/104 | 15 | 0.824 (192/233) | 78/104 | 15 |
+| CUDA | Laya BF16 | 0.562 (131/233) | 26/104 | 24 | 0.562 (131/233) | 26/104 | 24 |
+| CUDA | d1-3B Q8_0 | 0.824 (192/233) | 80/104 | 17 | 0.828 (193/233) | 82/104 | 18 |
+| CUDA | Lev 4B Q8_0 | 0.815 (190/233) | 76/104 | 15 | 0.815 (190/233) | 76/104 | 15 |
+
+The engines agree to within two words of 233. On the CPU rows for Laya and d1 the
+probabilities were compared word by word: the largest difference is 0.025 (Laya,
+mean 0.003) and 0.025 (d1, mean 0.004), and the answers that flip at 0.5 are
+near-ties (Laya: Scutigera 0.490 against 0.507; d1: Julus 0.507 against 0.500 and
+Parascutigera 0.496 against 0.519), which is the f32 reduction-order band, not a
+different function. Lev's two-word CPU gap was not compared word by word. Laya's
+accuracy is low (0.56, 26 of 104 centipedes caught) on both engines alike, so it
+belongs to the model on this file and question, not to an engine; it says
+nothing against the speed rows.
+
+### Sanity of llama.cpp's absolute rate
+
+`llama-bench` on the same d1 GGUF, same pinning: 90.2 +- 3.2 tokens/s for a
+64-token prompt on the CPU (12 threads) and 2324 +- 388 on the V100. A d1 request
+is 31-33 tokens, which is 355 ms and 14 ms of prompt processing; the server's p50
+is 398 ms and 16.3 ms, the difference being the HTTP request, the template and the
+answer arithmetic. The numbers are consistent with the host. There is no bytes per
+token or roofline figure: a request is a short prefill and the engine is
+compute-bound, not weight-bandwidth-bound.
+
+### What this does not cover
+
+Serial single requests only: no concurrent clients, no multi-question requests.
+`scripts/corebusy.py` and the clock coherence gate were not run (the box was
+otherwise idle and its load was read before each run). The CPU rows used main at
+585c3e9f; main has since moved (the row-reduction emitters, among others), so a
+CPU row quoted later wants a re-measure (RULE 1). Laya's CUDA placement, and
+whether jitllm placed every block of d1 and Lev on the card, were not
+inspected.
+
+### The commands
+
+On the laptop, build and ship binaries only (no source goes to the host):
+
+    CGO_ENABLED=0 ./scripts/cap 8G -- go build -trimpath -o jitllm ./cmd/jitllm
+    (cd server && CGO_ENABLED=0 ../scripts/cap 8G -- go build -trimpath -o ../jitllmd ./cmd/jitllmd)
+    CGO_ENABLED=0 ./scripts/cap 8G -- go build -trimpath -o decisionbench ./dev/decisionbench
+    scp jitllm jitllmd decisionbench dev/decisionbench/testdata/centipedes-large.tsv \
+        scripts/decisionbench-ab.sh scripts/decisionbench-cell.sh scripts/abstats.py HOST:dbr/
+
+On the host: the models come from Hugging Face (`ggml-org/Laya-GGUF`
+`Laya-BF16.gguf`, `LiquidAI/d1-3B-GGUF` `d1-3B-Q8_0.gguf`, `ggml-org/lev-GGUF`
+`lev-Q8_0.gguf`), converted by the shipped binary; llama.cpp is the b11514 release
+(`llama-b11514-bin-ubuntu-x64`, unpacked to `~/dbr/llama-cpu`) and, for CUDA, the
+b11514 tag built on the host:
+
+    ./jitllm convert Laya-BF16.gguf /mnt/models/jitllm/dbr/Laya-BF16.jlm      # and d1, lev
+    git clone --depth 1 --branch b11514 https://github.com/ggml-org/llama.cpp && cd llama.cpp
+    cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=70 -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF
+    cmake --build build -j 24 --target llama-server llama-bench
+
+    cd ~/dbr
+    ./decisionbench-cell.sh cpu  Laya-BF16 8  20      # A/A, accuracy, two A/B runs
+    ./decisionbench-cell.sh cpu  d1-3B-Q8_0 12 20
+    ./decisionbench-cell.sh cpu  lev-Q8_0  16 20
+    ./decisionbench-cell.sh cuda Laya-BF16 8  20      # and d1-3B-Q8_0, lev-Q8_0
+    python3 abstats.py res/cpu-Laya-BF16.ab1.tsv 8   # the medians and IQR above
+
+Each server inside the cell is `numactl --membind=0 taskset -c 0-11 jitllmd serve
+-models DIR -load MODEL.jlm -id MODEL -devices cpu|cuda:0` or `llama-server -m
+MODEL.gguf -t 12 -c 8192 -np 1 -ngl 0|99`; one request by hand is
+`decisionbench -url http://127.0.0.1:PORT -model MODEL -file centipedes-large.tsv
+-cycle -window 8s`.
+
 ## ★ THE FINAL BOARD: THREE HOSTS, FIVE ENGINES, ONE PASS PER HOST
 
 The M4 Metal 3B-7B section below has its own method (a paired harness and a
