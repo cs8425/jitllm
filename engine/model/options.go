@@ -43,6 +43,9 @@ type modelOpts struct {
 	// noStreamTrial keeps an auto-streamed placement without measuring it
 	// against the host; see WithStreamTrial.
 	noStreamTrial bool
+	// hostMoves sends every move between devices through the State's cache
+	// and stages nothing ahead (WithDirectMoves).
+	hostMoves bool
 	// noKVPrewarm leaves a device's KV pools at their first frame after
 	// placement (WithKVPrewarm).
 	noKVPrewarm bool
@@ -171,6 +174,14 @@ func WithExperts(where string) Option { return func(l *loadOpts) { l.opt.experts
 // placement made against itself, through the same migrations, so a paired
 // comparison can be checked against the harness's bias and spread first.
 func WithStreamTrialAA(on bool) Option { return func(l *loadOpts) { l.opt.trialAA = on } }
+
+// WithDirectMoves sets whether a block moving between two devices
+// (State.MoveBlocks, PrepareMove) is prepared on its target while the
+// sequence keeps generating and has its history copied device to device. Off,
+// every move brings the history home to the State's cache and up again, with
+// the target prepared inside the pause: the arm the direct path is measured
+// against. On by default.
+func WithDirectMoves(on bool) Option { return func(l *loadOpts) { l.opt.hostMoves = !on } }
 
 // WithStreamTrial sets whether a placement that streamed mixture blocks no
 // card could hold resident is measured against running them on the host

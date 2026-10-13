@@ -796,6 +796,11 @@ type Session struct {
 	// mu serialises this session's own work. A session is one sequence, so two
 	// concurrent generates on it are a caller error rather than a queue.
 	mu sync.Mutex
+	// move is a move between devices waiting for a token boundary
+	// (Engine.MoveBlocks), under moveMu: a generate serves it between two
+	// tokens, and an idle session where it was asked.
+	moveMu sync.Mutex
+	move   *moveReq
 
 	sampling model.Sampler
 	created  time.Time
@@ -1138,6 +1143,15 @@ func (s *Session) close() {
 	s.cancelGeneration()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A move waiting for a token boundary will not get one; the State's Close
+	// gives back what it prepared.
+	s.moveMu.Lock()
+	r := s.move
+	s.move = nil
+	s.moveMu.Unlock()
+	if r != nil {
+		r.done <- moveRes{err: fmt.Errorf("%w: session %q closed", ErrNotFound, s.id)}
+	}
 	if s.parkView != nil {
 		// A session closed while parked never faults its pages back: they
 		// stop being pinned, and the memory cache evicts them in turn.
@@ -1770,6 +1784,9 @@ func (e *Engine) Generate(ctx context.Context, o GenerateOptions, emit func(Even
 		if sp != nil {
 			continue
 		}
+		// A move between devices asked meanwhile is prepared and committed
+		// here, between two tokens (Engine.MoveBlocks).
+		s.serveMove(false)
 		if con == nil && !o.Logprobs {
 			if pending, err = s.st.ForwardSample(next, &sampler); err != nil {
 				return err
@@ -2202,23 +2219,89 @@ func (e *Engine) SetDeviceBlocks(s *Session, n int) int {
 	return got
 }
 
-// onDevices reports that every block of first..last is on a device.
+// onDevices reports that every block of first..last is on a device, as the
+// last snapshot has it: asked without the session's lock, so a generate in
+// flight does not hold the answer back.
 func (s *Session) onDevices(first, last int) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	on := make([]bool, last+1)
+	for _, r := range s.placement().runs {
+		for li := r[0]; li < r[1] && li <= last; li++ {
+			on[li] = true
+		}
+	}
 	for li := first; li <= last; li++ {
-		if _, ok := s.st.DeviceOf(li); !ok {
+		if !on[li] {
 			return false
 		}
 	}
 	return true
 }
 
+// moveReq is a move between devices handed to whoever holds the session
+// next: its generate, between two tokens, or MoveBlocks itself when idle.
+type moveReq struct {
+	first, last int
+	to          string
+	pm          *model.PendingMove
+	done        chan moveRes
+}
+
+type moveRes struct {
+	mv  model.BlockMove
+	err error
+}
+
+// serveMove advances the session's pending move; the caller holds s.mu, at a
+// token boundary. The first call prepares it (model.State.PrepareMove: the
+// target takes the blocks while the sequence keeps generating), and a later
+// one commits it once the target is ready -- or at once when final, which is
+// a session no generate is holding.
+func (s *Session) serveMove(final bool) {
+	s.moveMu.Lock()
+	r := s.move
+	s.moveMu.Unlock()
+	if r == nil {
+		return
+	}
+	if r.pm == nil {
+		pm, err := s.st.PrepareMove(r.first, r.last+1, r.to)
+		if err != nil {
+			s.finishMove(r, moveRes{err: err})
+			return
+		}
+		s.moveMu.Lock()
+		r.pm = pm
+		s.moveMu.Unlock()
+	}
+	if !final && !r.pm.Ready() {
+		return
+	}
+	mv, err := r.pm.Commit()
+	s.refresh()
+	s.finishMove(r, moveRes{mv, err})
+}
+
+// finishMove hands the result back and clears the slot.
+func (s *Session) finishMove(r *moveReq, res moveRes) {
+	s.moveMu.Lock()
+	if s.move == r {
+		s.move = nil
+	}
+	s.moveMu.Unlock()
+	r.done <- res
+}
+
 // MoveBlocks moves blocks first..last of a session from the devices they are
-// on to the device named to, history and all (model.State.MoveBlocks). The
-// device must be one of the session's tier: the tier owns the devices and is
-// opened at load.
-func (e *Engine) MoveBlocks(s *Session, first, last int, to string) (model.BlockMove, error) {
+// on to the device named to, history and all. The device must be one of the
+// session's tier: the tier owns the devices and is opened at load.
+//
+// A session generating keeps generating: its generate prepares the move
+// between two tokens (model.State.PrepareMove), keeps decoding on the source
+// while the target takes the blocks, and commits at the first token boundary
+// the target is ready, so the reply waits for the history's copy alone. An
+// idle session is moved here. A move asked while another is pending is
+// refused.
+func (e *Engine) MoveBlocks(ctx context.Context, s *Session, first, last int, to string) (model.BlockMove, error) {
 	if s.lm.dev == nil {
 		return model.BlockMove{}, fmt.Errorf("%w: session %q was loaded host-only; there is no "+
 			"device to move blocks to", ErrPlacement, s.id)
@@ -2228,15 +2311,43 @@ func (e *Engine) MoveBlocks(s *Session, first, last int, to string) (model.Block
 			"the TIER owns the devices and is opened at load. Load the model with every device "+
 			"you want to move between", ErrPlacement, s.id, s.lm.deviceIDs, to)
 	}
-	s.mu.Lock()
-	mv, err := s.st.MoveBlocks(first, last+1, to)
-	if err != nil {
-		err = fmt.Errorf("%w: %v", ErrPlacement, err)
+	r := &moveReq{first: first, last: last, to: to, done: make(chan moveRes, 1)}
+	s.moveMu.Lock()
+	if s.move != nil {
+		s.moveMu.Unlock()
+		return model.BlockMove{}, fmt.Errorf("%w: session %q has a move of blocks %d..%d to %s pending",
+			ErrPlacement, s.id, s.move.first, s.move.last, s.move.to)
 	}
-	s.refresh()
-	s.mu.Unlock()
-	e.applyPageBudget(s.lm, nil)
-	return mv, err
+	s.move = r
+	s.moveMu.Unlock()
+	tick := time.NewTicker(2 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		// Idle -- no generate holds the session -- the move is made here.
+		if s.mu.TryLock() {
+			s.serveMove(true)
+			s.mu.Unlock()
+		}
+		select {
+		case res := <-r.done:
+			e.applyPageBudget(s.lm, nil)
+			if res.err != nil {
+				res.err = fmt.Errorf("%w: %v", ErrPlacement, res.err)
+			}
+			return res.mv, res.err
+		case <-ctx.Done():
+			// Withdrawn only while nothing was prepared; past that the move
+			// finishes and the State is left consistent either way.
+			s.moveMu.Lock()
+			if s.move == r && r.pm == nil {
+				s.move = nil
+				s.moveMu.Unlock()
+				return model.BlockMove{}, ctx.Err()
+			}
+			s.moveMu.Unlock()
+		case <-tick.C:
+		}
+	}
 }
 
 // hostWeightShare is what the HOST may spend on paged weights, given a total

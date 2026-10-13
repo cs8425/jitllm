@@ -634,6 +634,15 @@ type unit struct {
 // iterate runs one step: every decoding row's next token, and as much of the
 // admitted prompts as the step has room for, in one model.StepRuns.
 func (lp *stepLoop) iterate() {
+	// A move between devices a decoding row's session asked for is prepared
+	// and committed here, between two steps, as the one-at-a-time path does
+	// between two tokens (Engine.MoveBlocks): the loop is what holds the
+	// row's State.
+	for _, r := range lp.rows {
+		if !r.prompting() {
+			r.s.serveMove(false)
+		}
+	}
 	units := lp.decodeUnits()
 	decoding := len(units)
 	budget := lp.promptChunk

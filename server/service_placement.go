@@ -116,7 +116,7 @@ func (s *PlacementService) RelocateBlocks(ctx context.Context, req *connect.Requ
 				"to move between", sess.id, sess.lm.deviceIDs, m.ToDeviceId))
 	}
 	if m.ToDeviceId != "" && sess.onDevices(first, last) {
-		return s.moveBetweenDevices(sess, first, last, m.ToDeviceId)
+		return s.moveBetweenDevices(ctx, sess, first, last, m.ToDeviceId)
 	}
 
 	start := time.Now()
@@ -288,9 +288,9 @@ func sameSet(a, b []string) bool {
 
 // moveBetweenDevices is RelocateBlocks for a range already on the session's
 // devices.
-func (s *PlacementService) moveBetweenDevices(sess *Session, first, last int, to string) (*connect.Response[v1.RelocateBlocksResponse], error) {
+func (s *PlacementService) moveBetweenDevices(ctx context.Context, sess *Session, first, last int, to string) (*connect.Response[v1.RelocateBlocksResponse], error) {
 	start := time.Now()
-	mv, err := s.E.MoveBlocks(sess, first, last, to)
+	mv, err := s.E.MoveBlocks(ctx, sess, first, last, to)
 	if err != nil {
 		return nil, connectErr(err)
 	}
@@ -302,13 +302,17 @@ func (s *PlacementService) moveBetweenDevices(sess *Session, first, last int, to
 		})
 	}
 	return connect.NewResponse(&v1.RelocateBlocksResponse{
-		Placement:   s.E.pbPlacement(sess),
-		BlocksMoved: int32(len(mv.Moved)),
-		Declined:    declined,
-		Millis:      millis(time.Since(start)),
-		Path:        pbRelocationPath(mv.Path),
-		History:     pbBytes(mv.KVBytes + mv.RecBytes),
-		HeadMoved:   mv.Head,
+		Placement:     s.E.pbPlacement(sess),
+		BlocksMoved:   int32(len(mv.Moved)),
+		Declined:      declined,
+		Millis:        millis(time.Since(start)),
+		Path:          pbRelocationPath(mv.Path),
+		History:       pbBytes(mv.KVBytes + mv.RecBytes),
+		HeadMoved:     mv.Head,
+		Copied:        pbBytes(mv.Copied),
+		PauseMicros:   mv.Pause.Microseconds(),
+		StagedBlocks:  int32(mv.Staged),
+		PrepareMillis: mv.Prepare.Milliseconds(),
 	}), nil
 }
 
@@ -317,6 +321,10 @@ func pbRelocationPath(p string) v1.RelocationPath {
 	switch p {
 	case "host":
 		return v1.RelocationPath_RELOCATION_PATH_HOST
+	case "staged":
+		return v1.RelocationPath_RELOCATION_PATH_STAGED
+	case "peer":
+		return v1.RelocationPath_RELOCATION_PATH_PEER
 	}
 	return v1.RelocationPath_RELOCATION_PATH_UNSPECIFIED
 }
