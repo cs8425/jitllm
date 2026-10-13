@@ -147,7 +147,11 @@ type lane struct {
 	promptW, stepW int
 	// exactW is the prompt chunk width built for one chunk (layersFor), 0 for
 	// none; one lives at a time.
-	exactW          int
+	exactW int
+	// planeCap narrows the vision score planes below planeBudget's when a
+	// picture's set does not fit the budget at the default (resizeTower);
+	// 0 is no cap.
+	planeCap        int
 	partBuf, f16Buf backend.Buf
 	partCap, f16Cap int
 	// argmaxOut is the device argmax's one word (PrepHead).
