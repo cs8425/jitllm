@@ -70,10 +70,11 @@ func TestStagedGemmPrefillMatchesTheHost(t *testing.T) {
 			for _, arm := range []struct {
 				name   string
 				noInt8 bool
-			}{{"int8", false}, {"binary16", true}} {
+				deep   int
+			}{{"int8", false, -1}, {"binary16", true, -1}, {"binary16-deep", true, 1}} {
 				t.Run(arm.name, func(t *testing.T) {
 					g, err := tier.OpenWith(tier.WithAPI("ptx"), tier.WithDeviceTune(tier.TuneOff),
-						tier.WithConfig(func(c *tier.Config) { c.PreferGemmInt8 = !arm.noInt8 }))
+						tier.WithConfig(func(c *tier.Config) { c.PreferGemmInt8, c.GemmDeep = !arm.noInt8, arm.deep }))
 					if err != nil || g == nil {
 						noDevice(t, "cuda", err)
 					}
@@ -81,7 +82,7 @@ func TestStagedGemmPrefillMatchesTheHost(t *testing.T) {
 					if !strings.Contains(g.Name(), "[ptx]") {
 						t.Skipf("the device is %s; the staged GEMMs are CUDA's", g.Name())
 					}
-					stagedGemmArm(t, m, g, len(ids)+8, run, want, arm.noInt8)
+					stagedGemmArm(t, m, g, len(ids)+8, run, want, arm.noInt8, arm.deep)
 				})
 			}
 			ran++
@@ -93,7 +94,7 @@ func TestStagedGemmPrefillMatchesTheHost(t *testing.T) {
 }
 
 // stagedGemmArm is one arm of TestStagedGemmPrefillMatchesTheHost on g.
-func stagedGemmArm(t *testing.T, m *Model, g *tier.GPU, seq int, run func(*State) [][]float32, want [][]float32, noInt8 bool) {
+func stagedGemmArm(t *testing.T, m *Model, g *tier.GPU, seq int, run func(*State) [][]float32, want [][]float32, noInt8 bool, deep int) {
 	t.Helper()
 	dev := m.NewState(seq)
 	dev.SetDevice(g)
@@ -144,7 +145,12 @@ func stagedGemmArm(t *testing.T, m *Model, g *tier.GPU, seq int, run func(*State
 		t.Fatalf("%s lowers the m16n8 binary16 instruction and built no GEMM on it: the int8 twin answered", g.Name())
 	case noInt8 && st.GemmInt8 != 0:
 		t.Fatalf("no GemmInt8 asked and %d GemmInt8 matvecs: the arm is not the binary16 GEMM", st.GemmInt8)
+	case deep > 0 && sm >= 75 && st.GemmDeep == 0:
+		t.Fatalf("the deep m16n8 tiles forced and none built: the arm is the shipping tile")
+	case deep < 0 && st.GemmDeep != 0:
+		t.Fatalf("the deep m16n8 tiles forced off and %d built", st.GemmDeep)
 	}
+	t.Logf("%d of the binary16 GEMMs on the deep tiles", st.GemmDeep)
 	t.Logf("%d FlashPrefill80 launches; fused operands: %d norms and %d activations wrote binary16, %d activations quantized",
 		st.FlashPrefill80, st.NormF16, st.ActF16Fused, st.QuantActs)
 	// From sm_80 the prompt's attention is FlashPrefill80 wherever a head is

@@ -85,9 +85,13 @@ func TestGemmF16Speed(t *testing.T) {
 			for _, tl := range []kernels.VoltaTile{
 				{MT: 4, NT: 8, WM: 2, WN: 2}, {MT: 4, NT: 4, WM: 2, WN: 2}, {MT: 2, NT: 8, WM: 2, WN: 2},
 				{MT: 8, NT: 4, WM: 2, WN: 2}, {MT: 2, NT: 4, WM: 2, WN: 2}, {MT: 4, NT: 4, WM: 1, WN: 4}, {MT: 8, NT: 2, WM: 1, WN: 4},
+				// The deep stage: eight warps, 64 (two buffers) or 128 (one) of k a trip.
+				{MT: 4, NT: 2, WM: 2, WN: 4, KB: 2}, {MT: 2, NT: 4, WM: 4, WN: 2, KB: 2},
+				{MT: 4, NT: 2, WM: 2, WN: 4, KB: 4, Single: true}, {MT: 2, NT: 4, WM: 4, WN: 2, KB: 4, Single: true},
+				{MT: 4, NT: 4, WM: 2, WN: 4, KB: 2, Single: true}, {MT: 2, NT: 4, WM: 4, WN: 2, KB: 2, Single: true},
 			} {
 				for _, f16k := range []int{16, 8} {
-					tl.KB, tl.F16K = 1, f16k
+					tl.KB, tl.F16K = max(tl.KB, 1), f16k
 					s := kernels.MatVecShape{T: kernels.Q4_K, K: k, Rows: rows, NTok: ntok}
 					kk, err := kernels.GemmVolta(s, tl)
 					if err != nil {
@@ -98,7 +102,7 @@ func TestGemmF16Speed(t *testing.T) {
 						t.Logf("%+v: %v", tl, err)
 						continue
 					}
-					time1(fmt.Sprintf("f16 %dx%d w%dx%d k%d", tl.MT, tl.NT, tl.WM, tl.WN, f16k), func() error {
+					time1(fmt.Sprintf("f16 %dx%d w%dx%d kb%d 1b%v k%d", tl.MT, tl.NT, tl.WM, tl.WN, tl.KB, tl.Single, f16k), func() error {
 						return kern.Launch(kernels.GemmVoltaGroups(s, tl), tl.Threads(), bQS, bD, bSC, bB, out)
 					})
 				}

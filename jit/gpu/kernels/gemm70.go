@@ -16,9 +16,16 @@ import (
 // (ir.MMAVolta), 16 is m16n8k16 (sm_80 on) and 8 is m16n8k8 (sm_75's
 // binary16 shape). The staging is the same for all three; only the fragment
 // reads, the instruction and the epilogue's lane map differ.
+//
+// Single stages one buffer instead of two: a trip is MMAs, a barrier, the
+// next trip's stage, a barrier. It halves the shared memory, so an m16n8
+// tile can stage 128 elements of k a trip (two barriers a trip, four a 256
+// of k -- llama.cpp's MMQ count) where double-buffering fits 64. The next
+// trip's global words are still loaded into registers a trip ahead.
 type VoltaTile struct {
 	MT, NT, WM, WN, KB int
 	F16K               int
+	Single             bool
 }
 
 // mRows is one m-tile's rows.
@@ -48,6 +55,18 @@ func GemmVoltaGroups(s MatVecShape, t VoltaTile) int {
 // -- the padding runs at the end of the sorted order -- and nothing else.
 func GemmVoltaGrouped(s MatVecShape, t VoltaTile, used int) int {
 	return (s.Rows / t.Rows()) * used
+}
+
+// f16Swizzle is an m16n8 tile's chunk permutation for a row of 8 or more
+// chunks (64 elements of k a trip and up). A fragment load's phase is lanes
+// 0-7: rows (or tokens) g and g+1, g even, chunk q = 0..3 each, so g+1's
+// chunks must land in the other half of the 8 bank chunks; a staging store's
+// phase is eight consecutive rows at one chunk (A) or one token's eight
+// chunks (B). swz(r) = 4(r&1) + (r>>1)&3 is a permutation of 0..7 over any
+// eight consecutive rows and puts rows g and g+1 four chunks apart.
+func f16Swizzle(b *ir.Builder, r ir.Value) ir.Value {
+	k := func(v int64) ir.Value { return b.Const(ir.U32, v) }
+	return b.Add(ir.U32, b.Shl(ir.U32, b.And(ir.U32, r, k(1)), k(2)), b.And(ir.U32, b.Shr(ir.U32, r, k(1)), k(3)))
 }
 
 // voltaSwizzle is the 16-byte chunk permutation of one shared-memory row of c
@@ -141,12 +160,20 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 	if C&(C-1) != 0 || C < 2 || subC < 1 {
 		return nil, fmt.Errorf("kernels: GemmVolta: %d chunks a trip; KB*sub must be 16, 32, 64 or more by powers of two", C)
 	}
-	if t.F16K != 0 && C != 4 {
-		// Lane q of an m16n8 fragment reads chunk q of its row: four chunks
-		// are one trip, and a wider trip puts rows g and g+1 on one bank set.
-		return nil, fmt.Errorf("kernels: GemmVolta: an m16n8 tile stages 32 elements a trip, not %d", 8*C)
+	if t.F16K != 0 && C != 4 && C%8 != 0 {
+		// Lane q of an m16n8 fragment reads chunk 4s+q of its row in step s:
+		// a trip is whole 32-element steps, and a wide one is 8 chunks or more
+		// so f16Swizzle's permutation of eight has whole rows to work in.
+		return nil, fmt.Errorf("kernels: GemmVolta: an m16n8 tile stages 32 or a multiple of 64 elements a trip, not %d", 8*C)
 	}
-	if sh := 2 * (BM + BN) * kHalf * 4; sh > 48<<10 {
+	if t.Single && t.F16K == 0 {
+		return nil, fmt.Errorf("kernels: GemmVolta: a single-buffered stage is an m16n8 tile's")
+	}
+	nbuf := 2
+	if t.Single {
+		nbuf = 1
+	}
+	if sh := nbuf * (BM + BN) * kHalf * 4; sh > 48<<10 {
 		return nil, fmt.Errorf("kernels: GemmVolta: %d bytes of shared memory, over the 48 KiB a kernel may declare", sh)
 	}
 	if (BM*t.KB)%nth != 0 && BM*t.KB > nth || (BN*C)%nth != 0 || nth%C != 0 {
@@ -157,6 +184,9 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 		s.Rows, s.K, s.NTok, t.MT, t.NT, t.WM, t.WN, t.KB, split)
 	if t.F16K != 0 {
 		name += fmt.Sprintf("_f%d", t.F16K)
+	}
+	if t.Single {
+		name += "_1b"
 	}
 	if grouped {
 		name += fmt.Sprintf("_e%d", s.Experts)
@@ -174,14 +204,22 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 	if grouped {
 		pSel = b.Param("pSel", ir.U32)
 	}
-	shA := b.Shared("gemmA", ir.U32, 2*BM*kHalf)
-	shB := b.Shared("gemmB", ir.U32, 2*BN*kHalf)
+	shA := b.Shared("gemmA", ir.U32, nbuf*BM*kHalf)
+	shB := b.Shared("gemmB", ir.U32, nbuf*BN*kHalf)
 	c := func(v int64) ir.Value { return b.Const(ir.U32, v) }
 	add := func(v ir.Value, n int64) ir.Value {
 		if n == 0 {
 			return v
 		}
 		return b.Add(ir.U32, v, c(n))
+	}
+	// wide is an m16n8 trip of 8 chunks or more, swizzled by f16Swizzle.
+	wide := t.F16K != 0 && C >= 8
+	swzOf := func(r ir.Value, weights bool) ir.Value {
+		if wide {
+			return f16Swizzle(b, r)
+		}
+		return voltaSwizzle(b, r, C, weights)
 	}
 	// chunkAt is the shared index of chunk j of the row whose swizzle is swz:
 	// one Value per j, built once before the loop.
@@ -271,7 +309,7 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 	// aAt[i][q] is where item i's chunk q goes in its row: chunk
 	// (sub-block)*subC+q, swizzled. The item's sub-block is a constant when a
 	// thread's items differ only in row, and tid/BM plus one otherwise.
-	aSw := voltaSwizzle(b, aRow0, C, true)
+	aSw := swzOf(aRow0, true)
 	aAt := make([][]ir.Value, nA)
 	for i := range aAt {
 		aAt[i] = make([]ir.Value, subC)
@@ -301,7 +339,7 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 		}
 		if i == 0 || bStep%4 != 0 {
 			bS[i] = b.Add(ir.U32, b.Mul(ir.U32, tk, c(int64(kHalf))),
-				b.Shl(ir.U32, b.Xor(ir.U32, bCh, voltaSwizzle(b, tk, C, false)), c(2)))
+				b.Shl(ir.U32, b.Xor(ir.U32, bCh, swzOf(tk, false)), c(2)))
 		} else {
 			bS[i] = bS[0]
 		}
@@ -317,8 +355,11 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 	var fragA, fragB []ir.Value
 	// m16n8's lane (g, q): g = lane/4 is the A row (and g+8) and the B token,
 	// q = lane%4 the k pair. fragA16 holds rows g and g+8, chunk q each.
-	var fragA16 [2]ir.Value
-	var fragB16, lq, lg ir.Value
+	// A wide trip's step s reads chunk (4s+q)^swz = (q^swz)^4(s&1) + 8(s>>1):
+	// index [p] is the even (p = 0) and odd step's base, the rest a constant.
+	var fragA16 [2][2]ir.Value
+	var fragB16 [2]ir.Value
+	var lq, lg ir.Value
 	if t.F16K == 0 {
 		q8 := b.Shl(ir.U32, v.quad(), c(3))
 		rowW = b.Add(ir.U32, b.Mul(ir.U32, wm, c(int64(32*t.MT))), q8)
@@ -343,14 +384,19 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 		lq = b.And(ir.U32, v.lane, c(3))
 		rowW = b.Mul(ir.U32, wm, c(int64(16*t.MT)))
 		tokW = b.Mul(ir.U32, wn, c(int64(8*t.NT)))
-		for h := 0; h < 2; h++ {
-			r := add(b.Add(ir.U32, rowW, lg), int64(8*h))
-			fragA16[h] = b.Add(ir.U32, b.Mul(ir.U32, r, c(int64(kHalf))),
-				b.Shl(ir.U32, b.Xor(ir.U32, lq, voltaSwizzle(b, r, C, true)), c(2)))
+		frag := func(r ir.Value, weights bool) (out [2]ir.Value) {
+			ch := b.Xor(ir.U32, lq, swzOf(r, weights))
+			base := b.Mul(ir.U32, r, c(int64(kHalf)))
+			out[0] = b.Add(ir.U32, base, b.Shl(ir.U32, ch, c(2)))
+			if wide {
+				out[1] = b.Add(ir.U32, base, b.Shl(ir.U32, b.Xor(ir.U32, ch, c(4)), c(2)))
+			}
+			return
 		}
-		tk := b.Add(ir.U32, tokW, lg)
-		fragB16 = b.Add(ir.U32, b.Mul(ir.U32, tk, c(int64(kHalf))),
-			b.Shl(ir.U32, b.Xor(ir.U32, lq, voltaSwizzle(b, tk, C, false)), c(2)))
+		for h := 0; h < 2; h++ {
+			fragA16[h] = frag(add(b.Add(ir.U32, rowW, lg), int64(8*h)), true)
+		}
+		fragB16 = frag(b.Add(ir.U32, tokW, lg), false)
 	}
 	nAcc := 8
 	if t.F16K != 0 {
@@ -482,18 +528,20 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 		d[i] = make([][]ir.Value, t.NT)
 		copy(d[i], accs[i])
 	}
-	if t.F16K != 0 {
-		pa0, pa1 := b.Add(ir.U32, fragA16[0], curA), b.Add(ir.U32, fragA16[1], curA)
-		pb := b.Add(ir.U32, fragB16, curB)
+	for ks := 0; ks < C/4 && t.F16K != 0; ks++ {
+		// One 32-element step of the trip: chunk 4ks+q of each row.
+		p, off := ks&1, int64(32*(ks>>1))
+		pa0, pa1 := b.Add(ir.U32, fragA16[0][p], curA), b.Add(ir.U32, fragA16[1][p], curA)
+		pb := b.Add(ir.U32, fragB16[p], curB)
 		a0 := make([][]ir.Value, t.MT)
 		a1 := make([][]ir.Value, t.MT)
 		for i := range a0 {
-			a0[i] = b.LoadV(ir.U32, shA, pa0, int64(16*i*kHalf), 4)
-			a1[i] = b.LoadV(ir.U32, shA, pa1, int64(16*i*kHalf), 4)
+			a0[i] = b.LoadV(ir.U32, shA, pa0, int64(16*i*kHalf)+off, 4)
+			a1[i] = b.LoadV(ir.U32, shA, pa1, int64(16*i*kHalf)+off, 4)
 		}
 		bf := make([][]ir.Value, t.NT)
 		for j := range bf {
-			bf[j] = b.LoadV(ir.U32, shB, pb, int64(8*j*kHalf), 4)
+			bf[j] = b.LoadV(ir.U32, shB, pb, int64(8*j*kHalf)+off, 4)
 		}
 		for st := 0; st < 2; st++ {
 			w0, w1 := 2*st, 2*st+1
@@ -533,6 +581,12 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 		}
 	}
 	nxA, nxB := b.Sub(ir.U32, sizeA, curA), b.Sub(ir.U32, sizeB, curB)
+	if t.Single {
+		// One buffer: every warp's fragment loads are done before it is
+		// overwritten.
+		nxA, nxB = zero, zero
+		b.Barrier()
+	}
 	stage(ra, rb, subR, nxA, nxB, xR)
 	subN, WN, BN2 := advance(subR, WR, BR)
 	na, nb := load(WN, BN2, subN)

@@ -20,6 +20,13 @@ func Lower(k *ir.Kernel, t Target) (string, error) {
 	if err := k.Validate(); err != nil {
 		return "", err
 	}
+	for i, o := range k.Ops {
+		if ir.IsLdMatrix(o) {
+			// ldmatrix's lane contract is NVIDIA's warp of 32 with a fixed
+			// row-to-lane map; there is no instruction here that keeps it.
+			return "", fmt.Errorf("amdgpu: op %d: no lowering for an ldmatrix load", i+1)
+		}
+	}
 	if t.Wave != 32 && t.Wave != 64 {
 		return "", fmt.Errorf("amdgpu: a wave of %d lanes", t.Wave)
 	}
