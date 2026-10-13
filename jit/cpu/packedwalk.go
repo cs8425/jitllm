@@ -161,6 +161,17 @@ func scByte(a *Buf, dst, word Reg, sh byte) {
 	a.VPSRLD(dst, dst, 24)
 }
 
+// scScale extracts sub-block sn's scale from the SC word into dst: a field
+// of container v27's stream (scField; borrow is its scratch and next loads a
+// straddling field's next word), or the packed byte.
+func scScale(a *Buf, f *packedFormat, dst, word, borrow Reg, sn int, next func(Reg)) {
+	if f.stream {
+		scField(avxSC(a), dst, word, borrow, sn, false, next)
+	} else {
+		scByte(a, dst, word, f.scShift(sn))
+	}
+}
+
 // scMinByte extracts the minimum byte, eight bits above the scale's.
 func scMinByte(a *Buf, dst, word Reg, sh byte) {
 	a.VPSLLD(dst, word, 16-sh)
