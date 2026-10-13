@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "container": {
-    "version": 28,
+    "version": 29,
     "note": "the engine reads only .jlm containers of exactly this version; anything else is converted with `jitllm convert`"
   },
   "input_formats": [
@@ -303,6 +303,10 @@
     {
       "name": "qwen3vlmoe",
       "graph": "qwen3vlmoe"
+    },
+    {
+      "name": "qwen4exp",
+      "graph": "qwen4exp"
     },
     {
       "name": "seed_oss",

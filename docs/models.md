@@ -7,9 +7,9 @@ a GGUF architecture, Hugging Face class or vision projector that is not here is 
 by name. `internal/srcgate.TestModelsDocIsGenerated` fails when the page and the code part; rerun
 `go run ./scripts/genmodels docs/models.md`.
 
-- **66** GGUF text architecture names (`general.architecture`, `convert.Architectures`) on **58** graphs
+- **67** GGUF text architecture names (`general.architecture`, `convert.Architectures`) on **59** graphs
 - **30** Hugging Face safetensors classes (`architectures` in `config.json`, `convert.HFClasses`) on **23** graphs, **1** of them reached only from safetensors
-- **59** graphs in all (`jlm.Arch`)
+- **60** graphs in all (`jlm.Arch`)
 - **17** vision projectors (`clip.projector_type`, `convert.Projectors`)
 - **3** embedding encoders, and pooling on any decoder
 - **13** weight types read (`quant.Dequantable`), **9** of them packed quantizations (`quant.PackedTypes`)
@@ -76,6 +76,7 @@ further at conversion (a stated sliding window, M-RoPE sections); the Models col
 | `qwen3next` | `qwen35`, `qwen35moe`, `qwen3next` | -- | `qwen35`: Qwen3.5 dense; `qwen35moe`: Qwen3.5 and Qwen3.6 mixtures; `qwen3next`: Qwen3-Next 80B-A3B |
 | `qwen3vl` | `qwen3vl` | -- | Qwen3-VL dense text models |
 | `qwen3vlmoe` | `qwen3vlmoe` | -- | Qwen3-VL mixtures |
+| `qwen4exp` | `qwen4exp` | -- | Qwen3.8-Flash-Next (text) |
 | `seed_oss` | `seed_oss` | `SeedOssForCausalLM` | Seed-OSS 36B |
 | `smollm3` | `smollm3` | `SmolLM3ForCausalLM` | SmolLM3 |
 | `stablelm` | `stablelm` | -- | StableLM 2, StableLM 3B |

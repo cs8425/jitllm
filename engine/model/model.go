@@ -1586,6 +1586,11 @@ func openContainer(path string, options ...Option) (*Model, error) {
 	for i := range m.altUnembd {
 		bindOne(c, &m.altUnembd[i])
 	}
+	if m.q4eHead != nil {
+		for _, t := range m.q4eHead.hc.tensors() {
+			bindOne(c, t)
+		}
+	}
 	// A container that carries a tower builds one. Nothing is faulted in: the
 	// tower's norms and biases are in the dense region like the text model's,
 	// and its matrices are bound by Tower.pageIn as Encode reaches them.
