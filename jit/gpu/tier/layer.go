@@ -10938,7 +10938,7 @@ func (g *devTier) mla70Attn(p *nn.LayerPlan, rows int) bool {
 // ActF16 and never the int8 one. A lookup: batchMV's twins are compiled by
 // prepBatch before any session.
 func (g *devTier) voltaBlock(l *layer, ntok, tok int) bool {
-	if l.router != nil || l.linear || l.mla || l.nonCausal || l.stream != nil {
+	if l.router != nil || l.linear || l.mla || l.stream != nil {
 		return false
 	}
 	n := 0
