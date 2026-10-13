@@ -228,6 +228,10 @@ func engineSettings(sh *app.Shell) widget.Widget {
 		label(sh, "Service address"),
 		p.Field(addr),
 		note(sh, "Empty is the login service's address. Apply closes the models the engine in use holds."),
+		label(sh, "Service API key"),
+		keyField(sh, st.ServiceKey),
+		showKeys(sh),
+		note(sh, "Sent to a jitllmd that was started with an API key. Blank is none."),
 	).Gap(p.Space.S).CrossAlign(primitives.CrossAxisStretch)
 }
 
@@ -258,7 +262,11 @@ func apiSettings(sh *app.Shell) widget.Widget {
 		note(sh, "OpenAI- and Anthropic-compatible endpoints and jitllm's own Connect API. A model open here is a model of the API, and its requests run beside the chat."),
 		label(sh, "Address"),
 		p.Field(addr),
-		note(sh, "127.0.0.1 keeps it on this computer. A new address applies the next time the API is turned on."),
+		note(sh, "Empty is "+api.DefaultAddr+", this computer only. A new address applies the next time the API is turned on."),
+		label(sh, "API key"),
+		keyField(sh, st.APIKey),
+		showKeys(sh),
+		note(sh, "Required of clients of the API when set; blank is none. Applies the next time the API is turned on."),
 	).Gap(p.Space.S).CrossAlign(primitives.CrossAxisStretch)
 }
 
@@ -366,6 +374,36 @@ func ResetSettings(sh *app.Shell) {
 	sh.Cfg.MaxMem = d.MaxMem
 	sh.SaveSoon()
 	sh.SetDark(!d.Light)
+}
+
+// keyField is a masked text field over sig, swapped for a plain one while
+// ShowKeys is on. The two share the signal, so the value is the same text.
+func keyField(sh *app.Shell, sig state.Signal[string]) widget.Widget {
+	p := sh.P
+	masked := textfield.New(
+		textfield.ValueSignal(sig),
+		textfield.InputTypeOpt(textfield.TypePassword),
+		textfield.PainterOpt(p.TextField),
+	)
+	plain := textfield.New(
+		textfield.ValueSignal(sig),
+		textfield.PainterOpt(p.TextField),
+	)
+	show := sh.Store.ShowKeys
+	hidden := state.NewComputed(func() bool { return !show.Get() }, show.AsReadonly())
+	return primitives.VBox(
+		widgets.Hide(hidden, p.Field(masked)),
+		widgets.Hide(show.AsReadonly(), p.Field(plain)),
+	).CrossAlign(primitives.CrossAxisStretch)
+}
+
+// showKeys is the checkbox that unmasks the key fields.
+func showKeys(sh *app.Shell) widget.Widget {
+	return checkbox.New(
+		checkbox.LabelOpt("Show keys"),
+		checkbox.CheckedSignal(sh.Store.ShowKeys),
+		checkbox.PainterOpt(sh.P.Checkbox),
+	)
 }
 
 // label is a small heading over one control.

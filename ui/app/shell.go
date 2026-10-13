@@ -16,6 +16,7 @@
 package app
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -106,6 +107,8 @@ func NewShell(gpuApp *gogpu.App, cfg *Config) *Shell {
 	s.Store.APIAddr.Set(cfg.APIAddr)
 	s.Store.EngineMode.Set(cfg.Engine)
 	s.Store.ServiceAddr.Set(cfg.ServiceAddr)
+	s.Store.ServiceKey.Set(cfg.ServiceKey)
+	s.Store.APIKey.Set(cfg.APIKey)
 	s.Store.ModelDirs.Set(append([]string(nil), cfg.ModelDirs...))
 	if p := cfg.ChatsPath(); p != "" {
 		s.Store.LoadChats(p)
@@ -372,6 +375,8 @@ func (s *Shell) SaveSettings() {
 	s.Cfg.APIAddr = st.APIAddr.Get()
 	s.Cfg.Engine = st.EngineMode.Get()
 	s.Cfg.ServiceAddr = st.ServiceAddr.Get()
+	s.Cfg.ServiceKey = strings.TrimSpace(st.ServiceKey.Get())
+	s.Cfg.APIKey = strings.TrimSpace(st.APIKey.Get())
 	s.Cfg.ModelDirs = append([]string(nil), st.ModelDirs.Get()...)
 	s.Cfg.LastModel = st.ModelPath.Get()
 	if err := s.Cfg.Save(); err != nil {
@@ -416,6 +421,10 @@ func (s *Shell) autosave() {
 	on(st.APIAddr, save)
 	on(st.EngineMode, save)
 	on(st.ServiceAddr, save)
+	// A key is used the moment the API or the engine is next started, which
+	// can be before the delayed save: Cfg follows the field at once.
+	on(st.ServiceKey, func() { s.Cfg.ServiceKey = strings.TrimSpace(st.ServiceKey.Get()); save() })
+	on(st.APIKey, func() { s.Cfg.APIKey = strings.TrimSpace(st.APIKey.Get()); save() })
 	on(st.ModelDirs, save)
 	on(st.ModelPath, save)
 	on(st.Chats, save)

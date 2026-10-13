@@ -203,7 +203,10 @@ The server is for the machine it runs on until told otherwise.
 The clients send the key when they have one: `jitllm` and `jitllmd` verbs take
 `-api-key` (default `JITLLM_API_KEY`); the window and the terminal app read
 `service_key` (the key to ask a jitllmd with) and `api_key` (the key their own
-API requires) from the settings file, and `JITLLM_API_KEY` for either.
+API requires) from the settings file, and `JITLLM_API_KEY` for either. Both
+settings screens have a masked field for each (with a show toggle); a blank field
+is no key, and the file is written private (mode 0600). The settings file records
+an address only when you type one: empty means the default.
 
 ## The native API and the OpenAI routes
 

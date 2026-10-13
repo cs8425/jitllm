@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,7 +43,8 @@ func TestASavedLegacyAPIAddressFollowsTheDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	for saved, want := range map[string]string{
-		"127.0.0.1:8080": "localhost:4242",
+		"127.0.0.1:8080": "",
+		"localhost:4242": "",
 		"127.0.0.1:9000": "127.0.0.1:9000",
 	} {
 		if err := os.WriteFile(p, []byte(`{"api_addr":"`+saved+`"}`), 0o644); err != nil {
@@ -51,5 +53,51 @@ func TestASavedLegacyAPIAddressFollowsTheDefault(t *testing.T) {
 		if got := LoadConfig().APIAddr; got != want {
 			t.Errorf("saved %q loads as %q, want %q", saved, got, want)
 		}
+	}
+}
+
+// TestTheDefaultAddressIsNotSaved: a first run holds "use the default" as an
+// empty address, the file records only what was typed, and it is private.
+func TestTheDefaultAddressIsNotSaved(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	c := LoadConfig()
+	if c.APIAddr != "" || c.ServiceAddr != "" {
+		t.Fatalf("a first run holds %q and %q, want both empty", c.APIAddr, c.ServiceAddr)
+	}
+	c.APIKey, c.ServiceKey = "k1", "k2"
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(c.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "4242") || strings.Contains(string(b), "8080") {
+		t.Errorf("an address the person never typed was written:\n%s", b)
+	}
+	fi, err := os.Stat(c.Path())
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("settings file mode %v, %v", fi.Mode(), err)
+	}
+	// An older, world-readable file is tightened by the next save.
+	if err := os.Chmod(c.Path(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ = os.Stat(c.Path()); fi.Mode().Perm() != 0o600 {
+		t.Errorf("an old file stayed %v", fi.Mode())
+	}
+	c = LoadConfig()
+	if c.APIKey != "k1" || c.ServiceKey != "k2" {
+		t.Errorf("keys did not round-trip: %q %q", c.APIKey, c.ServiceKey)
+	}
+	c.APIAddr = "0.0.0.0:9000"
+	c.Save()
+	if LoadConfig().APIAddr != "0.0.0.0:9000" {
+		t.Error("an address the person typed was lost")
 	}
 }

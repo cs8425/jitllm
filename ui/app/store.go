@@ -152,6 +152,12 @@ type Store struct {
 	// Settings applies, not what runs (Engine says that).
 	EngineMode  state.Signal[string]
 	ServiceAddr state.Signal[string]
+	// ServiceKey is the API key a jitllmd at ServiceAddr wants, APIKey the one
+	// the app's own API requires; blank is none. ShowKeys unmasks both fields
+	// and is not persisted.
+	ServiceKey state.Signal[string]
+	APIKey     state.Signal[string]
+	ShowKeys   state.Signal[bool]
 	// ModelDirs is the folders models are found in; the first is where
 	// downloads go. Write it through Shell.SetModelDirs, which keeps Cfg too.
 	ModelDirs state.Signal[[]string]
@@ -233,6 +239,9 @@ func NewStore() *Store {
 		Engine:      state.NewSignal(core.Where{}),
 		EngineMode:  state.NewSignal(""),
 		ServiceAddr: state.NewSignal(""),
+		ServiceKey:  state.NewSignal(""),
+		APIKey:      state.NewSignal(""),
+		ShowKeys:    state.NewSignal(false),
 		ModelDirs:   state.NewSignal([]string(nil)),
 
 		Chats:   state.NewSignal([]ChatInfo{{}}),
