@@ -21,7 +21,7 @@ func openQ4E(t *testing.T, name string) (*Model, *c6Golden) {
 // hyper-connection streams at rank 16; linear, attention, linear, attention;
 // QSA on both attention blocks (budget 8 at a ratio of 4, so from position 12
 // a query reads a subset of its keys); the n-gram block on block 2 (3-grams,
-// two heads each, rows of 32); the delta rule's gate a sigmoid.
+// two heads each, rows of 16); the delta rule's gate a sigmoid.
 var q4eFixtures = []struct {
 	name string
 	sel  func(m *Model) bool
@@ -30,7 +30,7 @@ var q4eFixtures = []struct {
 		c := m.Cfg
 		return c.Arch == "qwen4exp" && c.HCMult == 4 && c.HCLowRank == 16 && c.QSARatio == 4 &&
 			c.IdxTopK == 8 && c.IdxHeads == 8 && c.IdxHeadDim == 32 && c.NGramBlock == 3 &&
-			c.NGram == 3 && c.NGramHeadsPer == 2 && c.NGramRowDim == 32 && c.NGramConv == 4 &&
+			c.NGram == 3 && c.NGramHeadsPer == 2 && c.NGramRowDim == 16 && c.NGramConv == 4 &&
 			c.DeltaSigmoidGate && c.NRot == 16 && c.RopeNeox && c.AttnOutGate &&
 			c.LayerKind(0).Recurrent() && !c.LayerKind(1).Recurrent() &&
 			c.LayerKind(2).Recurrent() && !c.LayerKind(3).Recurrent() && m.ngram != nil

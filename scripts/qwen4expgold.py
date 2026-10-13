@@ -24,7 +24,8 @@ Every feature sits inside the golden's 32 positions:
   from position 12 each full-attention query reads a subset of its keys (the
   real file's budget of 2048 makes QSA dense under 2051 positions);
 - PLE on block 2 (one-based 3, a linear block, as the reference requires),
-  2-grams and 3-grams with two heads each, rows of 32, a dilated conv of
+  2-grams and 3-grams with two heads each, rows of 16 (ple_embed_dim is the
+  hidden width: llama.cpp's loader assumes it), a dilated conv of
   kernel 4 at dilation 3;
 - an EOS at position 10, so the n-gram window resets mid-sequence;
 - the gated norm's gate is sigmoid (output_gate_type), the release's.
@@ -70,7 +71,7 @@ SHAPE = dict(
     linear_num_key_heads=2, linear_num_value_heads=4,
     num_experts=8, num_experts_per_tok=2, moe_intermediate_size=32, shared_expert_intermediate_size=32,
     norm_topk_prob=True, hc_count=4, hc_lowrank=16,
-    ple_layer_ids=[3], ple_embed_dim=128, ple_conv_kernel_size=4, ngram_size=3, heads_per_ngram=2,
+    ple_layer_ids=[3], ple_embed_dim=64, ple_conv_kernel_size=4, ngram_size=3, heads_per_ngram=2,
     ngram_vocab_size_base=1000, make_ngram_vocab_size_divisible_by=128, seed=4321, split_ngram_parts=PARTS,
     indexer_n_heads=8, indexer_kv_heads=1, indexer_head_dim=32, indexer_budget=8, indexer_compress_ratio=4,
     output_gate_type="sigmoid", hidden_act="silu", rms_norm_eps=1e-6, max_position_embeddings=4096,
