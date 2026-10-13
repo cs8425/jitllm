@@ -323,6 +323,9 @@ func (s *cudaSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
 	if err := checkWidth("ptx", ck.name, ck.group, width); err != nil {
 		return err
 	}
+	if err := checkGrid("ptx", ck.name, ck.grid, groups, ck.resident, ck.residentErr); err != nil {
+		return err
+	}
 	m := ck.m
 	args := m.Args(len(bufs))
 	if s.q != nil {
@@ -562,34 +565,35 @@ func (s *cudaSession) Replay(r Recording) error {
 	cg := r.(*cudaGraph)
 	if len(cg.marks) > 0 {
 		// The previous timed replay is done: decode read its token back. A
-		// session on a queue is no different here, and settling only on the
-		// legacy stream left JITLLM_CUDA_KERNEL_TIMING silent for every
-		// decode that runs on a queue.
+		// session on a queue is no different here; settling only on the
+		// legacy stream left both timing instruments silent for every decode
+		// that runs on a queue, which is every decode of a session.
 		settleMarks(s.c.lastMarks)
 		s.c.lastMarks = cg.marks
 	}
+	st := s.c.cap
 	if s.q != nil {
-		return cg.g.Launch(s.q.st)
+		st = s.q.st
 	}
 	if !cudaTiming.Load() || !cuda.EventsAvailable() {
-		return cg.g.Launch(s.c.cap)
+		return cg.g.Launch(st)
 	}
-	return s.c.timeReplay(cg.g)
+	return s.c.timeReplay(cg.g, st)
 }
 
-// timeReplay is Replay between two events on the capture stream. Replay i's
+// timeReplay is Replay between two events on the stream it runs on. Replay i's
 // pair is read at replay i+1: its graph is done by then, because decode reads
 // the token back between them (a legacy-stream copy waits for this stream),
 // and so is replay i-1's after-event, which makes the gap between two graphs
 // -- the device idle while the host takes the token and issues the next --
 // a device-clock number too.
-func (c *cudaDev) timeReplay(g *cuda.Graph) error {
+func (c *cudaDev) timeReplay(g *cuda.Graph, st *cuda.Stream) error {
 	cur := &c.tev[c.ti%3]
 	for i := range cur {
 		if cur[i] == nil {
 			e, err := cuda.NewEvent()
 			if err != nil {
-				return g.Launch(c.cap)
+				return g.Launch(st)
 			}
 			cur[i] = e
 		}
@@ -607,14 +611,14 @@ func (c *cudaDev) timeReplay(g *cuda.Graph) error {
 			graphTimes.add(busy, gap)
 		}
 	}
-	if err := cur[0].Record(c.cap); err != nil {
+	if err := cur[0].Record(st); err != nil {
 		return err
 	}
-	if err := g.Launch(c.cap); err != nil {
+	if err := g.Launch(st); err != nil {
 		return err
 	}
 	c.ti++
-	return cur[1].Record(c.cap)
+	return cur[1].Record(st)
 }
 
 // graphTimes holds the last replays' device times, in microseconds.
@@ -987,10 +991,19 @@ func (c *cudaDev) Compile(k *ir.Kernel) (Kernel, error) {
 	var a cuda.Attrs
 	var attrsOK bool
 	err = errCUDAClosed
+	ck := &cudaKern{dev: c, name: k.Name, group: k.Group, src: k}
 	c.do(func() {
-		if m, err = c.d.Load(src, k.Name); err == nil {
-			a, attrsOK = m.Attrs(k.Group[0])
+		if m, err = c.d.Load(src, k.Name); err != nil {
+			return
 		}
+		a, attrsOK = m.Attrs(k.Group[0])
+		if !k.GridSync() {
+			return
+		}
+		// A grid barrier runs cooperatively, on a grid the occupancy
+		// calculator says is resident at once (cuda/coop.go).
+		m.Coop = true
+		ck.resident, ck.residentErr = m.Resident(k.Group[0])
 	})
 	if err != nil {
 		return nil, err
@@ -1002,15 +1015,25 @@ func (c *cudaDev) Compile(k *ir.Kernel) (Kernel, error) {
 		return nil, fmt.Errorf("%w: %s at %d registers a thread launches at most %d threads, not %d",
 			ErrGroupTooWide, k.Name, a.Regs, a.MaxThreads, k.Group[0])
 	}
-	kern := &cudaKern{m: m, dev: c, name: k.Name, group: k.Group}
+	ck.m = m
 	if attrsOK {
-		kern.res = KernelResources{Name: k.Name, API: "cuda", Group: k.Group[0], Regs: a.Regs,
+		ck.res = KernelResources{Name: k.Name, API: "cuda", Group: k.Group[0], Regs: a.Regs,
 			SpillBytes: a.Local, SharedBytes: a.Shared, MaxGroup: a.MaxThreads,
 			Resident: a.Blocks, ResidentThreads: a.Blocks * k.Group[0], MaxThreads: c.d.MaxThreadsPerSM()}
-		kern.resOK = true
-		c.res.note(kern.res)
+		ck.resOK = true
+		c.res.note(ck.res)
 	}
-	return kern, nil
+	return ck, nil
+}
+
+// GridLimit is the most workgroups a launch of k may carry when k has a grid
+// barrier: the occupancy calculator's resident blocks (cuda.Module.Resident).
+func (c *cudaDev) GridLimit(k Kernel) (int, error) {
+	ck := k.(*cudaKern)
+	if !ck.src.GridSync() {
+		return 0, fmt.Errorf("backend: cuda: %s has no grid barrier", ck.name)
+	}
+	return ck.resident, ck.residentErr
 }
 
 type cudaBuf struct {
@@ -1117,6 +1140,12 @@ type cudaKern struct {
 	// group is the declared workgroup. CUDA runs the launch's width, so a
 	// mismatch computes here and not on Vulkan; checkWidth refuses it on both.
 	group [3]int
+	// src is the kernel's IR (IRSource); resident and residentErr its
+	// co-residency limit when it has a grid barrier (GridLimit).
+	src         *ir.Kernel
+	resident    int
+	grid        bool // src has a grid barrier: decided once at compile, read by every launch
+	residentErr error
 	// res is what the driver reported for this compile (resOK false where it
 	// would not say); see KernelResourcesOf.
 	res   KernelResources
@@ -1135,11 +1164,16 @@ func (k *cudaKern) noteRan() {
 	}
 }
 
+func (k *cudaKern) IR() *ir.Kernel { return k.src }
+
 // Launch synchronises before returning. cuLaunchKernel is asynchronous and the
 // Vulkan and Metal arms block, so without this the interface would mean two
 // things per backend, and timing a launch would measure only the enqueue.
 func (k *cudaKern) Launch(groups, width int, bufs ...Buf) error {
 	if err := checkWidth("ptx", k.name, k.group, width); err != nil {
+		return err
+	}
+	if err := checkGrid("ptx", k.name, k.grid, groups, k.resident, k.residentErr); err != nil {
 		return err
 	}
 	cb := make([]*cuda.Buffer, len(bufs))
@@ -1166,7 +1200,7 @@ type cudaQueue struct {
 	c    *cudaDev
 	st   *cuda.Stream
 	mu   sync.Mutex
-	args [24]unsafe.Pointer
+	args [64]unsafe.Pointer
 	s    cudaSession
 	// stage is page-locked host memory every copy of this queue goes through,
 	// used from the front and reset once the stream has drained. A copy from

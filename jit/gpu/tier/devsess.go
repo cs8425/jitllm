@@ -369,6 +369,7 @@ func (g *devTier) sessQueue() {
 // closeQueue closes the session's queue. Callers hold g.mu, with no
 // submission of the session's running.
 func (ds *devSess) closeQueue() {
+	ds.launchTo.closePersist()
 	if ds.q != nil {
 		ds.q.Close()
 		ds.q = nil

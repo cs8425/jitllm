@@ -64,6 +64,16 @@ message BlockPlacement {
   // Whether the block's page is currently resident in the host pager. A block
   // ON a device can still be non-resident on the host side.
   bool host_resident = 6;
+
+  // What this block's history costs in the session, so a caller can draw how
+  // much of it a move carries at any position: `state_bytes` (a recurrent
+  // summary, fixed) plus `history_per_position` for each position the block
+  // keeps. A windowed block keeps the last `history_window` positions only;
+  // zero is every position. All three are zero for a block with no history
+  // (a vision block).
+  ByteSize history_per_position = 7;
+  int32 history_window = 8;
+  ByteSize state_bytes = 9;
 }
 
 // A decline is the device saying "I cannot run this block", by name. The only

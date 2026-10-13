@@ -54,6 +54,10 @@ type lowerer struct {
 	// always-false predicate; -1 when the module needs none. See anchorFor.
 	anchorLoop, anchorBuf int
 	anchorNever           uint32
+	// grid is whether the kernel has a grid barrier, and nGroups the loaded
+	// NumWorkgroups.x it counts arrivals against (grid.go).
+	grid    bool
+	nGroups uint32
 }
 
 // anchorFor finds where a module's first buffer access sits. When it is inside
@@ -155,6 +159,7 @@ func Emit(k *ir.Kernel) ([]byte, error) {
 			l.sizeVar = 1
 		}
 	}
+	l.grid = k.GridSync()
 	l.anchorLoop, l.anchorBuf = anchorFor(k)
 	if err := l.build(); err != nil {
 		return nil, err
@@ -236,6 +241,9 @@ func (l *lowerer) build() error {
 		inst(&m.deco, opDecorate, st, decoBlock)
 		inst(&m.deco, opDecorate, v, decoDescriptorSet, 0)
 		inst(&m.deco, opDecorate, v, decoBinding, uint32(i))
+		if l.grid {
+			inst(&m.deco, opDecorate, v, decoCoherent)
+		}
 		l.bufs = append(l.bufs, v)
 	}
 
@@ -286,6 +294,13 @@ func (l *lowerer) build() error {
 
 	// The lane index and the subgroup width, scalar u32 Input builtins.
 	iface := []uint32{vLocal, vGroup}
+	var vNum uint32
+	if l.grid {
+		vNum = m.id()
+		inst(&m.types, opVariable, pin, vNum, storageInput)
+		inst(&m.deco, opDecorate, vNum, decoBuiltIn, builtInNumGroups)
+		iface = append(iface, vNum)
+	}
 	if l.laneVar != 0 || l.sizeVar != 0 {
 		pu := m.id()
 		inst(&m.types, opTypePointer, pu, storageInput, l.tu32)
@@ -333,6 +348,12 @@ func (l *lowerer) build() error {
 		inst(&m.funcs, opIEqual, l.tbool, l.anchorNever, n, l.u32c(^uint32(0)))
 	}
 
+	if l.grid {
+		ld := m.id()
+		inst(&m.funcs, opLoad, l.tv3u32, ld, vNum)
+		l.nGroups = m.id()
+		inst(&m.funcs, opCompositeExtract, l.tu32, l.nGroups, ld, 0)
+	}
 	if l.laneVar != 0 {
 		l.laneID = m.id()
 		inst(&m.funcs, opLoad, l.tu32, l.laneID, l.laneVar)
@@ -463,6 +484,8 @@ func (l *lowerer) block(lo, hi int) error {
 			// AcquireRelease(0x8) | WorkgroupMemory(0x100). Anything weaker does
 			// not order the shared writes the barrier exists to order.
 			inst(&l.m.funcs, opControlBarrier, l.u32c(2), l.u32c(2), l.u32c(0x108))
+		case ir.OpGridBarrier:
+			l.gridBarrier(l.val[o.Args[0]])
 		case ir.OpConst:
 			l.val[v] = l.constID(l.spvType(o.Type), uint32(o.Imm))
 		case ir.OpTID:

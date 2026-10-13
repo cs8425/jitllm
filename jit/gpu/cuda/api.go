@@ -37,6 +37,11 @@ type Device struct {
 	// launch may carry along x (2^31-1 from compute capability 3.0), or 0 when
 	// the driver would not say. See MaxGrid.
 	maxGrid int
+	// sms is CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT and coop whether the
+	// device takes a cooperative launch (CU_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH);
+	// see Module.Resident.
+	sms  int
+	coop bool
 	// mapHost is whether the device can address registered host memory
 	// (CU_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY and HOST_REGISTER_SUPPORTED),
 	// and integrated whether its memory is the host's
@@ -152,6 +157,10 @@ func openDevice(ord int) (*Device, error) {
 			cuDeviceGetAttribute(&tpm, attrMaxTPM, d.dev) == 0 && sm > 0 && tpm > 0 {
 			d.slots = int(sm) * int(tpm)
 		}
+		d.sms = int(sm)
+		var coop int32
+		d.coop = cuLaunchCooperativeKernel != nil && cuOccupancy != nil &&
+			cuDeviceGetAttribute(&coop, attrCoopLaunch, d.dev) == 0 && coop != 0
 		var grid int32
 		if cuDeviceGetAttribute(&grid, attrMaxGrid, d.dev) == 0 && grid > 0 {
 			d.maxGrid = int(grid)
@@ -452,11 +461,19 @@ type Module struct {
 	args [maxArgs]unsafe.Pointer
 	// maxGrid is the loading device's MaxGrid; see LaunchArgs.
 	maxGrid int
+	// sms and devCoop are the loading device's; see Resident.
+	sms     int
+	devCoop bool
+	// Coop launches the module with cuLaunchCooperativeKernel, for a kernel
+	// with a grid barrier (ir.OpGridBarrier); see Resident.
+	Coop bool
 }
 
-// maxArgs bounds a kernel's parameter list. The widest generated kernel is
-// kernels.MatVecSegments over q, k and v with biases, at 17.
-const maxArgs = 24
+// maxArgs bounds a kernel's parameter list. The widest per-op kernel is
+// kernels.MatVecSegments over q, k and v with biases, at 17; a persistent
+// kernel composed from a block's launches (ir.Persist) takes every buffer
+// they bind.
+const maxArgs = 64
 
 // Load compiles PTX and looks up the entry point.
 //
@@ -466,7 +483,7 @@ const maxArgs = 24
 // performance property.
 func (d *Device) Load(ptx, entry string) (*Module, error) {
 	src := append([]byte(ptx), 0)
-	m := &Module{maxGrid: d.maxGrid}
+	m := &Module{maxGrid: d.maxGrid, sms: d.sms, devCoop: d.coop}
 	if err := call(cuModuleLoadData(&m.m, unsafe.Pointer(&src[0])), "cuModuleLoadData"); err != nil {
 		return nil, err
 	}
@@ -528,6 +545,12 @@ func (m *Module) LaunchArgs(st CUstream, grid, block int, args []unsafe.Pointer)
 	}
 	if grid < 0 || uint64(grid) > limit {
 		return fmt.Errorf("cuda: launch of %d blocks; this device takes at most %d along x", grid, limit)
+	}
+	if m.Coop {
+		// The driver refuses a cooperative grid it cannot hold resident
+		// (CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE) rather than launching it.
+		return call(cuLaunchCooperativeKernel(m.f, uint32(grid), 1, 1, uint32(block), 1, 1,
+			0, st, unsafe.Pointer(&args[0])), "cuLaunchCooperativeKernel")
 	}
 	return call(cuLaunchKernel(m.f, uint32(grid), 1, 1, uint32(block), 1, 1,
 		0, st, unsafe.Pointer(&args[0]), nil), "cuLaunchKernel")

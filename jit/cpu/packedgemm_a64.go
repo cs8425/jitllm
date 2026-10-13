@@ -52,26 +52,20 @@ func StationaryIntAccA64(t quant.Type, win int) bool {
 //	Cols     tokens this call serves, >= 1
 //	Scratch  64 bytes of row scales, then 64 bytes per token of accumulators
 func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, error) {
-	q, ok := kernels.QuantOf(t)
-	if !ok {
-		return nil, fmt.Errorf("jit: EmitA64PackedMatMulStationary: %s has no device layout", t)
-	}
-	sub, bits, biasK, biasArray := kernels.Layout(q)
-	perSuper, scOff := kernels.ScaleLayout(q)
-	signed := kernels.SignedPayload(q)
-	minD := kernels.MinInD(q)
-	hi := kernels.HiPlane(q)
-	codes, err := hasCodes(q)
+	f, err := packedFormatOf(t, "EmitA64PackedMatMulStationary")
 	if err != nil {
 		return nil, err
 	}
+	sub, bits, biasArray := f.sub, f.bits, f.biasArray
+	perSuper, scOff := f.perSuper, f.scOff
+	signed, minD, hi, codes := f.signed, f.minD, f.hi, f.codes
 	if bits != 4 && !signed {
 		return nil, fmt.Errorf("jit: EmitA64PackedMatMulStationary: %s: an unsigned 8-bit payload has no form here", t)
 	}
 	if codes && hi != 0 {
 		return nil, fmt.Errorf("jit: EmitA64PackedMatMulStationary: %s: a code table with a high plane has no form here", t)
 	}
-	pw, hw := sub*bits/32, sub*hi/32
+	pw, hw := f.pw, f.hw
 	nW := pw
 	if bits == 4 {
 		nW = 2 * pw
@@ -82,20 +76,8 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 	}
 	nact := sub / 16
 	intAcc := StationaryIntAccA64(t, win)
-	narrow := NarrowD(t)
-	e8 := E8M0D(t)
-	sub16 := sub == Q8Block/2
-
-	corrK := 0
-	switch {
-	case signed:
-	case biasArray:
-		corrK = 8
-	case sub16:
-		corrK = 4
-	case biasK != 0:
-		corrK = 8
-	}
+	narrow, e8, sub16 := f.narrow, f.e8, f.sub16
+	corrK := f.corrK()
 
 	next := VReg(0)
 	take := func() VReg { r := next; next++; return r }
@@ -150,7 +132,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 	// r[0] and r[1] are written after the token's dots and never read before
 	// them, so a widened SDOT (sdotemu.go) may clobber them.
 	a.DotScratch(r[0], r[1])
-	stream := kernels.ScStream(q)
+	stream := f.stream
 	// X6 row offset (bytes, 4 a row), X5 row groups left, X7 RowStr, X23
 	// Scratch, X19..X22 the per-token strides, X25 DStr.
 	a.LDRx(X5, X0, oRows)
@@ -165,8 +147,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 	}
 	a.MOVimm(X6, 0)
 	if vK != 0 { // v0 is always a weight register, so 0 is "none"
-		a.MOVI4s(vK, byte(corrK))
-		a.SCVTF4s(vK, vK)
+		a64CorrConst(&a, vK, corrK)
 	}
 
 	rowL := a.Label()
@@ -244,8 +225,8 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 	}
 
 	for sn := 0; sn < perSuper; sn++ {
-		pairOff := int32(sub * sn / Q8Block * 8)
-		sh := byte((sn % perWordOfA64(biasArray)) * strideOfA64(biasArray))
+		pairOff := f.pairOff(sn)
+		sh := f.scShift(sn)
 		last := sn == perSuper-1
 
 		// --- decode this sub-block of eight rows into W, once -------------
@@ -316,8 +297,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 				if stream {
 					scField(a64SC(&a), sc, scw, t0, sn, false, next)
 				} else {
-					a.SHL4s(sc, scw, 24-sh)
-					a.USHR4s(sc, sc, 24)
+					a64SCByte(&a, sc, scw, sh)
 				}
 				if scOff != 0 {
 					a.MOVI4s(t0, byte(-scOff))
@@ -327,8 +307,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 					scField(a64SC(&a), bf, scw, scw, sn, true, next)
 					a.SCVTF4s(bf, bf)
 				} else if biasArray {
-					a.SHL4s(bf, scw, 16-sh)
-					a.USHR4s(bf, bf, 24)
+					a64SCMinByte(&a, bf, scw, sh)
 					a.SCVTF4s(bf, bf)
 				} else {
 					a.SCVTF4s(bf, sc)
@@ -347,8 +326,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 				a.FMUL4s(sc, sc, t0) // d_row * sub-block scale
 			} else if perSuper > 1 {
 				a.LDRq(scw, X15, int32(h*16))
-				a.SHL4s(t0, scw, 24-sh)
-				a.USHR4s(t0, t0, 24)
+				a64SCByte(&a, t0, scw, sh)
 				if scOff != 0 {
 					a.MOVI4s(r[2], byte(-scOff))
 					a.SUB4s(t0, t0, r[2])
@@ -365,8 +343,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 					a.FMUL4s(bf, bf, t0) // dmin * m
 				} else if !minD {
 					a.LDRq(scw, X15, int32(h*16))
-					a.SHL4s(t0, scw, 16-sh)
-					a.USHR4s(t0, t0, 24)
+					a64SCMinByte(&a, t0, scw, sh)
 					a.SCVTF4s(t0, t0)
 					a.FMUL4s(bf, bf, t0) // dmin * m
 				}
@@ -494,7 +471,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 		a.SUBimm(X10, X10, 1)
 		a.CBNZ(X10, tokL)
 
-		if stream && scStep(sn) || !stream && perSuper > 1 && sn%perWordOfA64(biasArray) == perWordOfA64(biasArray)-1 {
+		if f.scWordDone(sn) {
 			a.ADDreg(X15, X15, X7)
 		}
 	}
