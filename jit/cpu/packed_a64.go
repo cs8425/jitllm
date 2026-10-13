@@ -73,12 +73,14 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 	if rows <= 0 || rows%4 != 0 || rows > 64 {
 		return nil, fmt.Errorf("jit: EmitA64PackedMatVec: rows=%d, want a multiple of 4 up to 64", rows)
 	}
-	sub, bits, biasK, biasArray := kernels.Layout(q)
-	perSuper, scOff := kernels.ScaleLayout(q)
-	signed := kernels.SignedPayload(q)
-	minD := kernels.MinInD(q) // Q5_1: dmin alone, no sc word to read m from
-	hi := kernels.HiPlane(q)
-	pw, hw := sub*bits/32, sub*hi/32
+	f, err := packedFormatK(q, t)
+	if err != nil {
+		return nil, err
+	}
+	sub, bits, biasArray := f.sub, f.bits, f.biasArray
+	perSuper, scOff := f.perSuper, f.scOff
+	minD, hi, codes := f.minD, f.hi, f.codes
+	pw, hw := f.pw, f.hw
 	grp := rows / 4
 	// The activation span of one sub-block is `sub` bytes: 2*pw 32-bit words
 	// for a 4-bit payload (lo nibbles then hi), pw for an 8-bit one.
@@ -93,10 +95,6 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 	vDA := vHi + 1
 	t0, t1, t2, t3 := vDA+1, vDA+2, vDA+3, vDA+4
 	vK := t3 + 1
-	codes, err := hasCodes(q)
-	if err != nil {
-		return nil, err
-	}
 	// The code table, held for the whole kernel; TBL needs it in a register.
 	vLut, last := vK+1, vK
 	if codes {
@@ -136,34 +134,19 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 	a.DotScratch(t3, vDA)
 	// Container v27's SC stream (scstream.go): X24, free in this kernel,
 	// addresses a straddling field's next word, one plane stride on.
-	stream := kernels.ScStream(q)
-	stepSC := func(sn int) bool {
-		if stream {
-			return scStep(sn)
-		}
-		return perSuper > 1 && sn%perWordOfA64(biasArray) == perWordOfA64(biasArray)-1
-	}
+	stream := f.stream
+	stepSC := f.scWordDone
 	nextSC := func(g int) func(VReg) {
 		return func(r VReg) {
 			a.ADDreg(X24, X17, X7)
 			a.LDRq(r, X24, int32(g*16))
 		}
 	}
-	// AAPCS64 hands *Args in x0, and arm64 saves nothing, so every register
-	// below is ours (x18, x27-x30 and sp excepted).
-	a.LDRx(X1, X0, 0)    // Out
-	a.LDRx(X2, X0, 8)    // QS
-	a.LDRx(X3, X0, 16)   // A
-	a.LDRx(X4, X0, 24)   // AScale
-	a.LDRx(X6, X0, 40)   // K, in super-blocks
-	a.LDRx(X7, X0, 48)   // RowStr, bytes between payload word planes
-	a.LDRx(X8, X0, 144)  // PD
-	a.LDRx(X15, X0, 152) // PSC
+	a64PackedArgs(&a)
 	// A narrow format packs two rows into one d word (kernels.DIndex), so its
 	// plane is an f16 array at a 2-byte row stride: four rows are one LDRd plus
 	// one FCVTL. The second stride and tile offset get their own registers.
-	narrow := NarrowD(t)
-	e8 := E8M0D(t)
+	narrow, e8 := f.narrow, f.e8
 	if narrow {
 		a.LDRx(X25, X0, 160) // DStr
 	}
@@ -232,26 +215,12 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 		// the two planes reach one accumulator: 3<<4 is 48, and SDOT takes it.
 		a.MOVI16b(vHi, byte(((1<<hi)-1)<<bits))
 	}
-	// The correction's constant factor, which amd64 folds into bscale.
-	// QuantizeQ8Window stores -sum*BiasC/8 in the pair, so every kernel multiplies
-	// it back up: 8 for a fixed bias or a dmin array, 4 for the 16-wide formats
-	// whose sums are per half-block.
-	corrK := 0
-	switch {
-	case signed:
-		// A signed payload needs no correction: SDOT is signed by signed, so there
-		// is no amd64-style XOR to undo.
-		corrK = 0
-	case biasArray:
-		corrK = 8
-	case sub == Q8Block/2:
-		corrK = 4
-	case biasK != 0:
-		corrK = 8
-	}
+	// The correction's constant factor, which amd64 folds into bscale. A
+	// signed payload needs none: SDOT is signed by signed, so there is no
+	// amd64-style XOR to undo.
+	corrK := f.corrK()
 	if corrK != 0 {
-		a.MOVI4s(vK, byte(corrK))
-		a.SCVTF4s(vK, vK)
+		a64CorrConst(&a, vK, corrK)
 	}
 	if perSuper > 1 && scOff != 0 {
 		a.MOVI4s(vOff, byte(-scOff))
@@ -363,8 +332,7 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 			if stream {
 				scField(a64SC(&a), t1, vSC, t2, sn, false, nextSC(g))
 			} else {
-				a.SHL4s(t1, vSC, 24-sh)
-				a.USHR4s(t1, t1, 24)
+				a64SCByte(&a, t1, vSC, sh)
 			}
 			if scOff != 0 {
 				a.SUB4s(t1, t1, vOff)
@@ -378,8 +346,7 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 				scField(a64SC(&a), t2, vSC, vSC, sn, true, nextSC(g))
 				a.SCVTF4s(t2, t2) // m
 			} else if biasArray {
-				a.SHL4s(t2, vSC, 16-sh)
-				a.USHR4s(t2, t2, 24)
+				a64SCMinByte(&a, t2, vSC, sh)
 				a.SCVTF4s(t2, t2) // m
 			} else {
 				a.SCVTF4s(t2, t1) // the signed scale
@@ -415,8 +382,8 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 	}
 
 	for sn := 0; sn < perSuper; sn++ {
-		pairOff := int32(sub * sn / Q8Block * 8)
-		sh := byte((sn % perWordOfA64(biasArray)) * strideOfA64(biasArray))
+		pairOff := f.pairOff(sn)
+		sh := f.scShift(sn)
 		for g := 0; g < grp; g++ {
 			a.MOVIzero(VReg(g))
 		}
@@ -630,8 +597,7 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 				a.FMUL4s(t0, t0, t1) // d_row * sub-block scale
 			} else if perSuper > 1 {
 				a.LDRq(vSC, X17, int32(g*16)) // the packed scale word
-				a.SHL4s(t1, vSC, 24-sh)
-				a.USHR4s(t1, t1, 24)
+				a64SCByte(&a, t1, vSC, sh)
 				if scOff != 0 {
 					// Per lane, not per byte: SUB16b does not borrow across
 					// bytes, so a scale below the offset would wrap to 224+
@@ -661,8 +627,7 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 					a.SCVTF4s(t1, t1)
 					a.FMUL4s(t2, t2, t1) // dmin_row * min
 				} else if !minD {
-					a.SHL4s(t1, vSC, 16-sh)
-					a.USHR4s(t1, t1, 24)
+					a64SCMinByte(&a, t1, vSC, sh)
 					a.SCVTF4s(t1, t1)
 					a.FMUL4s(t2, t2, t1) // dmin_row * min
 				}
@@ -731,7 +696,7 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 	case stream:
 		scWords = kernels.ScStreamWords
 	case perSuper > 1:
-		scWords = perSuper / perWordOfA64(biasArray)
+		scWords = perSuper / perWordOf(biasArray)
 	}
 	for i := 0; i < scWords; i++ {
 		a.ADDreg(X15, X15, X7)
@@ -752,18 +717,38 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 // hiPlane's, named once so the emitters cannot drift from the packer.
 func lanesOfA64(hi int) int { return 8 / hi }
 
-func perWordOfA64(biasArray bool) int {
-	if biasArray {
-		return 2
-	}
-	return 4
+// a64PackedArgs loads the pointers and strides every arm64 packed matrix
+// kernel reads. AAPCS64 hands *Args in x0, and arm64 saves nothing, so every
+// register below is the kernel's (x18, x27-x30 and sp excepted).
+func a64PackedArgs(a *A64) {
+	a.LDRx(X1, X0, 0)    // Out
+	a.LDRx(X2, X0, 8)    // QS
+	a.LDRx(X3, X0, 16)   // A
+	a.LDRx(X4, X0, 24)   // AScale
+	a.LDRx(X6, X0, 40)   // K, in super-blocks
+	a.LDRx(X7, X0, 48)   // RowStr, bytes between payload word planes
+	a.LDRx(X8, X0, 144)  // PD
+	a.LDRx(X15, X0, 152) // PSC
 }
 
-func strideOfA64(biasArray bool) int {
-	if biasArray {
-		return 16
-	}
-	return 8
+// a64SCByte extracts the sub-block scale byte at bit sh of each packed SC
+// word lane into dst as an int32; amd64's scByte.
+func a64SCByte(a *A64, dst, word VReg, sh byte) {
+	a.SHL4s(dst, word, 24-sh)
+	a.USHR4s(dst, dst, 24)
+}
+
+// a64SCMinByte extracts the minimum byte, eight bits above the scale's.
+func a64SCMinByte(a *A64, dst, word VReg, sh byte) {
+	a.SHL4s(dst, word, 16-sh)
+	a.USHR4s(dst, dst, 24)
+}
+
+// a64CorrConst builds the correction's constant factor as f32 in every lane
+// of vK (packedFormat.corrK).
+func a64CorrConst(a *A64, vK VReg, k int) {
+	a.MOVI4s(vK, byte(k))
+	a.SCVTF4s(vK, vK)
 }
 
 // MaxTiledTokensA64 is how many tokens the arm64 token-tiled packed matmul
@@ -973,7 +958,7 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 	// stride".
 	for sn := 0; sn < perSuper; sn++ {
 		pairOff := int32(sub * sn / Q8Block * 8)
-		sh := byte((sn % perWordOfA64(biasArray)) * strideOfA64(biasArray))
+		sh := byte((sn % perWordOf(biasArray)) * strideOf(biasArray))
 		for g := 0; g < grp; g++ {
 			for i := 0; i < tok; i++ {
 				a.MOVIzero(acc[g][i])
@@ -1159,8 +1144,7 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 				a.FMUL4s(t0, t0, t1)
 			} else if perSuper > 1 {
 				a.LDRq(t2, X17, int32(g*16))
-				a.SHL4s(t1, t2, 24-sh)
-				a.USHR4s(t1, t1, 24)
+				a64SCByte(&a, t1, t2, sh)
 				if scOff != 0 {
 					a.MOVI4s(t3, byte(-scOff))
 					a.SUB4s(t1, t1, t3)
@@ -1179,8 +1163,7 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 					a.FMUL4s(dmin, dmin, t2)
 				} else if !minD {
 					a.LDRq(t2, X17, int32(g*16))
-					a.SHL4s(t2, t2, 16-sh)
-					a.USHR4s(t2, t2, 24)
+					a64SCMinByte(&a, t2, t2, sh)
 					a.SCVTF4s(t2, t2)
 					a.FMUL4s(dmin, dmin, t2)
 				}
@@ -1245,7 +1228,7 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 				a.ADDreg(X24, X24, X22)
 			}
 		}
-		if stream && scStep(sn) || !stream && perSuper > 1 && sn%perWordOfA64(biasArray) == perWordOfA64(biasArray)-1 {
+		if stream && scStep(sn) || !stream && perSuper > 1 && sn%perWordOf(biasArray) == perWordOf(biasArray)-1 {
 			a.ADDreg(X17, X17, X7)
 		}
 	}
@@ -1272,7 +1255,7 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 	case stream:
 		scWords = kernels.ScStreamWords
 	case perSuper > 1:
-		scWords = perSuper / perWordOfA64(biasArray)
+		scWords = perSuper / perWordOf(biasArray)
 	}
 	for i := 0; i < scWords; i++ {
 		a.ADDreg(X15, X15, X7)

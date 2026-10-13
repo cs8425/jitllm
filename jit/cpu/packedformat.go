@@ -84,6 +84,25 @@ func (f *packedFormat) scWordDone(sn int) bool {
 	return f.perSuper > 1 && sn%perWordOf(f.biasArray) == perWordOf(f.biasArray)-1
 }
 
+// corrK is the correction's constant factor. QuantizeQ8Window stores
+// -sum*BiasC/8 in the activation's pair, so a kernel multiplies it back up: 8
+// for a fixed bias or a minimum array, 4 for the 16-wide formats whose sums
+// are per half-block, and 0 for a signed payload, which needs no correction
+// on a signed dot.
+func (f *packedFormat) corrK() int {
+	switch {
+	case f.signed:
+		return 0
+	case f.biasArray:
+		return 8
+	case f.sub16:
+		return 4
+	case f.biasK != 0:
+		return 8
+	}
+	return 0
+}
+
 // hiFields calls field for every primary chunk whose secondary bits live in
 // secondary word hwi, in payload order (lo half then hi half): gi is the chunk,
 // w its primary word and s its bit offset within each byte of the secondary

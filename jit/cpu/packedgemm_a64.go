@@ -245,7 +245,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 
 	for sn := 0; sn < perSuper; sn++ {
 		pairOff := int32(sub * sn / Q8Block * 8)
-		sh := byte((sn % perWordOfA64(biasArray)) * strideOfA64(biasArray))
+		sh := byte((sn % perWordOf(biasArray)) * strideOf(biasArray))
 		last := sn == perSuper-1
 
 		// --- decode this sub-block of eight rows into W, once -------------
@@ -316,8 +316,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 				if stream {
 					scField(a64SC(&a), sc, scw, t0, sn, false, next)
 				} else {
-					a.SHL4s(sc, scw, 24-sh)
-					a.USHR4s(sc, sc, 24)
+					a64SCByte(&a, sc, scw, sh)
 				}
 				if scOff != 0 {
 					a.MOVI4s(t0, byte(-scOff))
@@ -327,8 +326,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 					scField(a64SC(&a), bf, scw, scw, sn, true, next)
 					a.SCVTF4s(bf, bf)
 				} else if biasArray {
-					a.SHL4s(bf, scw, 16-sh)
-					a.USHR4s(bf, bf, 24)
+					a64SCMinByte(&a, bf, scw, sh)
 					a.SCVTF4s(bf, bf)
 				} else {
 					a.SCVTF4s(bf, sc)
@@ -347,8 +345,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 				a.FMUL4s(sc, sc, t0) // d_row * sub-block scale
 			} else if perSuper > 1 {
 				a.LDRq(scw, X15, int32(h*16))
-				a.SHL4s(t0, scw, 24-sh)
-				a.USHR4s(t0, t0, 24)
+				a64SCByte(&a, t0, scw, sh)
 				if scOff != 0 {
 					a.MOVI4s(r[2], byte(-scOff))
 					a.SUB4s(t0, t0, r[2])
@@ -365,8 +362,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 					a.FMUL4s(bf, bf, t0) // dmin * m
 				} else if !minD {
 					a.LDRq(scw, X15, int32(h*16))
-					a.SHL4s(t0, scw, 16-sh)
-					a.USHR4s(t0, t0, 24)
+					a64SCMinByte(&a, t0, scw, sh)
 					a.SCVTF4s(t0, t0)
 					a.FMUL4s(bf, bf, t0) // dmin * m
 				}
@@ -494,7 +490,7 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 		a.SUBimm(X10, X10, 1)
 		a.CBNZ(X10, tokL)
 
-		if stream && scStep(sn) || !stream && perSuper > 1 && sn%perWordOfA64(biasArray) == perWordOfA64(biasArray)-1 {
+		if stream && scStep(sn) || !stream && perSuper > 1 && sn%perWordOf(biasArray) == perWordOf(biasArray)-1 {
 			a.ADDreg(X15, X15, X7)
 		}
 	}
