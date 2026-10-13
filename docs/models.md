@@ -12,7 +12,7 @@ by name. `internal/srcgate.TestModelsDocIsGenerated` fails when the page and the
 - **59** graphs in all (`jlm.Arch`)
 - **17** vision projectors (`clip.projector_type`, `convert.Projectors`)
 - **3** embedding encoders, and pooling on any decoder
-- **12** weight types read (`quant.Dequantable`), **9** of them packed quantizations (`quant.PackedTypes`)
+- **13** weight types read (`quant.Dequantable`), **9** of them packed quantizations (`quant.PackedTypes`)
 - **85** models in the download catalogue (`jitllm library`), **9** of them with a vision tower
 
 ## Text architectures
@@ -160,7 +160,7 @@ Any decoder above also converts as an embedding model when its GGUF states `pool
 
 ## Weight types
 
-Read: F32, F16, Q4_0, Q5_0, Q5_1, Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, BF16, MXFP4.
+Read: F32, F16, Q4_0, Q5_0, Q5_1, Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, BF16, MXFP4.
 
 Packed quantizations: Q4_0, Q5_0, Q5_1, Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, MXFP4. A GGUF's quantization is kept; `-q8` stores a float safetensors model's
 matrices as Q8_0.
