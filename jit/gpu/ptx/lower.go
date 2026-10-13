@@ -337,7 +337,12 @@ func Lower(k *ir.Kernel, target string) (string, error) {
 				}
 				list += rs[i].String()
 			}
-			b.Op("ld.%s.v%d.b32 %s},[%v+%d];", space(shared[a0]), n, list, ad, off*int64(elemSize(o.Type)))
+			if ir.IsLdMatrix(o) {
+				// Validate holds it to a shared u32 buffer; sm_75 on.
+				b.Op("ldmatrix.sync.aligned.m8n8.x%d.shared.b16 %s},[%v+%d];", n, list, ad, off*4)
+			} else {
+				b.Op("ld.%s.v%d.b32 %s},[%v+%d];", space(shared[a0]), n, list, ad, off*int64(elemSize(o.Type)))
+			}
 			mma[v] = rs
 			reg[v] = rs[0]
 

@@ -32,7 +32,7 @@ func cmdPlace(ctx context.Context, c cli, args []string) error {
 	head := fs.Bool("head-on-device", false, "place the output projection on a device too")
 
 	move := fs.String("move", "", "a block range to relocate, FIRST:LAST or a single index")
-	to := fs.String("to", "", "where -move goes: `host`, or a device id")
+	to := fs.String("to", "", "where -move goes: `host`, or a device id -- another of the session's devices moves the blocks between them, history and all")
 	relocate := fs.Bool("relocate", false, "adopt one block per token while serving, as memory frees")
 
 	tuneSeam := fs.Bool("tune-seam", false, "measure whether fewer device blocks are faster, and relocate")
@@ -123,20 +123,48 @@ func relocateBlocks(ctx context.Context, c cli, cn *conn, session, spec, to stri
 	}
 	resp, err := cn.Placement.RelocateBlocks(ctx, connect.NewRequest(req))
 	if err != nil {
-		// A hole in the seam, a device-to-device move and a host-only model
-		// are declined by name; print the server's reason.
+		// A hole in the seam, a device the session was not loaded with and a
+		// host-only model are declined by name; print the server's reason.
 		return clientError("relocating blocks", cn.base, err)
 	}
-	fmt.Fprintf(c.out, "moved %d block(s) in %s\n", resp.Msg.GetBlocksMoved(),
-		(time.Duration(resp.Msg.GetMillis()) * time.Millisecond).Round(time.Millisecond))
+	m := resp.Msg
+	fmt.Fprintf(c.out, "moved %d block(s) in %s\n", m.GetBlocksMoved(),
+		(time.Duration(m.GetMillis()) * time.Millisecond).Round(time.Millisecond))
+	// Between devices the history travelled with the blocks; say how much
+	// and by which path, so a pause can be read against the bytes.
+	if p := m.GetPath(); p != v1.RelocationPath_RELOCATION_PATH_UNSPECIFIED {
+		line := fmt.Sprintf("  history %s via %s, the sequence waited %s", m.GetHistory().GetHuman(),
+			relocationPath(p), (time.Duration(m.GetPauseMicros()) * time.Microsecond).Round(10*time.Microsecond))
+		if n := m.GetStagedBlocks(); n > 0 {
+			line += fmt.Sprintf("; %d block(s) prepared beside its tokens in %s", n,
+				(time.Duration(m.GetPrepareMillis()) * time.Millisecond).Round(time.Millisecond))
+		}
+		if m.GetHeadMoved() {
+			line += "; the output projection followed"
+		}
+		fmt.Fprintln(c.out, line)
+	}
 	// A refused block is reported, not an error: the rest of the range may
 	// still have moved.
-	for _, d := range resp.Msg.GetDeclined() {
+	for _, d := range m.GetDeclined() {
 		fmt.Fprintf(c.out, "  block %d declined by %s: %s%s\n",
 			d.GetBlockIndex(), d.GetDeviceId(), d.GetReason(), oomNote(d.GetOutOfMemory()))
 	}
-	printPlacement(c.out, resp.Msg.GetPlacement())
+	printPlacement(c.out, m.GetPlacement())
 	return nil
+}
+
+// relocationPath names a RelocationPath for a person.
+func relocationPath(p v1.RelocationPath) string {
+	switch p {
+	case v1.RelocationPath_RELOCATION_PATH_HOST:
+		return "the host"
+	case v1.RelocationPath_RELOCATION_PATH_STAGED:
+		return "a host buffer"
+	case v1.RelocationPath_RELOCATION_PATH_PEER:
+		return "peer access, card to card"
+	}
+	return strings.ToLower(strings.TrimPrefix(p.String(), "RELOCATION_PATH_"))
 }
 
 func tuneTheSeam(ctx context.Context, c cli, cn *conn, session string, warmup, perRun, rounds int32) error {

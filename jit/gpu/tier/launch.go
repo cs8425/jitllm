@@ -69,9 +69,18 @@ type launchTo struct {
 // la is the ordinary launch: threads in groups of 128, nothing once the
 // submission has failed.
 func (l *launcher) la(k backend.Kernel, threads int, bufs ...backend.Buf) {
+	l.law(k, threads, 0, bufs...)
+}
+
+// law is la in workgroups of width threads (0 is 128): a staged GEMM's
+// workgroup is its tile's warps, which an eight-warp tile makes 256.
+func (l *launcher) law(k backend.Kernel, threads, width int, bufs ...backend.Buf) {
+	if width <= 0 {
+		width = 128
+	}
 	*l.memoK, *l.memoSrc = nil, nil
 	if *l.err == nil {
-		*l.err = l.launch(k, (threads+127)/128, 128, bufs...)
+		*l.err = l.launch(k, (threads+width-1)/width, width, bufs...)
 	}
 	if len(bufs) == 3 && bufs[1] == l.a && bufs[2] == l.ax {
 		*l.fsrc = bufs[0]

@@ -125,6 +125,13 @@ func Emit(k *ir.Kernel) ([]byte, error) {
 	if err := k.Validate(); err != nil {
 		return nil, err
 	}
+	for i, o := range k.Ops {
+		if ir.IsLdMatrix(o) {
+			// ldmatrix's lane contract is NVIDIA's warp of 32 with a fixed
+			// row-to-lane map; there is no instruction here that keeps it.
+			return nil, fmt.Errorf("spirv: op %d: no lowering for an ldmatrix load", i+1)
+		}
+	}
 	l := &lowerer{k: k, val: make([]uint32, len(k.Ops)+1),
 		consts: map[[2]uint32]uint32{}, ptrTo: map[uint32]uint32{}}
 	for i, o := range k.Ops {

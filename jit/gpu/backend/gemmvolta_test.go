@@ -213,3 +213,62 @@ func TestGemmVoltaSpeed(t *testing.T) {
 		}
 	}
 }
+
+// TestGemmF16DeepStageMatchesTheReference holds GemmVolta's deep m16n8 stage
+// (llama.cpp MMQ's shape: eight warps a workgroup, 64 to 256 elements of k a
+// trip, one buffer or two) to MatVecMMA70's reference: both 8-warp grids,
+// every trip depth the shared memory admits, a k-split with a bias, a k of
+// one trip and of several, and every format whose dequant differs. A refusal
+// on a card that lowers the instruction is a failure.
+func TestGemmF16DeepStageMatchesTheReference(t *testing.T) {
+	gpuLock(t)
+	devs := backend.Open()
+	if len(devs) == 0 {
+		t.Skip("no GPU backend on this host")
+	}
+	ran := 0
+	for _, d := range devs {
+		defer d.Close()
+		if d.API() != "ptx" {
+			continue
+		}
+		for _, f16k := range []int{16, 8} {
+			if ptxSM(d.Name()) < mmaMinSM(ir.MMAShape{M: 16, N: 8, K: f16k, Kind: ir.MMAF16}) {
+				continue
+			}
+			for _, q := range []kernels.Quant{kernels.Q4_K, kernels.Q6_K, kernels.Q8_0, kernels.Q5_K, kernels.Q4_0, kernels.Q5_1} {
+				sub, _, _, _ := kernels.Layout(q)
+				for _, sh := range []struct {
+					rows, k, ntok, split, depth int
+					tl                          kernels.VoltaTile
+					bias                        bool
+				}{
+					{128, 512, 64, 1, 64, kernels.VoltaTile{MT: 4, NT: 2, WM: 2, WN: 4}, false},
+					{128, 512, 64, 1, 128, kernels.VoltaTile{MT: 4, NT: 2, WM: 2, WN: 4, Single: true}, true},
+					{256, 768, 128, 1, 128, kernels.VoltaTile{MT: 2, NT: 4, WM: 4, WN: 2, Single: true}, false},
+					{128, 1024, 64, 2, 128, kernels.VoltaTile{MT: 2, NT: 4, WM: 4, WN: 2, Single: true}, true},
+					{128, 256, 32, 1, 128, kernels.VoltaTile{MT: 4, NT: 1, WM: 2, WN: 4, Single: true}, true},
+					{128, 768, 64, 3, 64, kernels.VoltaTile{MT: 2, NT: 4, WM: 4, WN: 2, Single: true}, false},
+				} {
+					sh.tl.KB, sh.tl.F16K = sh.depth/sub, f16k
+					s := kernels.MatVecShape{T: q, K: sh.k, Rows: sh.rows, NTok: sh.ntok, Split: sh.split, Bias: sh.bias}
+					kk, err := kernels.GemmVolta(s, sh.tl)
+					if err != nil {
+						t.Fatalf("%v %+v: %v", q, sh, err)
+					}
+					kern, err := d.Compile(kk)
+					if err != nil {
+						t.Fatalf("%s %s f%d %+v: %v", d.API(), d.Name(), f16k, sh, err)
+					}
+					ran++
+					mma70Case(t, d, kern, s, fmt.Sprintf("gemm f%d k%d %+v", f16k, sh.depth, sh.tl),
+						kernels.GemmVoltaGroups(s, sh.tl), sh.tl.Threads(), true)
+					kern.Close()
+				}
+			}
+		}
+	}
+	if ran == 0 {
+		t.Skip("no backend lowers an m16n8 binary16 shape here")
+	}
+}

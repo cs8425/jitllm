@@ -162,7 +162,8 @@ const (
 	// OpLoadV reads n (2 or 4) consecutive elements (idx+off .. idx+off+n-1)
 	// in one instruction; OpLoadVGet extracts component Imm (1..n-1), the op
 	// itself being component 0, as with OpMMA/OpMMAGet. OpStoreV writes its
-	// Vargs to the same span. Imm packs off<<3 | n.
+	// Vargs to the same span. Imm packs off<<3 | n, and ldmMark marks an
+	// OpLoadV that is a warp's ldmatrix (Builder.LdMatrix).
 	//
 	// The address must be aligned to the whole vector (8 or 16 bytes), and
 	// that is the kernel's to guarantee: PTX faults on a misaligned vector
@@ -414,6 +415,35 @@ func (b *Builder) LoadV(t Type, buf, idx Value, off int64, n int) []Value {
 	return out
 }
 
+// LdMatrix is a warp's collective load of n (2 or 4) 8x8 matrices of
+// 16-bit elements (8 rows of 16 bytes) from shared memory: PTX's ldmatrix.
+// Lane l names, in idx+off, the u32 element where row l%8 of matrix l/8
+// starts (16-byte aligned; lanes past 8n are ignored), and receives as
+// component i the 32-bit word l%4 of row l/4 of matrix i -- the A or B
+// fragment of an mma whose operand rows are those 16 bytes (for int8,
+// m8n8k16's A at k 4(l%4)..+3 of row l/4). Every lane of the warp must
+// reach it. Only PTX lowers it; the others refuse it by name.
+func (b *Builder) LdMatrix(buf, idx Value, off int64, n int) []Value {
+	if n != 2 && n != 4 {
+		panic(fmt.Sprintf("ir: LdMatrix of %d matrices; 2 or 4", n))
+	}
+	b.k.Lanes = SubgroupLanes
+	v := b.emit(Op{Kind: OpLoadV, Type: U32, Args: [3]Value{buf, idx}, Imm: ldmMark | off<<3 | int64(n)})
+	out := []Value{v}
+	for i := 1; i < n; i++ {
+		out = append(out, b.emit(Op{Kind: OpLoadVGet, Type: U32, Args: [3]Value{v}, Imm: int64(i)}))
+	}
+	return out
+}
+
+// ldmMark is the Imm bit that makes an OpLoadV LdMatrix's: high, so the
+// encoding of every other vector access (and every IR fingerprint) is as it
+// was before ldmatrix existed.
+const ldmMark = int64(1) << 60
+
+// IsLdMatrix reports whether an OpLoadV is LdMatrix's collective load.
+func IsLdMatrix(o Op) bool { return o.Kind == OpLoadV && o.Imm&ldmMark != 0 }
+
 // StoreV writes vs to elements idx+off .. idx+off+len(vs)-1 of a buffer in
 // one access, len(vs) 2 or 4. The address must be aligned to 4*len(vs) bytes.
 func (b *Builder) StoreV(buf, idx Value, off int64, vs ...Value) {
@@ -425,7 +455,7 @@ func (b *Builder) StoreV(buf, idx Value, off int64, vs ...Value) {
 }
 
 // VecOf unpacks a LoadV/StoreV Imm into its element offset and width.
-func VecOf(o Op) (off int64, n int) { return o.Imm >> 3, int(o.Imm & 7) }
+func VecOf(o Op) (off int64, n int) { return (o.Imm &^ ldmMark) >> 3, int(o.Imm & 7) }
 
 // Dot4 is the four-way packed int8 dot product with accumulate: dp4a on PTX,
 // OpSDotKHR on SPIR-V, four multiplies on Metal.
@@ -531,6 +561,12 @@ func (k *Kernel) Validate() error {
 		case OpLoadV, OpStoreV:
 			if _, n := VecOf(o); n != 2 && n != 4 || (o.Kind == OpStoreV && len(o.Vargs) != n) {
 				return fmt.Errorf("ir: op %d: a %s of %d elements", i, o.Kind, n)
+			}
+			if o.Kind == OpStoreV && o.Imm&ldmMark != 0 {
+				return fmt.Errorf("ir: op %d: a StoreV marked ldmatrix", i)
+			}
+			if IsLdMatrix(o) && (o.Args[0] == 0 || k.Ops[o.Args[0]-1].Kind != OpShared || o.Type != U32) {
+				return fmt.Errorf("ir: op %d: ldmatrix reads a u32 shared buffer", i)
 			}
 		case OpLoadVGet:
 			if o.Args[0] == 0 || k.Ops[o.Args[0]-1].Kind != OpLoadV {
@@ -721,8 +757,16 @@ const (
 var mmaShapes = []MMAShape{
 	{16, 8, 16, MMAS8}, {16, 8, 32, MMAS8},
 	{16, 8, 8, MMAF16}, {16, 8, 16, MMAF16},
-	MMAVolta,
+	MMAVolta, MMAS8Turing,
 }
+
+// MMAS8Turing is m8n8k16 int8 -> int32, the integer matrix instruction sm_75
+// has (the m16n8 integer shapes are sm_80's). Lane (g, q) = (lane/4, lane%4)
+// holds A's row g at k 4q..4q+3, B's column g at the same k, and D's row g at
+// columns 2q and 2q+1. A kernel asks for it by name: it is not how the m16n8
+// shapes lower, so a device without them still refuses those (and the tier's
+// integer-matvec probe keeps its answer).
+var MMAS8Turing = MMAShape{8, 8, 16, MMAS8}
 
 // MMAVolta is sm_70's only matrix instruction, mma.sync m8n8k4 f16 -> f32. It
 // is not a warp-wide tile: the warp is four quad-pairs (lanes 4q..4q+3 with

@@ -203,6 +203,10 @@ type Config struct {
 	// prompt at 0.75 and 0.91 of llama.cpp where this one read 0.67 and 0.78
 	// (gpu-kernels.md "The sm_80+ prompt"). The A/B arm.
 	PreferGemmInt8 bool
+	// GemmDeep forces the deep m16n8 tiles (f16DeepTiles) on every prompt
+	// GEMM shape they divide (1) or off (-1); 0 leaves it to tuneGemm's
+	// measurement. The A/B arm and the gate's selection switch.
+	GemmDeep int
 	// PreferTiles puts the collective-tile prompt kernels (kernels.GemmTile,
 	// kernels.FlashPrefillTile) ahead of a backend's own -- the m16n8 GEMMs
 	// and FlashPrefill80 on CUDA -- wherever the device lowers the tiles. Off
@@ -706,6 +710,8 @@ type Stats struct {
 	// GemmF16 counts batched matvecs built as GemmVolta on the m16n8 binary16
 	// instruction (sm_75 on, devTier.f16Gemm) rather than MatVecMMA.
 	GemmF16 int
+	// GemmDeep counts those built on the deep tiles (f16DeepTiles).
+	GemmDeep int
 	// GemmInt8 counts batched matvecs built as kernels.GemmInt8, the staged
 	// int8 GEMM (sm_80 on, devTier.int8Gemm).
 	GemmInt8 int
@@ -1145,6 +1151,7 @@ func (s *Stats) add(o Stats) {
 	s.RecShared += o.RecShared
 	s.VoltaGemm += o.VoltaGemm
 	s.GemmF16 += o.GemmF16
+	s.GemmDeep += o.GemmDeep
 	s.GemmInt8 += o.GemmInt8
 	s.NormF16 += o.NormF16
 	s.ActF16Fused += o.ActF16Fused
@@ -1607,6 +1614,9 @@ type devShared struct {
 	idKerns map[kernels.MatVecShape]backend.Kernel
 	res     map[resKey]*resident
 	splits  map[splitKey]int
+	// gemmDeep is tuneGemm's verdict per prompt GEMM shape: true where the
+	// deep m16n8 tiles (f16DeepTiles) measured faster than f16Tiles' pick.
+	gemmDeep map[splitKey]bool
 	// groupSplit records, per shape, whether tuneSplit found the in-group
 	// reduction faster than the partial-buffer one.
 	groupSplit map[splitKey]bool
@@ -1814,6 +1824,17 @@ type GPU struct {
 	// own maps a block index to the device holding it. A block with no entry is
 	// on the host.
 	own map[int]*devTier
+	// staged is a block StageBlock prepared on a device ahead of a move's
+	// commit, not yet routed there (move.go).
+	staged map[int]*devTier
+	// stagedHead is the device StageHead prepared the projection on.
+	stagedHead *devTier
+	// retire is what a move left on its source -- a block, or a projection
+	// (block -1) -- freed after the route switched (RetireMoved), and
+	// retiring the frees running; every placement call waits for them
+	// (settle), so none re-creates a block a free is about to take.
+	retire   []retiree
+	retiring sync.WaitGroup
 	// geo is a block's scratch set (gemma4.go: Gemma 4's attention geometry
 	// and FFN width), so a range is cut where it changes as it is cut where
 	// the device does (runsInto). Set with own; a block's never changes.

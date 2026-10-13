@@ -52,29 +52,20 @@ func EmitRMSNormSSE(n int) ([]byte, error) {
 		a.ADDPS(acc, acc, t)
 	}
 	a.MOVQ(R11, RSI)
-	if blocks := n / 32; blocks > 0 {
-		a.MOVimm(R10, int64(blocks))
-		lp := a.Label()
-		a.Bind(lp)
+	// The tail in eights goes into chain 0 exactly as the AVX2 kernel does, and
+	// the last n%8 one at a time: scalar ops touch lane 0 only.
+	newRowWalk(&a, n, R11).run(func() {
 		for h := 0; h < 8; h++ {
 			sq(XMM0+Reg(h), XMM8+Reg(h), At(R11, int32(16*h)))
 		}
-		a.ADDimm(R11, 128)
-		a.DEC(R10)
-		a.JNZ(lp)
-	}
-	// The tail in eights, into chain 0 exactly as the AVX2 kernel does.
-	for off := (n / 32) * 32; off+8 <= n; off += 8 {
+	}, func() {
 		sq(XMM0, XMM8, At(R11, 0))
 		sq(XMM1, XMM9, At(R11, 16))
-		a.ADDimm(R11, 32)
-	}
-	// The last n%8 one at a time: scalar ops touch lane 0 only.
-	for i := 0; i < n%8; i++ {
+	}, func(i int) {
 		a.MOVSSLoad(XMM8, At(R11, int32(4*i)))
 		a.MULSS(XMM8, XMM8, XMM8)
 		a.ADDSS(XMM0, XMM0, XMM8)
-	}
+	})
 	normFold8SSE(&a)
 
 	// ---- scale = 1 / sqrt(ss/n + eps), in every lane ----
@@ -96,34 +87,21 @@ func EmitRMSNormSSE(n int) ([]byte, error) {
 	}
 	a.MOVQ(R11, RSI)
 	a.MOVQ(R8, RCX)
-	if blocks := n / 32; blocks > 0 {
-		a.MOVimm(R10, int64(blocks))
-		lp := a.Label()
-		a.Bind(lp)
+	newRowWalk(&a, n, R11, RDX, R8).run(func() {
 		for h := 0; h < 8; h++ {
 			app(XMM8+Reg(2*(h%4)), XMM9+Reg(2*(h%4)), int32(16*h))
 		}
-		a.ADDimm(R11, 128)
-		a.ADDimm(RDX, 128)
-		a.ADDimm(R8, 128)
-		a.DEC(R10)
-		a.JNZ(lp)
-	}
-	for off := (n / 32) * 32; off+8 <= n; off += 8 {
+	}, func() {
 		app(XMM8, XMM9, 0)
 		app(XMM10, XMM11, 16)
-		a.ADDimm(R11, 32)
-		a.ADDimm(RDX, 32)
-		a.ADDimm(R8, 32)
-	}
-	for i := 0; i < n%8; i++ {
+	}, func(i int) {
 		d := int32(4 * i)
 		a.MOVSSLoad(XMM8, At(R11, d))
 		a.MULSS(XMM8, XMM8, XMM7)
 		a.MOVSSLoad(XMM9, At(RDX, d))
 		a.MULSS(XMM8, XMM8, XMM9)
 		a.MOVSSStore(At(R8, d), XMM8)
-	}
+	})
 	a.RET()
 	return a.Bytes(), nil
 }
@@ -190,30 +168,21 @@ func emitRowStatSSE(n int, bias bool, mode RowMode) ([]byte, error) {
 			a.XORPS(r, r, r)
 		}
 		a.MOVQ(R11, RSI)
-		if blocks := n / 32; blocks > 0 {
-			a.MOVimm(R10, int64(blocks))
-			lp := a.Label()
-			a.Bind(lp)
+		newRowWalk(&a, n, R11).run(func() {
 			for h := 0; h < 8; h++ {
 				t := XMM8 + Reg(h%4)
 				sub(t, int32(16*h))
 				a.ADDPS(XMM0+Reg(h), XMM0+Reg(h), t)
 			}
-			a.ADDimm(R11, 128)
-			a.DEC(R10)
-			a.JNZ(lp)
-		}
-		for off := (n / 32) * 32; off+8 <= n; off += 8 {
+		}, func() {
 			sub(XMM8, 0)
 			a.ADDPS(XMM0, XMM0, XMM8)
 			sub(XMM9, 16)
 			a.ADDPS(XMM1, XMM1, XMM9)
-			a.ADDimm(R11, 32)
-		}
-		for i := 0; i < n%8; i++ {
+		}, func(i int) {
 			subOne(XMM8, int32(4*i))
 			a.ADDSS(XMM0, XMM0, XMM8)
-		}
+		})
 		normFold8SSE(&a)
 	}
 
@@ -296,29 +265,14 @@ func emitRowStatSSE(n int, bias bool, mode RowMode) ([]byte, error) {
 	}
 	a.MOVQ(R11, RSI)
 	a.MOVQ(R8, RCX)
-	if blocks := n / 32; blocks > 0 {
-		a.MOVimm(R10, int64(blocks))
-		lp := a.Label()
-		a.Bind(lp)
+	newRowWalk(&a, n, R11, RDX, R9, R8).run(func() {
 		for h := 0; h < 8; h++ {
 			one(XMM8+Reg(h%4), XMM4+Reg(h%4), int32(16*h))
 		}
-		a.ADDimm(R11, 128)
-		a.ADDimm(RDX, 128)
-		a.ADDimm(R9, 128)
-		a.ADDimm(R8, 128)
-		a.DEC(R10)
-		a.JNZ(lp)
-	}
-	for off := (n / 32) * 32; off+8 <= n; off += 8 {
+	}, func() {
 		one(XMM8, XMM4, 0)
 		one(XMM9, XMM5, 16)
-		a.ADDimm(R11, 32)
-		a.ADDimm(RDX, 32)
-		a.ADDimm(R9, 32)
-		a.ADDimm(R8, 32)
-	}
-	for i := 0; i < n%8; i++ {
+	}, func(i int) {
 		d := int32(4 * i)
 		a.MOVSSLoad(XMM8, At(R11, d))
 		switch mode {
@@ -338,7 +292,7 @@ func emitRowStatSSE(n int, bias bool, mode RowMode) ([]byte, error) {
 			}
 		}
 		a.MOVSSStore(At(R8, d), XMM8)
-	}
+	})
 	a.RET()
 	return a.Bytes(), nil
 }

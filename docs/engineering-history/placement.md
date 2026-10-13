@@ -3101,7 +3101,134 @@ under `numactl --membind=0`), `model.TestScoreRowsFollowTheReach` (sizing at
 the context fails it), `server.TestAServerUnderLoadStaysUnderItsBound` (the
 ledger of the 1B under 16 distinct prompts with 2 GiB available).
 
+## ★ 16e. A BLOCK MOVES BETWEEN TWO DEVICES AS A CALL OF ITS OWN, AND jitllmd NO LONGER REFUSES IT.
+
+`jitllmd place -move A:B -to DEV` (PlacementService.RelocateBlocks) refused a
+device destination the session was already on, with the reason "the tier
+exposes only the per-device count, so a per-block destination would be a guess
+dressed as an API". That was a choice of the code, not a limit (RULE 11e): the
+tier already placed a block by name (`PrepLayerOn`, WithPlacement) and said
+where each block was (`DeviceOf`). The only engine route between two cards was
+`State.SetDevice(b)`, which brings every block and all history home and offers
+the model again, so cuda:0 -> cuda:1 was cuda:0 -> host -> cuda:1.
+
+`State.MoveBlocks(lo, hi, to)` is the call: each block's history comes home
+(MigrateKV copies, so the source keeps its rows until the target has them),
+the target takes the block by name, which frees it on the source, and the
+history goes up; the projection follows when none of the State's blocks is
+left beside it, and the copy it leaves is freed (`devTier.dropHead`) instead of
+sitting on a card that serves none of the model. jitllmd's RelocateBlocks
+calls it for a range already on the session's devices; the CLI prints the
+history moved and its path, and the TUI's engine page moves every device block
+to the tier's next device on `d`.
+
+- **A block another session is using does not move.** The weights are the
+  model's and the route per block is one (`GPU.own`), so a move for one
+  session would take the block from under another. Refused by name; a route
+  per session would be the change that lifts it.
+- **`GPU.Layers`' head-on-another-device arm is reached now.** Moving the upper
+  half of the blocks leaves the projection on a device that no longer holds
+  the last block: `TestBlocksMoveBetweenDevices`' `upper` arm runs it,
+  teacher-forced against an unmoved control (the section below is why no
+  placement reached it before).
+- `TestBlocksMoveBetweenDevices` runs the relocation models (every principle
+  fixture and mixture, Llama-3.2-1B) on two devices of one tier
+  (`JITLLM_MOVE_DEVICES`, the laptop's card under CUDA and Vulkan by default):
+  zero prompt rows recomputed, every block on the target, the logits before
+  the move bit-identical, after it inside the two backends' band (largest
+  0.52 on Llama-3.2-1B), and bit-identical where both devices run the same
+  kernels. With the history's upload removed it fails at the first token after
+  the move (12.6 on Llama-3.2-1B).
+
+## ★ 16f. THE PAUSE OF A MOVE BETWEEN TWO V100s WAS 3.1-5.6 s AND IS 20-35 ms: THE TARGET IS PREPARED BESIDE THE TOKENS, THE HISTORY GOES CARD TO CARD.
+
+16e's move brought the history home and up again, and prepared the target
+inside the pause. On the V100 box (two of eight Tesla V100-SXM2-16GB, NV2
+between cuda:0 and cuda:1), Llama-3.2-3B-Instruct Q4_K_M, an 1852-token
+prompt and every block moved at token 80 and back at 160, that pause was
+3.1-5.6 s for 443-462 MB of history (`model.TestMovePause`, both arms in one
+process, alternated, five rounds, tuner off). Where the time went was read off
+the commit before anything was built on it:
+
+    the target's weights and kernels     re-read from the pager, uploaded,
+                                         compiled: most of it, and nothing
+                                         to do with the sequence's position
+    the history                          D2H, Go transposes into the host
+                                         cache, back out, H2D
+    the target's KV pool                 grown a block at a time inside the
+                                         commit: ~7 ms a block
+    the source's frees                   a driver free of every tensor and a
+                                         dropped graph: 3-5 ms a block
+    peer access                          enabled by the first copy: ~114 ms
+
+Each went where it costs the sequence nothing:
+
+- **Prepared beside the tokens.** `State.PrepareMove` hands the target every
+  block (weights uploaded, kernels built, `nn.BlockMover.StageBlock`) and the
+  projection (`StageHead`) on another goroutine while the sequence keeps
+  decoding on the source; staging takes no call lock and is refused unless the
+  target routes nothing, so no step reads what it changes. The same call grows
+  the target's pool for the history (`prewarmKV`) and enables peer access.
+  `Commit`, at a token boundary, has only the history to copy and the routes
+  to switch. jitllmd's generate (one at a time and the batch loop) serves a
+  RelocateBlocks this way between two tokens of the reply it is streaming.
+- **Card to card.** `tier.copyHistory` copies the session's pages from the
+  source's pool into pages the target allocates: `cuMemcpyPeer` a run of pages
+  consecutive on both sides (`backend.PeerCopier`), and between two backends a
+  gather on the source, one read, and a write a run (the laptop's CUDA to
+  Vulkan). Pools that page differently go through the row layout
+  (`pagedMigrate`), still without the State's cache. 470 MB of history went
+  over NV2 in ~24 ms (0.85 ms a block of 16.8 MB, ~20 GB/s).
+- **Freed after the switch.** What a move leaves on the source is freed on
+  another goroutine once the routes name the target (`RetireMoved`); every
+  placement call waits for those frees first.
+
+Measured, both arms in one process (`TestMovePause`, five rounds):
+
+| | direct | host (WithDirectMoves(false)) |
+|---|---|---|
+| pause cuda:0 -> cuda:1 | 20.4-20.9 ms | 4579-5589 ms |
+| pause cuda:1 -> cuda:0 | 22.6-34.8 ms | 3104-3563 ms |
+| history | 460-471 MB KV, 470-528 MB copied (whole pages) via peer | 443-462 MB via the host cache |
+| prompt rows computed again | 0 | 0 |
+| logits against the unmoved control, teacher-forced | bit-identical | bit-identical |
+
+What it costs instead, and stays open:
+
+- **The source decodes slower while the target is prepared**: 19.3-37.3 ms a
+  token against 5.1-6.2 unmoved, for the 1.3-1.8 s the preparation takes (35-79
+  tokens decoded where the host arm decoded none for 3-5.6 s). Not attributed:
+  the box's CPUs carried other users' load (load average ~27), and the
+  preparation's page reads, packs, uploads and compiles run beside the
+  source's owner hops. Throttling the preparation, or compiling once for both
+  cards of one architecture, are the candidates; neither is measured.
+- **The first token after a move takes 10-25 ms** (5.1-5.8 unmoved): the
+  target's first step, its graph captured. In one traced run the dozen after
+  the second move ran at 10-23 ms while the source's frees ran
+  (RetireMoved), and the unmoved rate after them.
+- **The weights still go host to card.** Copying a resident block's tensors
+  card to card would skip the page read and the upload, but the tier builds a
+  block's buffers from host spans (`prepLayer`), and with the preparation off
+  the pause it buys the pause nothing; it would shorten the preparation.
+- **A block another session uses does not move** (16e).
+
+Gates: `TestBlocksMoveBetweenDevices` (its default arm asserts the direct path
+ran and every block was staged; `/host` is the control arm),
+`TestAMoveLandsBetweenTwoTokensOfAReply` (a 400-token reply on the V100s is
+the unmoved reply token for token, the move landing between two of its tokens
+with every block staged ahead).
+
+★ **Found on the way, not fixed here: on a V100 the server's memory cache
+answers a second session differently from the first with no move at all.**
+origin/main, `-devices cuda:0` alone, stories15M: three sessions in turn on
+"Once upon a time" read [18358 29892 1183 4446 263 4802], then [304 748 3271
+29889 1 9038] twice; with `NoMemCache` all three read the first. The laptop's
+card does not show it. The move gates run without the memory cache for that
+reason, and say so.
+
 ## GPU.Layers' head-on-another-device arm is dead code
+
+(Moving blocks between devices reaches this arm now: 16e.)
 
 ★★★ **AND `GPU.Layers`' HEAD-ON-ANOTHER-DEVICE ARM IS DEAD CODE, ESTABLISHED
 BY THREE FAILED ROUTES RATHER THAN BY READING IT.** The arm issues

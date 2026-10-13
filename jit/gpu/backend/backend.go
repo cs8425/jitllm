@@ -209,6 +209,22 @@ type HostPinner interface {
 	UnpinHost(p []byte)
 }
 
+// PeerCopier is an optional Device that copies from another device of its own
+// backend without the bytes passing through memory the caller owns: a block
+// moving between two cards takes its history across in one call instead of a
+// read home and a write up. CUDA implements it (cuMemcpyPeer).
+type PeerCopier interface {
+	// CopyPeer copies n bytes of src, a buffer of device from, at srcOff into
+	// dst, a buffer of this device, at dstOff, landed when it returns. direct
+	// reports that the bytes went card to card (NVLink or PCIe peer access)
+	// rather than staged through the host by the driver.
+	CopyPeer(dst Buf, dstOff int, from Device, src Buf, srcOff, n int) (direct bool, err error)
+	// PeerAccess enables what CopyPeer from device from would enable on its
+	// first call, and reports whether the copies go card to card: a caller
+	// that knows a copy is coming asks ahead, outside the copy's own time.
+	PeerAccess(from Device) bool
+}
+
 // Session is a batch of device calls that runs under one ownership hop. The
 // methods mirror Buf and Kernel but skip the hop, so they are only valid inside
 // the closure Device.Session was given.
