@@ -9386,3 +9386,97 @@ positive scale on a relu sum selects the same blocks), the PLE EOS id
 (transformers takes the first of a list, llama.cpp's converter the last; the
 release states one), and MTP (both drop it; unsloth publishes it as a
 separate GGUF).
+
+## qwen4exp: what was built, and what the gates measured
+
+The plan above held, with these settlements.
+
+**The n-gram hash is generated code on every tier** (RULE 8): uint64
+multiply, xor and modulo per head, the reset at an end-of-sequence id, and
+the predecessors moved on (`cpu.EmitNGramHash`, AVX2/SSE/arm64; the only
+setup integer work is the constants). The predecessors are recurrent state
+the host keeps whichever side runs the block: the host hashes and reads the
+table rows, a device gets the gathered rows (`nn.NGramDevice`).
+
+**IQ4_NL is a native type** (`quant.IQ4_NL`, container v29): the oracle
+decoder first, then a row-gather kernel per tier. The 28.8 GB table is a row
+table placed after every page array and read a row at a time with O_DIRECT
+(`jlm.File.ReadRow`); its page size once entered the per-block page sizing
+and laid a 1.5 TB file out, which `TestRowTableIsReadARowAtATime` now holds.
+
+**Every linear block's state slot is [delta rule | tail]**: the n-gram
+block's tail is its predecessors and the dilated convolution's nine
+positions of every stream, and every linear block carries the room so a
+device keeps one slot width (`nn.RecurrentPlan.TailLen`; the delta kernels
+take the stride). It costs the tail on the blocks that leave it unread:
+on the real file 9 x 4 x 2560 floats and two words a sequence a block.
+
+**The fixture's hyper-connection rank is 32**, not 16: a device quantizes
+activations in blocks of 32, and the real rank is 320. The golden was
+regenerated from transformers, not edited.
+
+**The real file's graph**, from `llama-eval-callback` on cato (blocks 0, 2
+and 3 of UD-Q4_K_XL at llama.cpp de7fa0a, `/mnt/models/qwen4exp/evalcb.log`):
+the hyper-connection read is `hc_norm` (2560 x 4) -> `hc_attn_up` (320 x
+10240 after the down) -> `DSV4_HC_PRE`; the placement `hc_attn_inject`
+(10240 -> 4) -> `DSV4_HC_POST`; the delta rule's gate `SIGMOID(z)` times the
+gated norm; 512 experts of 640 by softmax, top-10, renormalised over a
+clamped sum; one 640-wide shared expert behind a sigmoid; block 1 (one-based
+2) carries the PLE (`ple_gate`, `ple_gated_value`, its conv state). Each is
+the transcription the host runs.
+
+Measured, the fixture against transformers' own class:
+
+| arm | worst logit NMSE |
+| --- | --- |
+| host decode, prefill at every length, batch (amd64 AVX2) | 2.4e-10 |
+| host on an SSE4.2 Atom C3558, natively | within the golden's bound |
+| host arm64 (M4) | within the golden's bound |
+| every block and the head on CUDA (RTX 3050 Ti), decode / prefill | 2.1e-10 / 9.5e-12 |
+| the same on Vulkan (RTX 3050 Ti) | 3.3e-10 / 9.8e-12 |
+| the same on Metal (M4) | 3.1e-11 / 7.9e-12 |
+
+Thirteen violations each move the logits 0.06-6.5 NMSE on the host and on
+every device (`TestQwen4ExpFeaturesAreLoadBearing`,
+`TestQwen4ExpOnEveryDevice`). The real checkpoint matched llama.cpp
+teacher-forced 20 of 20 on a short prompt (QSA is dense there).
+
+**Four device bugs the end-to-end gate found and the kernel gates could
+not**, each green at the kernel level (`backend.TestQ4EKernelsMatchTheLoops`)
+and wrong in the tier's wiring (RULE 11c):
+
+- the placement writes every stream into `bs.x2`, which held one stream
+  unless the model was DeepSeek V4 or Kimi-K3: stream 2 landed on whatever
+  followed it. Bisected by reading the scratch after one block: three
+  streams agreed at 1e-13 and one did not.
+- an attention block read `bs.x` where its hyper-connection's mix belonged.
+- QSA's row is k's heads and the raw key, copied whole; the rotary writer
+  took the row's width from the heads it turns and wrote the next heads
+  into the key's place (`kernels.PagedRoPERowsTIn` takes the row's width).
+- the head reads its mix with no norm; the device allocated a zero-length
+  norm and declined it.
+
+**QSA on the device** is MiniMax-M3's select, compact and gather under a
+forced tail (the tail block at end/blk, empty on a block boundary) and a
+scorer of its own (`kernels.QSAScores`): each complete block's raw keys
+pooled, normed and turned at the block's first position, scored by the
+relu sum. A picture moves the positions after it (M-RoPE's marks): the
+scorer composes the block start's turn with the mark's, both from the
+device's rotary table (`TestQwen4ExpQSATurnsByTheMarks`, which fails at
+NMSE 0.45 when the marks are not handed over). The host had the same
+question wrong: `qsaMask` turned another session's blocks by this
+State's slot 0.
+
+**Gates run for it**: the five principles' lists (paging, relocation
+between devices, KV pages with the layer, faulting a batch's blocks in,
+zero-allocation decode on the host and every device), the batch seam
+(`TestBatchSeamMovesCarryEveryRowQwen4Exp`), the prefix cache
+(`TestPrefixCacheRestoresQwen4Exp`: the restored state slot carries the
+hash's predecessors and the convolution's history; clearing the tail on
+restore moves the continuation by 0.30 NMSE), and `TestEveryModelRunsSSE`.
+A q8_0 KV cache is refused by name: QSA pools raw cached keys, which its
+references hold at f32.
+
+**Found on the M4, not this model's**: `TestKVPagesRelocateWithTheLayer`
+opens no fused run there (0 of 624 asked for, and the same for
+synth-kimik3), so its fused-run check is red on arm64 whatever the model.
