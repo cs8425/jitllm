@@ -6288,6 +6288,11 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	// grid is sized for, elements 1..R each row's own causal key count. At R == 1
 	// it is the single count.
 	n := uint32(pos + R)
+	if p.NonCausal && g.ncPhase == 2 {
+		// A row-chunked block's second phase reads every key the first
+		// phase wrote, whatever chunk its queries are.
+		n = uint32(g.ncKeys)
+	}
 	if int(n) > p.MaxSeq {
 		// The score row is MaxSeq wide, so the uniform width cannot exceed it.
 		// Clamping is safe: a real row needs at most pos+nrow of it.
@@ -6343,6 +6348,9 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 				// every row gets the same count and needs no second score kernel. A
 				// padded row still takes nrow, for the tile reason above.
 				n = nrow
+				if g.ncPhase == 2 {
+					n = g.ncKeys
+				}
 			} else if r < nrow {
 				// A row of a bidirectional run counts keys to the run's end
 				// (bidir.go); bidirCheck has kept the run inside these rows.
@@ -7133,7 +7141,10 @@ func (g *devTier) layersSession(s backend.Session) {
 				// This session's attention history for the block -- its source's,
 				// for a KV-sharing block -- while the weights are the model's and
 				// shared. See layer.kv.
-				shared := l.kvSrc != li
+				// A row-chunked block's second phase reads the k and v its
+				// first phase wrote for every chunk, as a KV-sharing block
+				// reads its source's: q alone.
+				shared := l.kvSrc != li || p.NonCausal && g.ncPhase == 2
 				kvp := g.layers[l.kvSrc].kvOf(sid)
 				if kvp == nil {
 					// A missing cache fails the submission rather than launching against
@@ -7520,6 +7531,12 @@ func (g *devTier) layersSession(s backend.Session) {
 							err = lc.launch(bs.qNorm, qg, qw, qAtt, l.nQ, bs.qn)
 						}
 						qAtt = bs.qn
+					}
+					// A row-chunked block's first phase ends with its chunk's
+					// k and v in the cache: the attention reads every chunk's,
+					// so it runs in the second phase.
+					if p.NonCausal && g.ncPhase == 1 {
+						continue
 					}
 					var fv *flashVariant
 					var flash backend.Kernel
@@ -9772,7 +9789,7 @@ func (g *devTier) capped(p *nn.LayerPlan) nn.LayerPlan {
 	// (visrows.go), and a call is one submission of at most that many.
 	if q.NonCausal {
 		if g.visCap > 0 {
-			q.MaxSeq = min(q.MaxSeq, g.visCap)
+			q.MaxSeq = min(q.MaxSeq, max(g.visCap, g.visKeys))
 		}
 		return q
 	}

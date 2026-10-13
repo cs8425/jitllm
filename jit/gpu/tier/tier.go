@@ -494,6 +494,9 @@ type Config struct {
 	// replaying a captured graph: the other arm of that comparison, a field so
 	// both arms can be live in one process.
 	NoGraph bool
+	// NoTowerChunks refuses a picture whose whole non-causal set does not fit
+	// rather than running it row-chunked (chunkTower, LayersPhase).
+	NoTowerChunks bool
 	// ScalarSoftmax runs the thread-per-head softmax instead of the warp
 	// reduction, the other arm of that comparison. It is ignored on a device
 	// that did not pass pickSoftmax's check, where the scalar kernel runs
@@ -969,6 +972,9 @@ type Stats struct {
 	// HeadFolds counts batched chunks that ran the output projection on
 	// their last row inside their own submission.
 	HeadFolds int
+	// TowerChunked counts non-causal sets built row-chunked (chunkTower), and
+	// TowerPhases the phase calls run over them (LayersPhase).
+	TowerChunked, TowerPhases int
 	// FlashPrefills counts batched attention launches of a one-kernel form
 	// (kernels.FlashPrefill70, FlashPrefillTile), paged or not.
 	FlashPrefills int
@@ -1255,6 +1261,8 @@ func (s *Stats) add(o Stats) {
 	s.PagedPrefillPasses += o.PagedPrefillPasses
 	s.EmbedLaunches += o.EmbedLaunches
 	s.HeadFolds += o.HeadFolds
+	s.TowerChunked += o.TowerChunked
+	s.TowerPhases += o.TowerPhases
 	s.FlashPrefills += o.FlashPrefills
 	s.VisionAttnChunks += o.VisionAttnChunks
 	if o.MMAWhy != "" {
@@ -1538,6 +1546,10 @@ type devShared struct {
 	// visCap is the rows the non-causal set is built for and visMax the
 	// largest grid a tower placed here takes (visrows.go). Guarded by mu.
 	visCap, visMax int
+	// visKeys is the keys the set's k/v pairs and score rows hold when it is
+	// row-chunked (LayersPhase): a picture of visKeys rows runs visCap rows a
+	// call. 0 when the set takes a picture whole (visKeys is visCap).
+	visKeys int
 	// scratch is the budget the device's own buffers hold -- the block
 	// scratches and the staging -- and explicit the running sum of what
 	// charge and refund moved, which a scratch window subtracts so a weight or
