@@ -48,11 +48,13 @@ IDS="$("$JITLLM" tokenize "$JITLLM_PATH" "$PROMPT" 2>&1 | sed -n 's/^[0-9]* toke
 [ -n "$IDS" ] || { echo "could not tokenize the prompt" >&2; exit 1; }
 
 psi() { awk '/^some/{split($2,a,"="); print a[2]}' /proc/pressure/cpu 2>/dev/null || echo 0; }
-# The node's CPUs, which both engines' host experts run on, and how busy they
-# are before a sample (corebusy.py): PSI cannot see a tenant on a box with
-# CPUs to spare (RULE 2), and a tenant on these cores is a cliff.
-CPUS="$(numactl -H | sed -n "s/^node $NODE cpus: //p" | tr ' ' ',')"
-BUSYMAX="${STRATA_VS_BUSY:-20}"
+# How busy the CPUs are before a sample (corebusy.py): PSI cannot see a
+# tenant on a box with CPUs to spare (RULE 2), and every GPU must be empty.
+# Every CPU, not only the node's: a tenant elsewhere on the box still
+# shares the memory controllers and the PCIe root, and on cato other
+# sessions' gates ran on every core and on this run's GPU.
+CPUS="$(seq -s, 0 $(($(nproc --all) - 1)))"
+BUSYMAX="${STRATA_VS_BUSY:-10}"
 busy() { "$(dirname "$0")/corebusy.py" "$CPUS" 2>/dev/null || echo 0; }
 # Waits for the node to go quiet (STRATA_VS_WAIT seconds at most), so a
 # tenant that started first is outlasted rather than measured.
@@ -60,10 +62,10 @@ quiet() {
   local waited=0 b g
   while :; do
     b="$(busy)"
-    g="$(nvidia-smi -i "$GPU" --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')"
+    g="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1 | tr -d ' ')"
     awk -v b="$b" -v m="$BUSYMAX" -v g="${g:-0}" 'BEGIN{exit !(b <= m && g < 600)}' && return 0
     if [ "$waited" -ge "${STRATA_VS_WAIT:-0}" ]; then
-      echo "node $NODE is ${b}% busy, GPU $GPU holds ${g} MiB, before a sample: refusing" >&2
+      echo "the box is ${b}% busy and a GPU holds ${g} MiB before a sample: refusing" >&2
       return 1
     fi
     sleep 30
