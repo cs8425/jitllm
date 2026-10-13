@@ -47,6 +47,14 @@ func gpuOptions() []tier.Option {
 	case "1":
 		o = append(o, tier.WithDeviceTune(tier.TuneForce))
 	}
+	// A register cap on every CUDA kernel: the register report's what-if.
+	if n := num("JITLLM_CUDA_MAXREGS"); n > 0 {
+		o = append(o, tier.WithCUDAMaxRegs(n))
+	}
+	// The batched GEMM's spilling tiles, refused by default (tier.Config.SpillingTiles).
+	if str("JITLLM_GPU_SPILLING_TILES") == "1" {
+		o = append(o, tier.WithConfig(func(c *tier.Config) { c.SpillingTiles = true }))
+	}
 	if set("JITLLM_GPU_VERBOSE") {
 		o = append(o, tier.WithVerbose(true))
 	}
@@ -198,6 +206,12 @@ func gpuOptions() []tier.Option {
 		{"JITLLM_GPU_NO_TAIL", set("JITLLM_GPU_NO_TAIL"), func(c *tier.Config) { c.NoTail = true }},
 		{"JITLLM_GPU_NO_KT", set("JITLLM_GPU_NO_KT"), func(c *tier.Config) { c.NoKT = true }},
 		{"JITLLM_NO_GPU_MMA", set("JITLLM_NO_GPU_MMA"), func(c *tier.Config) { c.NoMMA = true }},
+		{"JITLLM_GPU_NO_FUSE", set("JITLLM_GPU_NO_FUSE"), func(c *tier.Config) { c.NoFuse = true }},
+		{"JITLLM_GPU_NO_ACTFUSE", set("JITLLM_GPU_NO_ACTFUSE"), func(c *tier.Config) { c.NoActFuse = true }},
+		{"JITLLM_GPU_ACTIN_SITES", set("JITLLM_GPU_ACTIN_SITES"),
+			func(c *tier.Config) { c.ActInSites = num("JITLLM_GPU_ACTIN_SITES") }},
+		{"JITLLM_GPU_ACTIN_PREFETCH", set("JITLLM_GPU_ACTIN_PREFETCH"),
+			func(c *tier.Config) { c.ActInPrefetch = num("JITLLM_GPU_ACTIN_PREFETCH") }},
 		{"JITLLM_GPU_NO_VOLTA", set("JITLLM_GPU_NO_VOLTA"), func(c *tier.Config) { c.NoVolta = true }},
 		{"JITLLM_GPU_NO_FLASH_PREFILL", set("JITLLM_GPU_NO_FLASH_PREFILL"), func(c *tier.Config) { c.NoFlashPrefill = true }},
 		{"JITLLM_GPU_NO_TILE_TAIL", set("JITLLM_GPU_NO_TILE_TAIL"), func(c *tier.Config) { c.NoTileTail = true }},

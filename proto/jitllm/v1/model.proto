@@ -36,6 +36,25 @@ service ModelService {
   // which is the failure mode the engine records as producing fluent output
   // and no signal at all.
   rpc ApplyChatTemplate(ApplyChatTemplateRequest) returns (ApplyChatTemplateResponse) {}
+
+  // Aliases and enable/disable for a container in the models folder. A
+  // request naming a model by id, file name or alias loads an enabled one on
+  // demand; a disabled one is refused by name.
+  rpc SetModelOptions(SetModelOptionsRequest) returns (SetModelOptionsResponse) {}
+}
+
+message SetModelOptionsRequest {
+  // The model: its file name, with or without .jlm, an alias, or a loaded
+  // model's id.
+  string name = 1;
+  repeated string add_aliases = 2;
+  repeated string remove_aliases = 3;
+  // Unset leaves it as it is.
+  optional bool enabled = 4;
+}
+
+message SetModelOptionsResponse {
+  ModelFile file = 1;
 }
 
 // ModelFile is something on disk that has not necessarily been opened.
@@ -49,6 +68,19 @@ message ModelFile {
   uint32 container_version = 5;
   // Present when `is_container` is false: the command that would convert it.
   string convert_command = 6;
+  // Other names a request may use for this model, unique across the folder,
+  // kept in the models folder's jitllm-models.json.
+  repeated string aliases = 7;
+  // A disabled model is listed and never loaded on demand; an explicit
+  // LoadModel still loads it.
+  bool disabled = 8;
+  // The id it is loaded under, when it is loaded.
+  string model_id = 9;
+  // Read from the container's header without loading it; empty and zero for a
+  // file that is not a container. `capabilities` is ModelInfo.capabilities'
+  // vocabulary, and `context_length` the context the model was trained for.
+  repeated string capabilities = 10;
+  int32 context_length = 11;
 }
 
 // ModelInfo describes a LOADED model. Every field here needs the container
@@ -101,6 +133,25 @@ message ModelInfo {
   // True for an encoder (BERT, nomic-bert). It has no decoder session, so
   // Generate and CreateSession refuse it and Embed is its only path.
   bool encoder = 23;
+
+  // The aliases its file carries in the models folder (ModelFile.aliases).
+  repeated string aliases = 24;
+
+  // The context a request on this model gets when it asks for none: the
+  // prompt and the completion together. This is what the OpenAI listing
+  // reports as `max_model_len`; `context_length` is the trained context.
+  int32 default_max_seq = 25;
+
+  // What the model can be asked to do, a name added and never renamed:
+  //   "completion"   Generate on a text or token prompt
+  //   "chat"         Generate on a chat prompt (the container has a template)
+  //   "tools"        chat with tools and tool_choice
+  //   "json_schema"  response_format / json_schema constrained output
+  //   "logprobs"     per-token log-probabilities
+  //   "vision"       chat pictures (the container carries a vision tower)
+  //   "embeddings"   Embed (the container states a pooling)
+  // An encoder has "embeddings" and nothing else.
+  repeated string capabilities = 26;
 }
 
 message ListModelsRequest {
@@ -222,6 +273,22 @@ message ChatMessage {
   // request. Generate reads them; ApplyChatTemplate refuses them, since a
   // picture is rows of the prompt and not token ids.
   repeated ChatImage images = 3;
+
+  // An assistant turn's tool calls, and a "tool" turn's answer: the call it
+  // answers and the function that produced it. They are rendered by the
+  // model's chat template as the OpenAI API's messages are.
+  repeated ToolCall tool_calls = 4;
+  string tool_call_id = 5;
+  string name = 6;
+}
+
+// ToolCall is one call a model made, or one an earlier assistant turn carries.
+message ToolCall {
+  // Minted by the server for a call the model made.
+  string id = 1;
+  string name = 2;
+  // The arguments as JSON text, in the order the model wrote them.
+  string arguments = 3;
 }
 
 // ChatImage is one picture: its encoded bytes, PNG, JPEG, WebP or GIF (its
@@ -231,6 +298,12 @@ message ChatImage {
   // The declared media type (image/png, image/jpeg, image/webp, image/gif);
   // empty takes the bytes' own. A declared type the bytes are not is refused.
   string media_type = 2;
+  // The picture by reference instead of by bytes, exclusive with `data`: a
+  // `data:image/...;base64,` URL, or an http(s) URL fetched only from the
+  // hosts the server's -image-fetch-allow names. The same decoder, size and
+  // pixel limits apply as to `data`, and a refusal reads as the OpenAI
+  // surface's does.
+  string url = 3;
 }
 
 message ApplyChatTemplateRequest {

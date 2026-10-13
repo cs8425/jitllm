@@ -190,6 +190,10 @@ func (e *Engine) pbModelInfo(lm *LoadedModel) *v1.ModelInfo {
 		DefaultDeviceIds:  lm.deviceIDs,
 		Pooling:           pooling,
 		Encoder:           lm.m.IsEncoder(),
+		Aliases:           e.aliasesOf(lm.path),
+		DefaultMaxSeq:     int32(e.defaultMaxSeq(lm)),
+		Capabilities: modelCapabilities(lm.m.ChatCapable(), lm.m.Tower() != nil,
+			lm.m.IsEmbedding(), lm.m.IsEncoder()),
 	}
 }
 
@@ -370,7 +374,8 @@ func pbSampling(p *v1.SamplingParams) *model.Sampler {
 		s.TopP = float64(*p.TopP)
 	}
 	if p.TopK != nil {
-		s.TopK = int(*p.TopK)
+		// -1 disables top-k, as the OpenAI surface spells it.
+		s.TopK = max(int(*p.TopK), 0)
 	}
 	if p.MinP != nil {
 		s.MinP = float64(*p.MinP)

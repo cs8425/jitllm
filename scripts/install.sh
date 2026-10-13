@@ -7,12 +7,20 @@
 # Arguments name the programs to install: jitllm (the CLI), jitllmd (the
 # server), desktop (jitllm-desktop), tui (jitllm-tui), or all. With none it
 # installs jitllm and jitllmd. Each archive is checked against the release's
-# checksums.txt before anything is installed.
+# checksums.txt before anything is installed. On macOS the desktop app is the
+# signed jitllm.app bundle (the release's .app.zip), installed into
+# /Applications, or ~/Applications when /Applications is not writable.
 #
 #   JITLLM_VERSION      a release tag, such as v0.1.0 (default: the latest)
 #   JITLLM_INSTALL_DIR  where the binaries go (default: ~/.local/bin, or
 #                       /usr/local/bin when run as root)
+#   JITLLM_APPS_DIR     where jitllm.app goes on macOS (default: /Applications,
+#                       or ~/Applications when that is not writable)
 #   JITLLM_DOWNLOAD_URL where releases are fetched from (default: GitHub)
+#   JITLLM_NO_SERVICE   set to skip the service, as --no-service does
+#
+# On Linux, installing jitllmd also installs it as a systemd user service on
+# 127.0.0.1:8080 (`jitllmd service install`); --no-service skips that.
 set -eu
 
 repo=jitllm/jitllm
@@ -45,10 +53,11 @@ arm64 | aarch64) arch=arm64 ;;
 *) die "$(uname -m) is not a release architecture (amd64, arm64)" ;;
 esac
 
-[ $# -gt 0 ] || set -- jitllm jitllmd
+service=${JITLLM_NO_SERVICE:+no}
 progs=
 for p in "$@"; do
 	case $p in
+	--no-service) service=no ;;
 	all) progs="$progs jitllm jitllmd jitllm-desktop jitllm-tui" ;;
 	jitllm | cli) progs="$progs jitllm" ;;
 	jitllmd | server) progs="$progs jitllmd" ;;
@@ -57,6 +66,7 @@ for p in "$@"; do
 	*) die "unknown program $p (jitllm, jitllmd, desktop, tui, all)" ;;
 	esac
 done
+[ -n "$progs" ] || progs="jitllm jitllmd"
 
 tag=${JITLLM_VERSION:-}
 if [ -z "$tag" ]; then
@@ -84,16 +94,39 @@ say "jitllm $tag for $os/$arch"
 fetch "$base/$tag/checksums.txt" "$tmp/checksums.txt" || die "no checksums.txt for $tag at $base/$tag"
 for p in $progs; do
 	archive=${p}_${version}_${os}_${arch}.tar.gz
+	[ "$os/$p" = darwin/jitllm-desktop ] && archive=jitllm_${version}_${os}_${arch}.app.zip
 	fetch "$base/$tag/$archive" "$tmp/$archive" || die "could not download $archive"
 	want=$(awk -v f="$archive" '$2 == f { print $1 }' "$tmp/checksums.txt")
 	[ -n "$want" ] || die "$archive is not in checksums.txt"
 	[ "$(sha256 "$tmp/$archive")" = "$want" ] || die "$archive does not match its checksum"
 	mkdir -p "$tmp/$p"
-	tar -xzf "$tmp/$archive" -C "$tmp/$p"
+	case $archive in
+	*.app.zip)
+		# ditto keeps the bundle's signature, stapled ticket and links.
+		if command -v ditto >/dev/null 2>&1; then
+			ditto -x -k "$tmp/$archive" "$tmp/$p"
+		else
+			unzip -q "$tmp/$archive" -d "$tmp/$p"
+		fi
+		[ -d "$tmp/$p/jitllm.app" ] || die "$archive holds no jitllm.app"
+		;;
+	*) tar -xzf "$tmp/$archive" -C "$tmp/$p" ;;
+	esac
 done
 
 mkdir -p "$dir"
 for p in $progs; do
+	if [ -d "$tmp/$p/jitllm.app" ]; then
+		apps=${JITLLM_APPS_DIR:-/Applications}
+		[ -w "$apps" ] || apps=$HOME/Applications
+		mkdir -p "$apps"
+		rm -rf "$apps/jitllm.app.new"
+		mv "$tmp/$p/jitllm.app" "$apps/jitllm.app.new"
+		rm -rf "$apps/jitllm.app"
+		mv "$apps/jitllm.app.new" "$apps/jitllm.app"
+		say "installed $apps/jitllm.app"
+		continue
+	fi
 	cp "$tmp/$p/$p" "$dir/$p.new"
 	chmod 755 "$dir/$p.new"
 	mv -f "$dir/$p.new" "$dir/$p"
@@ -104,3 +137,16 @@ case ":$PATH:" in
 *":$dir:"*) ;;
 *) say "$dir is not on your PATH; add it, e.g. export PATH=\"$dir:\$PATH\"" ;;
 esac
+
+# On Linux, jitllmd runs as this person's systemd user service on
+# 127.0.0.1:8080, as the Mac app and the Windows installer start it at login.
+# --no-service or JITLLM_NO_SERVICE=1 skips it; `jitllmd service install`
+# does it later. As root there is no person's session to start it in.
+case " $progs " in *" jitllmd "*) has_server=yes ;; *) has_server=no ;; esac
+if [ "$os" = linux ] && [ "$has_server" = yes ] && [ "$service" != no ] && [ "$(id -u)" != 0 ]; then
+	if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+		"$dir/jitllmd" service install || say "the service did not start; see jitllmd service status"
+	else
+		say "no systemd user session here: start the server with jitllmd serve"
+	fi
+fi

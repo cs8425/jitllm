@@ -24,6 +24,16 @@ type modelOpts struct {
 	// profile arms the per-op nanosecond counters OpProfile reports. The
 	// counters stay process-wide; only the gate is per model.
 	profile bool
+	// noFuse runs a decode token's host blocks one pool region per op rather
+	// than as fused runs; see WithBlockFusion.
+	noFuse bool
+	// noGroups runs a fused run's matvecs a phase each; see WithMatVecGroups.
+	noGroups bool
+	// noLook turns off the fused runs' weight lookahead; see WithLookahead.
+	noLook bool
+	// residFold adds the o and down projections into the residual inside
+	// their groups; see WithResidualFold.
+	residFold bool
 	// noShOverlap runs a mixture's shared expert after its routed read
 	// rather than behind it; see WithSharedOverlap.
 	noShOverlap bool
@@ -36,6 +46,9 @@ type modelOpts struct {
 	// noKVPrewarm leaves a device's KV pools at their first frame after
 	// placement (WithKVPrewarm).
 	noKVPrewarm bool
+	// noTailRows runs a prompt's few-row chunk batched rather than as a
+	// ragged step (tailrows.go).
+	noTailRows bool
 	// experts is WithExperts' choice.
 	experts string
 	// trialAA makes the stream trial an A/A self-control (WithStreamTrialAA).
@@ -106,6 +119,34 @@ func defaultOpts() modelOpts {
 	}
 }
 
+// WithBlockFusion sets whether a decode token runs each run of consecutive
+// resident host blocks as one fused pool region (sched.Pool.Fuse), its ops
+// phases of that region, instead of one region per op. On by default: the
+// kernels, their chunks and their order are the same, so the answer is the
+// same bits (TestFusedBlocksMatchPerOp); off is the other arm.
+func WithBlockFusion(on bool) Option { return func(l *loadOpts) { l.opt.noFuse = !on } }
+
+// WithMatVecGroups sets whether a fused run's matvecs that read one activation
+// run as one region with the activation's quantization folded in
+// (nn.MatVecPackedGroup). On by default, the same bits; off is the A/B arm.
+func WithMatVecGroups(on bool) Option { return func(l *loadOpts) { l.opt.noGroups = !on } }
+
+// WithLookahead sets whether a fused run's workers that find a phase drained
+// hint the next op's weights into the outer caches while the phase's last
+// chunks run (nn.JIT.SetAhead). On by default; it writes nothing a kernel
+// reads, so the bits are the same either way. Off is the A/B arm.
+func WithLookahead(on bool) Option { return func(l *loadOpts) { l.opt.noLook = !on } }
+
+// WithResidualFold sets whether a fused run's o and down groups add their rows
+// into the residual as each worker makes them, rather than in an add of its
+// own. The same bits either way (TestFusedBlocksMatchPerOp runs both). Off by
+// default: on the Xeon its rows against off read 0.9905, 0.9965 and 1.0015
+// (Llama-3.2-1B), unresolved, so it is not on until a row shows it gains.
+func WithResidualFold(on bool) Option { return func(l *loadOpts) { l.opt.residFold = on } }
+
+// SetResidualFold is WithResidualFold for one State.
+func (s *State) SetResidualFold(on bool) { s.residFold = on }
+
 // WithSharedOverlap sets whether a latent mixture's shared experts run while
 // its routed experts are read from the container, instead of after. On by
 // default: the two read nothing in common and the shared contribution is
@@ -141,6 +182,12 @@ func WithStreamTrial(on bool) Option { return func(l *loadOpts) { l.opt.noStream
 // (nn.KVPrewarmer), so its first prompt does not grow them inside its own
 // time. On by default; off is the A/B arm.
 func WithKVPrewarm(on bool) Option { return func(l *loadOpts) { l.opt.noKVPrewarm = !on } }
+
+// WithTailRows sets whether a prompt chunk of at most four rows, every block
+// and the head on one device that runs ragged rows, runs as one ragged step
+// of its rows (decode's matvec over them) rather than as a batched chunk at
+// the device's grain (tailrows.go). On by default; off is the A/B arm.
+func WithTailRows(on bool) Option { return func(l *loadOpts) { l.opt.noTailRows = !on } }
 
 // WithProfile arms the per-op nanosecond counters OpProfile reports.
 func WithProfile(on bool) Option { return func(l *loadOpts) { l.opt.profile = on } }

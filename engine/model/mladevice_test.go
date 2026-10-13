@@ -217,6 +217,7 @@ func declineList(st *State) []DeviceDecline { return st.DeviceDeclines() }
 // fail differently: demotion reads into host pages whose k and v alias
 // (kvPages.latent), promotion writes at the stride the scores kernel bakes.
 func TestMLASeamMovesWithItsHistory(t *testing.T) {
+	defer fusedRunsCheck(t, true)()
 	ids := []int32{5, 11, 23, 41, 67, 89, 101, 127}
 	m, err := Open(hfContainer(t, "synth-deepseek-dense"), noTune, WithKVF16(false))
 	if err != nil {

@@ -64,6 +64,7 @@ var sseProbes = []sseProbe{
 	{"Scale", func(em *Emitters) error { return probe0(em.Scale) }},
 	{"Softcap", func(em *Emitters) error { return probe0(em.Softcap) }},
 	{"Clamp", func(em *Emitters) error { return probe0(em.Clamp) }},
+	{"PrefetchLines", func(em *Emitters) error { return probe0(em.PrefetchLines) }},
 	{"Resample", func(em *Emitters) error { _, err := em.Resample(22); return err }},
 	{"ResampleH", func(em *Emitters) error { _, err := em.ResampleH(22); return err }},
 	{"PixLUT", func(em *Emitters) error { return probe0(em.PixLUT) }},

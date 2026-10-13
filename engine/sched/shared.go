@@ -42,6 +42,7 @@ func Shared(cpus []int, opts ...Option) *Pool {
 				break
 			}
 		}
+		c.mu.crews++
 		crews.m[key] = c
 	}
 	c.views++
@@ -67,6 +68,7 @@ func (c *Pool) release(v *Pool) {
 		return
 	}
 	delete(crews.m, c.key)
+	c.mu.crews--
 	c.Close()
 }
 

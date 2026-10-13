@@ -118,6 +118,12 @@ func oaChatLogprobsOf(raw json.RawMessage, top *int) (oaLogprobRequest, error) {
 			return oaLogprobRequest{}, fmt.Errorf("logprobs must be true or false on chat completions")
 		}
 	}
+	return logprobRequestOf(on, top)
+}
+
+// logprobRequestOf is the check on a logprobs switch and its alternative
+// count that both surfaces share.
+func logprobRequestOf(on bool, top *int) (oaLogprobRequest, error) {
 	r := oaLogprobRequest{on: on}
 	if top != nil {
 		if !r.on {
@@ -130,6 +136,11 @@ func oaChatLogprobsOf(raw json.RawMessage, top *int) (oaLogprobRequest, error) {
 	}
 	return r, nil
 }
+
+// errLogprobsWithEcho is the refusal of logprobs on a generate that echoes its
+// prompt, on both surfaces.
+const errLogprobsWithEcho = "logprobs with echo would need the prompt's own " +
+	"log-probabilities, which are not built"
 
 // oaLegacyLogprobsOf reads /v1/completions' `logprobs`, an alternative count;
 // top_logprobs is chat's field and is refused here rather than ignored.

@@ -14,6 +14,7 @@ import (
 	"github.com/jitllm/jitllm/convert"
 	"github.com/jitllm/jitllm/convert/hf"
 	"github.com/jitllm/jitllm/format/jlm"
+	"github.com/jitllm/jitllm/internal/localserver"
 )
 
 // convertCmd writes a GGUF (or a safetensors model) as a jlm container.
@@ -85,9 +86,8 @@ func convertCmd(args []string) error {
 			"lives in the model directory", src, mmproj)
 	}
 	// The default output is derived AFTER the fetch (see defaultDest).
-	beside := false
 	if dst == "" {
-		if dst, beside, err = defaultDest(src, *outDir); err != nil {
+		if dst, err = defaultDest(src, *outDir); err != nil {
 			return err
 		}
 	}
@@ -110,10 +110,6 @@ func convertCmd(args []string) error {
 		fmt.Fprintf(os.Stderr, "convert  %s + %s -> %s\n", src, mmproj, dst)
 	} else {
 		fmt.Fprintf(os.Stderr, "convert  %s -> %s\n", src, dst)
-	}
-	if beside {
-		fmt.Fprintf(os.Stderr, "         no model directory here, so it lands beside the "+
-			"source; set JITLLM_MODELS or pass -o to write it elsewhere\n")
 	}
 	t0 := time.Now()
 	var h *jlm.Header
@@ -222,7 +218,29 @@ func convertCmd(args []string) error {
 			float64(pad)/(1<<20), float64(allPages)/(1<<30),
 			100*float64(pad)/float64(allPages))
 	}
+	aliasCatalogName(fs.Args(), dst)
 	return nil
+}
+
+// aliasCatalogName gives a container converted from a catalog name that name
+// as an alias in the models folder, so `jitllm convert qwen3-8b` is followed
+// by `jitllm run qwen3-8b` rather than the file's own name. A name another
+// container already answers to is left alone.
+func aliasCatalogName(args []string, dst string) {
+	if len(args) == 0 || libraryArgs(args)[0] == args[0] {
+		return
+	}
+	dir := defaultModelDir()
+	if filepath.Clean(filepath.Dir(dst)) != filepath.Clean(dir) {
+		return
+	}
+	added, err := localserver.AddAlias(dir, filepath.Base(dst), args[0])
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "         alias %s not kept: %v\n", args[0], err)
+	case added:
+		fmt.Fprintf(os.Stderr, "alias    %s (jitllm run %s)\n", args[0], args[0])
+	}
 }
 
 // splitPart is llama.cpp's gguf-split naming, NAME-00001-of-00003.gguf.
@@ -270,23 +288,17 @@ func sourceBytes(src string) (int64, error) {
 
 // defaultDest is where a conversion with no output path writes: into -o's
 // directory when one is given, whatever the source is (a local file as much as
-// a download), otherwise into the model directory (defaultModelDir:
-// JITLLM_MODELS, or the models disk the repo's links point at) whatever disk
-// the source is on. With neither on this host it lands beside the source, and
-// beside says so.
-func defaultDest(src, outDir string) (dst string, beside bool, err error) {
-	if outDir != "" {
-		if err := os.MkdirAll(outDir, 0o755); err != nil {
-			return "", false, fmt.Errorf("jitllm convert: -o %s: %w", outDir, err)
-		}
-		return convert.DestFor(src, outDir), false, nil
+// a download), otherwise into the models folder every front end and jitllmd
+// read (defaultModelDir), created on first use, whatever disk the source is
+// on.
+func defaultDest(src, outDir string) (string, error) {
+	dir, what := outDir, "-o "+outDir
+	if dir == "" {
+		dir = defaultModelDir()
+		what = "the models folder " + dir
 	}
-	dir := defaultModelDir()
-	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-		// Say so: defaultModelDir resolves the relative name "models", so
-		// from a directory without one the container lands beside the
-		// source, possibly a multi-GB file on the main disk.
-		return convert.DestFor(src, ""), true, nil
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("jitllm convert: %s: %w", what, err)
 	}
-	return convert.DestFor(src, dir), false, nil
+	return convert.DestFor(src, dir), nil
 }

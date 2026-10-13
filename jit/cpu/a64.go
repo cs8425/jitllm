@@ -163,6 +163,7 @@ func (a *A64) Bytes() []byte {
 			panic("jit: label used but never bound")
 		}
 	}
+	noteEmitA64(a.b)
 	return a.b
 }
 
@@ -726,6 +727,14 @@ func (a *A64) UZP2h8(vd, vn, vm VReg) {
 // retires without waiting for it. Encoding from llvm-mc.
 func (a *A64) PRFM(rn XReg, off int32) {
 	a.w(0xF9800000 | scaled(off, 8, "prfm") | uint32(rn)<<5)
+}
+
+// prfmPLDL2KEEP is PRFM's prfop for a load hint into L2 (Rt = 0b00010).
+const prfmPLDL2KEEP = 2
+
+// PRFMop is PRFM with the prfop in Rt: prfm <op>, [xn, #off].
+func (a *A64) PRFMop(op uint32, rn XReg, off int32) {
+	a.w(0xF9800000 | scaled(off, 8, "prfm") | uint32(rn)<<5 | op)
 }
 
 func (a *A64) FCVTL2(vd, vn VReg) { a.w(0x4E217800 | uint32(vn)<<5 | uint32(vd)) }

@@ -11,7 +11,19 @@
 | OpenAI-compatible | `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/models`, `POST /v1/embeddings` (floats or base64), `/v1/files`, `/v1/batches` |
 | Anthropic-compatible | `POST /v1/messages` (named SSE events) |
 | Connect RPC | `ModelService`, `InferenceService` (`Generate`, `Complete`, `Cancel`, `Embed`), `SessionService`, `PlacementService`, `DeviceService`, `TelemetryService` |
-| Health | `GET /healthz` |
+| jitllm | `POST /v1/systemone` (a decision model's answers), `GET /v1/capabilities` (the manifest, [capabilities.md](capabilities.md)), `GET /metrics` (Prometheus) |
+| Health | `GET /healthz`, `GET /health` |
+
+A client checks what it is talking to before it relies on it:
+`TelemetryService.GetServerInfo` returns the version and revision, the
+control plane's compatibility version (`api_version`), the OS and
+architecture, the models folder, every device, the capability manifest that
+`GET /v1/capabilities` serves (`capabilities_json`, which also carries
+`server_api`) and a list of named `features`. The API version changes only
+when a field changes meaning or goes away; a client built for another number
+refuses with a message naming both. `server/client.Discover` is that check
+for a Go front end, and `internal/localserver.Probe` the same check over
+`/v1/capabilities` for the root module's CLI.
 
 Both compatible APIs stream and take `tools`: the tool list is rendered by the
 model's own chat template, and calls come back as OpenAI `tool_calls` or
@@ -134,7 +146,8 @@ to a model with no tower ("model X does not accept images"), an unsupported
 or mismatched type, a picture over a limit, undecodable bytes, a remote URL
 with fetching off (the message says how to turn it on), and an audio or file
 part. The Connect API takes pictures as `ChatMessage.images` (`ChatImage`:
-the bytes and an optional `media_type`) under the same limits;
+the bytes and an optional `media_type`, or a `url` that is a `data:` URL or an
+`http(s)` URL under the fetch rules above) under the same limits;
 `ApplyChatTemplate` refuses one. Pictures combine with `tools` (the template
 renders the tool list, and a forced `tool_choice` runs under the tool
 grammar), with `n` (the prompt, picture included, is prefilled once and the
@@ -158,5 +171,108 @@ prompt store a Speculator does not use).
 | `sessions` | create, list, describe, reset and close sessions |
 | `place` | read and move the CPU/device seam and the pager budget |
 | `stats` | engine counters, once or streamed (`-watch`) |
+| `service` | `install`, `uninstall`, `start`, `stop`, `status`: jitllmd as this person's background service |
+
+## The native API and the OpenAI routes
+
+`InferenceService` carries everything the OpenAI routes do, so the CLI, the
+window and the terminal app use the native API with every feature. The two are
+one path: the OpenAI body and the Connect request build the same
+`GenerateOptions` for `Engine.Generate`, and a request is read by the
+functions the OpenAI route runs (`oaTools`, `oaToolChoice`,
+`oaResponseFormat`, `oaChoiceSeeds`, the sampling check, the tool-call
+reader), so a value one refuses the other refuses in the same words, as a 400
+and as `InvalidArgument`. `server/parity_test.go` holds the mapping field by
+field on a scripted backend, and `server/parity_model_test.go` sends
+equivalent requests through both on stories260K and Qwen3-0.6B and requires
+the same text, finish reason, usage, log-probabilities and tool calls.
+
+| OpenAI | Connect (`InferenceService`) | Notes |
+|---|---|---|
+| `model`, `jitllm_session` | `GenerateRequest.model_id`, `session_id` | a model by id, file name or alias; loaded on demand |
+| `messages[].role`, text parts | `ChatPrompt.messages[].role`, `content`; `system` | text parts of a turn are joined, on both |
+| `image_url` parts (`data:` URL, `http(s)` URL) | `ChatMessage.images[]`: `data` (bytes) or `url` | the same `-image-*` limits and `-image-fetch-allow` policy; `data` and `url` together are refused |
+| `tools` | `ChatPrompt.tools[]` (`name`, `description`, `parameters_json`, `strict`) | rendered by the model's own chat template |
+| `tool_choice` `none`, `auto`, `required`, named | `ToolChoice.mode` `NONE`, `AUTO`, `REQUIRED`, `FUNCTION` + `name` | a named tool must be declared; `none` withholds the tools |
+| `parallel_tool_calls: false` | `ToolChoice.single_call` | at most one call |
+| assistant `tool_calls`, `tool` turns | `ChatMessage.tool_calls`, `tool_call_id`, `name` | |
+| reply `tool_calls` | `GenerateToolCalls` events; `CompleteChoice.tool_calls` | each call is sent when its markup closes; the text carries none of it |
+| `finish_reason` `stop`, `length`, `tool_calls` | `FinishReason` `STOP` or `EOS`, `MAX_TOKENS`, `TOOL_CALLS` | |
+| `response_format` `text`, `json_object`, `json_schema` | `ResponseFormat.type`, `json_schema`, `name`, `strict` | `strict` is accepted and always so: the grammar always holds the reply; with `grammar`, `json_schema` or a forced tool call it is refused as one constraint each |
+| `logprobs`, `top_logprobs` | `logprobs`, `top_logprobs` (0 to 20) | `GenerateToken.logprob`, `CompleteChoice.logprobs`; the raw distribution; refused with `echo_prompt` |
+| `/v1/completions` `logprobs: N` | `logprobs: true`, `top_logprobs: N` | |
+| `n` (1 to 128) | `n` | `GenerateResponse.choice`, `CompleteResponse.choices`; choice `i` samples with seed + `i` |
+| `stop` | `stop` | |
+| `seed` | `sampling.seed` | |
+| `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty` | `sampling.temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty` | validated by one function; `top_k: -1` disables |
+| `presence_penalty`, `frequency_penalty` | `sampling.presence_penalty`, `frequency_penalty` | non-zero is refused by name on both; `repeat_penalty` is what the engine has |
+| `max_tokens`, `max_completion_tokens` | `max_tokens` | |
+| `ignore_eos`, `echo` | `ignore_eos`, `echo_prompt` | |
+| `jitllm_speculate`, `jitllm_priority` | `speculation`, `priority` | |
+| `usage.prompt_tokens`, `completion_tokens`, `total_tokens`, `prompt_tokens_details.cached_tokens` | `CompleteResponse.usage`; a `GenerateUsage` event when `include_usage` is set | the prompt is counted once for `n` choices; per choice, `GenerateFinished.cached_tokens` |
+| `/v1/models` `max_model_len`, `aliases`, `loaded` | `ModelInfo.default_max_seq`, `aliases`; `ListModels.loaded` and `files` | |
+| (none) | `ModelInfo.capabilities`, `ModelFile.capabilities`, `context_length` | `completion`, `chat`, `tools`, `json_schema`, `logprobs`, `vision`, `embeddings`; an encoder has `embeddings` alone; a file's come from its header, without loading it |
+| `/v1/embeddings` `input`, `dimensions` | `EmbedRequest.inputs`, `dimensions` | an empty input or a negative width is refused in the same words; the vectors are the same bytes |
+
+Left to the surface they belong to: `encoding_format: "base64"` (a transport
+choice; the Connect message already carries packed floats), a list of prompts
+in one `/v1/completions` request (the Connect client sends one request per
+prompt, and the step loop batches them), the Files and Batch APIs, and the
+Anthropic content blocks. `GenerateRequest.add_generation_prompt` is the
+native default of false where the chat route always sets it: a client sending
+a chat sets it. Unlike the OpenAI route, a Connect request with `sampling`
+unset runs the session's own sampler (greedy by default); the route's
+temperature 1 default is the route's.
+
+A named feature reaches a client through `ServerInfo.features`: `chat_tools`,
+`response_format`, `logprobs`, `choices`, `image_url`, `stream_usage` and
+`model_capabilities` join `server_info`, `model_aliases`, `model_enable` and
+`on_demand_load`. `server/client.Conn.Has` asks for one.
+
+## Models by name, loaded on demand
+
+Every `.jlm` in the models folder (`-models`) is available by name: its file
+name, with or without `.jlm`, or an alias. A request naming one that is not
+loaded loads it, under its file name as its id, with `-devices` (auto by
+default), `-gpu-layers` and `-sessions`; the folder is read at each lookup,
+so a container converted into it is there for the next request. A model that
+does not fit pages (that is the design); a load that fails answers with the
+model, its size and the host budget it was opened against. `-on-demand=false`
+turns this off. `GET /v1/models` lists the loaded models and then the
+available ones (`"loaded": false`), each alias as an entry of its own.
+
+Aliases and enable/disable live in the folder's `jitllm-models.json`, so they
+survive a restart and move with the models:
+
+```sh
+jitllmd models -alias Qwen3-0.6B-Q8_0=qwen3,small   # several names, unique across the folder
+jitllmd models -unalias Qwen3-0.6B-Q8_0=small
+jitllmd models -disable qwen3   # listed, never loaded on demand; `models -load` still loads it
+jitllmd models -enable qwen3
+jitllmd models                  # loaded, then on disk with their aliases and state
+```
+
+The same is `ModelService.SetModelOptions` on the Connect API, and
+`ListModels` carries each file's `aliases`, `disabled` and loaded `model_id`.
+`jitllmd models -load` and `-unload` work as before.
+
+## The service
+
+`jitllmd service install` runs `jitllmd serve -addr 127.0.0.1:8080 -models
+<the models folder>` in the background, now and at every login, restarted
+after a crash and not after a clean stop. Loopback only: nothing is opened to
+the network unless `-addr` says so.
+
+| System | What runs it | Log |
+|---|---|---|
+| Linux | systemd user unit `~/.config/systemd/user/jitllm.service` | `journalctl --user -u jitllm` |
+| macOS | launchd agent `~/Library/LaunchAgents/org.jitllm.service.plist` (the app's "start the server at login" writes the same one) | `~/Library/Logs/jitllm/jitllmd.log` |
+| Windows | `%LOCALAPPDATA%\jitllm\jitllmd-login.vbs` under the user Run key (the installer's "start the server at login" calls `jitllmd service install`) | `%LOCALAPPDATA%\jitllm\jitllmd.log` |
+
+`install.sh` installs the service on Linux when it installs jitllmd
+(`--no-service` or `JITLLM_NO_SERVICE=1` skips it). `jitllmd service status`
+shows whether it is installed, the address, the version, the models folder
+and the loaded models. On Linux, `loginctl enable-linger` keeps it running
+without a login session.
 
 The Connect API is defined in [`proto/jitllm/v1`](../proto/jitllm/v1/).

@@ -32,19 +32,22 @@ func (s *ModelService) ListModels(ctx context.Context, req *connect.Request[v1.L
 		}
 		out.Directory = dir
 		for _, f := range files {
-			mf := &v1.ModelFile{
-				Path:           f.Path,
-				Name:           f.Name,
-				Size:           pbBytes(f.Size),
-				IsContainer:    f.IsContainer,
-				ConvertCommand: f.ConvertCommand,
-			}
+			mf := pbModelFile(f)
 			if f.IsContainer {
 				// jlm.Open refuses any version but this build's, so a
 				// successful open proves the version. A container that fails
 				// is still listed, with the re-convert fix.
 				if h, err := jlm.Open(f.Path); err == nil {
 					mf.ContainerVersion = uint32(jlm.Version)
+					if c := h.Config(); c != nil {
+						chat := false
+						if v := h.Vocab(); v != nil {
+							_, chat = v.Template("")
+						}
+						mf.ContextLength = int32(c.NCtx)
+						mf.Capabilities = modelCapabilities(chat, h.VisionBlocks() > 0,
+							c.Flags.Pooling() != jlm.PoolNone, c.Arch.Encoder())
+					}
 					h.Close()
 				} else {
 					mf.ConvertCommand = fmt.Sprintf(
@@ -55,6 +58,54 @@ func (s *ModelService) ListModels(ctx context.Context, req *connect.Request[v1.L
 		}
 	}
 	return connect.NewResponse(out), nil
+}
+
+// modelCapabilities names what a model can be asked to do, from what its
+// container states (ModelInfo.capabilities). A name is added, never renamed.
+// An encoder has no decoder session, so embeddings is all it offers; a
+// decoder can complete, and chat, tools and json_schema ride on the same
+// generate path, with chat needing the container's template.
+func modelCapabilities(chat, vision, pooled, encoder bool) []string {
+	var out []string
+	if !encoder {
+		out = append(out, "completion", "json_schema", "logprobs")
+		if chat {
+			out = append(out, "chat", "tools")
+		}
+		if vision {
+			out = append(out, "vision")
+		}
+	}
+	if pooled {
+		out = append(out, "embeddings")
+	}
+	return out
+}
+
+func pbModelFile(f ModelFileInfo) *v1.ModelFile {
+	return &v1.ModelFile{
+		Path:           f.Path,
+		Name:           f.Name,
+		Size:           pbBytes(f.Size),
+		IsContainer:    f.IsContainer,
+		ConvertCommand: f.ConvertCommand,
+		Aliases:        f.Aliases,
+		Disabled:       f.Disabled,
+		ModelId:        f.ModelID,
+	}
+}
+
+// SetModelOptions sets a container's aliases and whether it loads on demand.
+func (s *ModelService) SetModelOptions(ctx context.Context, req *connect.Request[v1.SetModelOptionsRequest]) (*connect.Response[v1.SetModelOptionsResponse], error) {
+	m := req.Msg
+	if m.Name == "" {
+		return nil, invalid("set model options: name is required")
+	}
+	f, err := s.E.SetModelOptions(m.Name, m.AddAliases, m.RemoveAliases, m.Enabled)
+	if err != nil {
+		return nil, connectErr(err)
+	}
+	return connect.NewResponse(&v1.SetModelOptionsResponse{File: pbModelFile(f)}), nil
 }
 
 // GetModel describes one loaded model.

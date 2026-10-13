@@ -122,6 +122,24 @@ type State struct {
 	// rg is the pool regions a decode token runs, with their functions built
 	// once (see regions).
 	rg regions
+	// fuseOff runs this State's decode one pool region per op
+	// (WithBlockFusion, SetBlockFusion); fused is whether a fused run of host
+	// blocks is open (fuse.go), and FusedRuns counts the runs opened.
+	fuseOff   bool
+	fused     bool
+	FusedRuns int64
+	// grp is groupOf's call, reused; groupOff keeps a fused run's matvecs
+	// one region each (SetMatVecGroups); Grouped counts the group calls.
+	grp      nn.MVGroup
+	groupOff bool
+	// aheads is the fused runs' lookahead sets, one per (block, op), and
+	// lookOff turns the lookahead off (fuse.go).
+	aheads  []nn.AheadSet
+	lookOff bool
+	// residFold lets the o and down groups add their rows into the
+	// residual (WithResidualFold).
+	residFold bool
+	Grouped   int64
 
 	// kv is the paged KV history (see engine/model/kvpage.go). Pages are committed as
 	// the sequence reaches them rather than reserved for the whole context.
@@ -371,6 +389,12 @@ type State struct {
 	// devRowChunks counts prompt chunks the device refused whole and ran
 	// again a row at a time (prefillSrc's per-row retry). See DeviceRowChunks.
 	devRowChunks int
+	// tailRowChunks counts few-row prompt chunks run as one ragged step
+	// (tailrows.go). See TailRowChunks.
+	tailRowChunks int
+	// tailPos is a ragged tail step's positions, kept so the step allocates
+	// nothing once grown.
+	tailPos []int
 	// relocate hands the device's highest block to the host when its history
 	// cannot grow, rather than letting the token fail. See SetRelocate.
 	relocate     bool
@@ -622,7 +646,9 @@ func (m *Model) newStateRange(nseq, maxSeq, lo, hi int) *State {
 		maxSeq = c.NCtx
 	}
 	s := &State{m: m, c: m.Cfg, lo: lo, hi: hi, gpuLayers: lo, maxSeq: maxSeq, reqSeq: req, nseq: nseq,
-		devFallback: true, relocate: true, prof: m.opt.profile, outNorm: m.outNorm, outW: &m.output}
+		devFallback: true, relocate: true, prof: m.opt.profile, outNorm: m.outNorm, outW: &m.output,
+		fuseOff: m.opt.noFuse, groupOff: m.opt.noGroups, lookOff: m.opt.noLook,
+		residFold: m.opt.residFold}
 	s.holdHostRuns()
 	// A State over a prediction block projects through that block's head.
 	if lo < len(m.layers) {
@@ -2116,6 +2142,11 @@ func (s *State) DeviceDemotions() int { return s.devDemoted }
 // kernels computed.
 func (s *State) DeviceRowChunks() int { return s.devRowChunks }
 
+// TailRowChunks is how many few-row prompt chunks this session ran on the
+// device as one ragged step of their rows rather than as a batched chunk
+// (tailrows.go).
+func (s *State) TailRowChunks() int { return s.tailRowChunks }
+
 // SetRelocate chooses what happens when the device cannot grow its attention
 // history to the next position: hand its highest block to the host and ask
 // again, as often as it takes (true, the default), or let the token fail on
@@ -3398,12 +3429,18 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 	// token an allocation whenever the runtime's per-P pool runs dry.
 	var unhide func()
 	defer func() {
+		s.unfuse()
 		if unhide != nil {
 			unhide()
 		}
 	}()
+	// attnResid and ffnResid: a group already added the projection into the
+	// residual (fuse.go).
+	var attnResid, ffnResid bool
 	for li := s.lo; li < s.hi; li++ {
 		if s.devAt(li) {
+			// A device run ends the fused host run (fuse.go).
+			s.unfuse()
 			hi := li + 1
 			for hi < s.hi && s.devAt(hi) {
 				hi++
@@ -3470,10 +3507,15 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			continue
 		}
 		// The block is faulted in at first touch; with a budget that holds the
-		// model this is one nil compare.
+		// model this is one nil compare. A block that has to be read ends the
+		// fused run before the read, and the run reopens after it.
+		if s.fused && !m.blockResident(li) {
+			s.unfuse()
+		}
 		if err := m.pageIn(li); err != nil {
 			return nil, err
 		}
+		s.fuseRun()
 		l := &m.layers[li]
 		if c.DSV4() {
 			s.ds.rslot[0], s.ds.rpos[0], s.ds.rid[0] = 0, s.pos, s.tok
@@ -3544,7 +3586,14 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			m.trace(li, "k", s.kc[:c.KVDim()])
 		} else {
 			kvd := c.KVDimAt(li)
-			if _, err := s.projectQ(l, s.q, s.ogate, s.h, 1, false); err != nil {
+			// q, k and v as one region inside a fused run (fuse.go).
+			s.aheadOf(li, 0, [nn.MaxGroup]*tensor{&l.wo})
+			grouped := !c.AttnOutGate && !c.KVShared(li) && !l.vFromK && !c.MSAAt(li) &&
+				s.groupOf(s.h, [nn.MaxGroup]*tensor{&l.wq, &l.wk, &l.wv},
+					[nn.MaxGroup][]float32{s.q, s.kc, s.vc}, 3)
+			if grouped {
+				s.addBiasRows(s.q, l.bq, 1)
+			} else if _, err := s.projectQ(l, s.q, s.ogate, s.h, 1, false); err != nil {
 				return nil, err
 			}
 			// A KV-sharing block projects q alone and attends to its
@@ -3553,16 +3602,20 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 				s.attnPrep(l, s.q, nil, nil, s.ropeTable(li, s.cs, s.csSWA, 0), li, 0, s.pos)
 				goto attend
 			}
-			if err := s.mv(s.kc, l.wk, s.h); err != nil {
-				return nil, err
+			if !grouped {
+				if err := s.mv(s.kc, l.wk, s.h); err != nil {
+					return nil, err
+				}
 			}
 			s.addBias(s.kc, l.bk)
 			if l.vFromK {
 				// Gemma 4's global layers: v is k's projection, taken before
 				// k's norm and rotary.
 				copy(s.vc[:kvd], s.kc[:kvd])
-			} else if err := s.mv(s.vc, l.wv, s.h); err != nil {
-				return nil, err
+			} else if !grouped {
+				if err := s.mv(s.vc, l.wv, s.h); err != nil {
+					return nil, err
+				}
 			}
 			s.addBias(s.vc, l.bv)
 			// MiniMax Sparse Attention: the indexer's key rides the row as one
@@ -3667,8 +3720,22 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 					s.jit.NewInput()
 					src = s.ogate
 				}
-				if err := s.mv(s.h, l.wo, src[:c.QDimAt(li)]); err != nil {
-					return nil, err
+				// With nothing between the projection and the residual, the
+				// add rides the projection's rows (fuse.go).
+				plain := s.residFold && l.bo == nil && !kind.Recurrent() && l.postAttnNorm == nil &&
+					!c.ResAttn() && c.AltUp == 0
+				if plain {
+					s.grp.Resid, s.grp.Alpha = s.x, float32(c.ResidualScale)
+				}
+				s.aheadOf(li, 1, [nn.MaxGroup]*tensor{&l.gate, &l.up})
+				attnResid = plain && s.groupOf(src[:c.QDimAt(li)], [nn.MaxGroup]*tensor{&l.wo},
+					[nn.MaxGroup][]float32{s.h}, 1)
+				s.grp.Resid = nil
+				if !attnResid && !s.groupOf(src[:c.QDimAt(li)], [nn.MaxGroup]*tensor{&l.wo},
+					[nn.MaxGroup][]float32{s.h}, 1) {
+					if err := s.mv(s.h, l.wo, src[:c.QDimAt(li)]); err != nil {
+						return nil, err
+					}
 				}
 			}
 			// The bias goes before the residual add; after it s.h is dead.
@@ -3686,9 +3753,10 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 		t0 = s.tick()
 		if c.ResAttn() {
 			s.k3Resid(li, s.x, s.h, 1)
-		} else {
+		} else if !attnResid {
 			s.addInto(s.x, s.h)
 		}
+		attnResid = false
 		if c.AltUp != 0 {
 			s.laurelJoin(s.x, s.altLaur)
 		}
@@ -3767,19 +3835,35 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			// NFFN (Config.NFFNAt).
 			ff := c.NFFNAt(li)
 			gate, up, act := s.gate[:ff], s.up[:ff], c.Act
-			if err := s.mv(gate, l.gate, ffnIn); err != nil {
-				return nil, err
-			}
-			if err := s.mv(up, l.up, ffnIn); err != nil {
-				return nil, err
+			s.aheadOf(li, 2, [nn.MaxGroup]*tensor{&l.down})
+			if !s.groupOf(ffnIn, [nn.MaxGroup]*tensor{&l.gate, &l.up},
+				[nn.MaxGroup][]float32{gate, up}, 2) {
+				if err := s.mv(gate, l.gate, ffnIn); err != nil {
+					return nil, err
+				}
+				if err := s.mv(up, l.up, ffnIn); err != nil {
+					return nil, err
+				}
 			}
 			t0 = s.tick()
 			s.gaussTopK(li, gate, ff)
-			s.actmulAll(gate, up, act)
-			s.jit.NewInput()
-			s.tock(opAct, t0)
-			if err := s.mv(s.h, l.down, gate); err != nil {
-				return nil, err
+			// Inside a fused run the activation rides the down projection's
+			// group: each worker forms act(gate)*up itself (fuse.go).
+			s.grp.ActUp, s.grp.Act = up, act
+			if s.residFold && l.postFFNNorm == nil {
+				s.grp.Resid, s.grp.Alpha = s.x, float32(c.ResidualScale)
+			}
+			s.aheadNext(li)
+			grouped := s.groupOf(gate, [nn.MaxGroup]*tensor{&l.down}, [nn.MaxGroup][]float32{s.h}, 1)
+			ffnResid = grouped && s.grp.Resid != nil
+			s.grp.ActUp, s.grp.Resid = nil, nil
+			if !grouped {
+				s.actmulAll(gate, up, act)
+				s.jit.NewInput()
+				s.tock(opAct, t0)
+				if err := s.mv(s.h, l.down, gate); err != nil {
+					return nil, err
+				}
 			}
 		}
 		if l.postFFNNorm != nil {
@@ -3788,7 +3872,10 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			s.tock(opRMSNorm, t0)
 		}
 		t0 = s.tick()
-		s.addInto(s.x, ffn)
+		if !ffnResid {
+			s.addInto(s.x, ffn)
+		}
+		ffnResid = false
 		s.tock(opResid, t0)
 		if c.AltUp != 0 {
 			if err := s.altCorrect(li, l, s.xa, s.altPred, s.ple, 1); err != nil {
@@ -3826,6 +3913,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 	// which has the norm and the weights either way.
 	done := false
 	if s.head != nil && !folded {
+		s.unfuse()
 		defer s.rows.hiddenOf(s.head)()
 		if s.ld.Layers(s.gpuLayers, s.gpuLayers, s.pos, 1, s.resid(), s.cs[:c.RopeW()], s.swaTable(c.NRotSWA), s.head) {
 			done = true
@@ -3844,6 +3932,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 			copy(s.rows.hidden, s.h)
 		}
 	}
+	s.unfuse()
 	// After both arms: when the tier ran the head it also applied the final
 	// softcap, so that arm takes only the scale.
 	if done {

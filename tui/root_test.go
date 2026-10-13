@@ -185,6 +185,31 @@ func TestChatsKeepTheirTurns(t *testing.T) {
 	}
 }
 
+// macOS takes ctrl+arrows for Mission Control, so Option (alt) arrows switch
+// chats too, and the help says so.
+func TestOptionArrowsSwitchChatsAndAreInTheHelp(t *testing.T) {
+	r := newTestRoot(t)
+	r.env.f.appendTurn(session.Turn{Role: session.RoleUser, Text: "first chat"})
+	r.chat.newChat()
+	r.setScreen(scrChat)
+	r.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
+	if turns, _, _ := r.env.f.snapshot(); len(turns) != 1 || turns[0].Text != "first chat" {
+		t.Fatalf("alt+down shows %v", turns)
+	}
+	r.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	if n := r.env.f.turnCount(); n != 0 {
+		t.Fatalf("alt+up back to the new chat shows %d turns", n)
+	}
+	var prev, next bool
+	for _, b := range r.chat.Help() {
+		prev = prev || b.Help().Key == "ctrl/⌥+↑"
+		next = next || b.Help().Key == "ctrl/⌥+↓"
+	}
+	if !prev || !next {
+		t.Fatal("the help does not show the Option bindings")
+	}
+}
+
 // A finished turn is rendered once: a second refresh reuses it.
 func TestAFinishedTurnIsRenderedOnce(t *testing.T) {
 	r := newTestRoot(t)
@@ -216,4 +241,47 @@ func stripANSI(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// Two loaded models both read "loaded" on the models page and in the chat's
+// sidebar, and the palette offers each an explicit unload.
+func TestTwoLoadedModelsAreBothLoaded(t *testing.T) {
+	r := newTestRoot(t)
+	dir := r.env.dirs[0]
+	a, b := filepath.Join(dir, "a.jlm"), filepath.Join(dir, "b.jlm")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.env.f.st.Models.Set([]session.LoadedModel{
+		{Path: a, Name: "a.jlm", Arch: "llama", Blocks: 2},
+		{Path: b, Name: "b.jlm", Arch: "llama", Blocks: 2, Colour: 1, Active: true},
+	})
+	r.env.f.st.Active.Set(b)
+	r.pages[scrModels].(*modelsPage).scan()
+	r.setScreen(scrModels)
+	v := stripANSI(r.View())
+	if n := strings.Count(v, "● loaded"); n != 2 {
+		t.Errorf("%d rows read \"● loaded\", want 2:\n%s", n, v)
+	}
+	for _, w := range []string{"● active", "○ open", "2 open"} {
+		if strings.Contains(v, w) {
+			t.Errorf("the models page still says %q", w)
+		}
+	}
+	side := stripANSI(sidebar(r.env, 40, 30))
+	if n := strings.Count(side, "●"); n != 2 {
+		t.Errorf("the sidebar marks %d models loaded, want 2:\n%s", n, side)
+	}
+	var titles []string
+	for _, a := range actions(r) {
+		titles = append(titles, a.title)
+	}
+	all := strings.Join(titles, "|")
+	for _, w := range []string{"Unload a", "Unload b", "Chat with a"} {
+		if !strings.Contains(all, w) {
+			t.Errorf("the palette has no %q: %s", w, all)
+		}
+	}
 }
