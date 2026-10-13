@@ -70,7 +70,7 @@ SHAPE = dict(
     linear_conv_kernel_dim=4, linear_key_head_dim=32, linear_value_head_dim=32,
     linear_num_key_heads=2, linear_num_value_heads=4,
     num_experts=8, num_experts_per_tok=2, moe_intermediate_size=32, shared_expert_intermediate_size=32,
-    norm_topk_prob=True, hc_count=4, hc_lowrank=16,
+    norm_topk_prob=True, hc_count=4, hc_lowrank=32,
     ple_layer_ids=[3], ple_embed_dim=64, ple_conv_kernel_size=4, ngram_size=3, heads_per_ngram=2,
     ngram_vocab_size_base=1000, make_ngram_vocab_size_divisible_by=128, seed=4321, split_ngram_parts=PARTS,
     indexer_n_heads=8, indexer_kv_heads=1, indexer_head_dim=32, indexer_budget=8, indexer_compress_ratio=4,

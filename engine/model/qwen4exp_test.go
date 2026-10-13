@@ -18,7 +18,8 @@ func openQ4E(t *testing.T, name string) (*Model, *c6Golden) {
 }
 
 // q4eFixtures names each fixture and what its container must carry: four
-// hyper-connection streams at rank 16; linear, attention, linear, attention;
+// hyper-connection streams at rank 32 (a device quantizes activations in
+// blocks of 32); linear, attention, linear, attention;
 // QSA on both attention blocks (budget 8 at a ratio of 4, so from position 12
 // a query reads a subset of its keys); the n-gram block on block 2 (3-grams,
 // two heads each, rows of 16); the delta rule's gate a sigmoid.
@@ -28,7 +29,7 @@ var q4eFixtures = []struct {
 }{
 	{"synth-qwen4exp", func(m *Model) bool {
 		c := m.Cfg
-		return c.Arch == "qwen4exp" && c.HCMult == 4 && c.HCLowRank == 16 && c.QSARatio == 4 &&
+		return c.Arch == "qwen4exp" && c.HCMult == 4 && c.HCLowRank == 32 && c.QSARatio == 4 &&
 			c.IdxTopK == 8 && c.IdxHeads == 8 && c.IdxHeadDim == 32 && c.NGramBlock == 3 &&
 			c.NGram == 3 && c.NGramHeadsPer == 2 && c.NGramRowDim == 16 && c.NGramConv == 4 &&
 			c.DeltaSigmoidGate && c.NRot == 16 && c.RopeNeox && c.AttnOutGate &&

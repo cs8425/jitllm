@@ -23,8 +23,9 @@ func (s *State) q4ePlan(li int, plan *nn.LayerPlan) {
 	} else {
 		plan.IdxHeads, plan.IdxHeadDim, plan.IdxTopK = 0, 0, 0
 	}
-	if c.NGramAt(li) {
+	if c.NGramBlock != 0 && c.q4eFault != q4eFaultNoNGram {
 		q.NGramWidth, q.NGramConv, q.NGramDil = c.NGramWidth(), c.NGramConv, c.NGram
+		q.NGramHere = c.NGramAt(li)
 	}
 	if c.LayerKind(li).Recurrent() {
 		plan.Recurrent.SigmoidGate = c.q4eSigmoidGate()
@@ -66,8 +67,8 @@ func (s *State) ngramToDevice(lo, hi, n int, order []int, owner func(r int) (*St
 	if c.NGramBlock == 0 || li < lo || li >= hi || c.q4eFault == q4eFaultNoNGram {
 		return nil
 	}
-	nd, ok := s.ld.(nn.NGramDevice)
-	if !ok {
+	nd := s.ldNGram
+	if nd == nil {
 		return nil
 	}
 	s.growQ4E(n)

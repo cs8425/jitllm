@@ -660,6 +660,9 @@ type Stats struct {
 	// K3Mixes counts Kimi-K3 residual-attention mixes a device ran, and
 	// K3Latent its latent mixtures (k3.go).
 	K3Mixes, K3Latent int
+	// Q4EMixes counts Qwen3.8-Flash-Next hyper-connection mixes a device
+	// ran, and Q4ENGram its n-gram embeddings (q4e.go).
+	Q4EMixes, Q4ENGram int
 	// LinearBatched counts recurrent (linear-attention) blocks a batched chunk
 	// ran through the chunked delta rule (kernels.GatedDeltaScan) rather than
 	// one row at a time.
@@ -1146,6 +1149,8 @@ func (s *Stats) add(o Stats) {
 	s.DS4HC += o.DS4HC
 	s.K3Mixes += o.K3Mixes
 	s.K3Latent += o.K3Latent
+	s.Q4EMixes += o.Q4EMixes
+	s.Q4ENGram += o.Q4ENGram
 	s.LinearBatched += o.LinearBatched
 	s.LinearFused += o.LinearFused
 	s.RecShared += o.RecShared
@@ -2237,8 +2242,9 @@ func freeScratch(bs *blockScratch) {
 	bs.mlab.free()
 	bs.ds4.free()
 	bs.k3.free()
+	bs.q4e.free()
 	for n, rk := range bs.ragLin { // a map, which the walk does not follow either
-		for _, k := range []backend.Kernel{rk.conv, rk.shift, rk.delta} {
+		for _, k := range []backend.Kernel{rk.conv, rk.shift, rk.delta, rk.ngConv} {
 			if k != nil {
 				closeKern(k)
 			}
@@ -2330,10 +2336,10 @@ func (g *devTier) setRecSteps(sid uint64, n int) {
 
 // setInputs hands session sid's per-layer inputs and token ids to this device
 // for its next call (gpuSession.inputsTo).
-func (g *devTier) setInputs(sid uint64, ple []float32, ids []int32) {
+func (g *devTier) setInputs(sid uint64, ple []float32, ids []int32, ng []float32) {
 	g.mu.Lock()
 	ds := g.sessOf(sid)
-	ds.pleHost, ds.tokIDs = ple, ids
+	ds.pleHost, ds.tokIDs, ds.ngHost = ple, ids, ng
 	g.mu.Unlock()
 }
 

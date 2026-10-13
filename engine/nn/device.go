@@ -584,7 +584,8 @@ type K3Plan struct {
 // cached row (KVRow, padded to HeadDim) and attention reads the plan's
 // IdxTopK/QSARatio best blocks of QSARatio positions and the tail, the
 // indexer being IdxHeads heads of IdxHeadDim. On the n-gram block
-// (NGramWidth non-zero) the gathered table rows of each row
+// (NGramHere; NGramWidth is the model's, on every block, so a scratch built
+// for any block serves it) the gathered table rows of each row
 // (NGramDevice.SetNGramRows) are projected, gated per stream and convolved
 // over NGramConv taps NGramDil positions apart, the history the block's
 // recurrent tail (RecurrentPlan.TailLen). The head's mix is the host's.
@@ -594,6 +595,7 @@ type Q4EPlan struct {
 	NGramWidth        int
 	NGramConv         int
 	NGramDil          int
+	NGramHere         bool
 	// Fault breaks one piece of the graph on purpose, set only by a gate;
 	// the host honours the same faults (model's q4eFault).
 	Fault Q4EFault
@@ -976,7 +978,7 @@ type RecurrentPlan struct {
 	VHeads    int // value heads, and the number of decay rates
 	KDim      int // key/query head width, and the state's key extent
 	VDim      int // value head width, and the state's value extent
-	StateLen  int // VHeads*VDim*KDim floats, per sequence, CONSTANT in context
+	StateLen  int // VHeads*VDim*KDim floats and TailLen more, per sequence, CONSTANT in context
 	ConvState int // (Conv-1)*Chans floats, per sequence
 	// ChanDecay is Kimi Delta Attention rather than qwen3next's gated delta
 	// rule: the state decays at a rate per channel instead of one per head,
@@ -1018,10 +1020,10 @@ type RecurrentPlan struct {
 	// rule's is silu(z) (Qwen3.8-Flash-Next).
 	SigmoidGate bool
 	// TailLen is what the block's state carries per sequence after the delta
-	// rule's: Qwen3.8-Flash-Next's n-gram predecessors and convolution
-	// history on its n-gram block (model's recTailLen). A state migrated
-	// whole carries it: every sequence's delta-rule state first, then the
-	// tails.
+	// rule's, inside StateLen: room for Qwen3.8-Flash-Next's n-gram
+	// predecessors and convolution history (model's recTailLen), the same on
+	// every linear block so a device keeps one slot width. A sequence's slot
+	// is [delta rule | tail]; the delta rule's kernels step its head.
 	TailLen int
 	// Mamba1 is Mamba-1's selective scan (jlm.LayerMamba1): VHeads channels
 	// of one row each over a KDim-wide state, B and C shared, the decay a

@@ -281,6 +281,8 @@ type State struct {
 	// face (nn.TokenDevice).
 	ldInputs nn.LayerInputDevice
 	ldTokens nn.TokenDevice
+	// ldNGram is its n-gram face (nn.NGramDevice), Qwen3.8-Flash-Next's.
+	ldNGram nn.NGramDevice
 	// dmoe is Gemma 4's mixture block's scratch (Config.DenseMoE): the
 	// router's input and the mixture's sum, each NEmbd wide. See denseMoE.
 	dmoe [2][]float32
@@ -1642,8 +1644,9 @@ func (s *State) offerRange(lo, hi int) {
 	// A group the device took part of (a decline mid-group) comes home whole.
 	defer s.fixKVGroups()
 	c := s.c
-	// TEMPORARY: Qwen3.8-Flash-Next's blocks run on the host until the
-	// device carries its hyper-connections, QSA and n-gram embedding.
+	// Qwen3.8-Flash-Next's blocks stay on the host until the device path
+	// (tier's q4e.go) matches it: the hyper-connection and n-gram kernels are
+	// wired and run, and the answers do not agree yet; QSA has no kernels.
 	if c.Q4E() {
 		return
 	}
@@ -1973,7 +1976,7 @@ func (s *State) planFor(li int) *nn.LayerPlan {
 		plan.Recurrent = nn.RecurrentPlan{
 			Conv: g.conv, Chans: g.chans, KHeads: g.kHeads, VHeads: g.vHeads,
 			KDim: g.kDim, VDim: g.vDim,
-			StateLen: g.deltaStateLen(), ConvState: g.convStateLen(),
+			StateLen: g.stateStride(), ConvState: g.convStateLen(),
 			ChanDecay: c.ChanDecay(), KeyTiled: g.tiled,
 		}
 		if g.ssd {
@@ -4394,6 +4397,7 @@ func (s *State) setLD(ld nn.LayerDevice) {
 	s.ldNamed, _ = ld.(nn.NamedDevice)
 	s.ldInputs, _ = ld.(nn.LayerInputDevice)
 	s.ldTokens, _ = ld.(nn.TokenDevice)
+	s.ldNGram, _ = ld.(nn.NGramDevice)
 }
 
 // layerInputs hands the device the rows' per-layer embedding inputs for the

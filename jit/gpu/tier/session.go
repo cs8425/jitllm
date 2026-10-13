@@ -53,6 +53,8 @@ type gpuSession struct {
 	// ids their token ids (SetTokenIDs).
 	ple []float32
 	ids []int32
+	// ng is the rows' n-gram table rows (SetNGramRows).
+	ng []float32
 }
 
 // PlanBlocks forwards the placement's block count; see GPU.PlanBlocks.
