@@ -103,7 +103,9 @@ const forcedTools = `[{"type":"function","function":{"name":"get_weather","descr
 	`"parameters":{"type":"object","properties":{"location":{"type":"string","description":"City name"},` +
 	`"unit":{"type":"string","enum":["celsius","fahrenheit"]}},"required":["location"]}}},` +
 	`{"type":"function","function":{"name":"get_time","description":"Get the time in a time zone",` +
-	`"parameters":{"type":"object","properties":{"zone":{"type":"string"}},"required":["zone"]}}}]`
+	`"parameters":{"type":"object","properties":{"zone":{"type":"string"}},"required":["zone"]}}},` +
+	`{"type":"function","function":{"name":"get_stock_price","description":"Get a stock's last price",` +
+	`"parameters":{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}}}]`
 
 // forcedPrompt is a request no model answers with a call of its own accord.
 const forcedPrompt = `[{"role":"system","content":"You are a poet. Call a tool only when the user asks for the weather or the time."},{"role":"user","content":"Write one short sentence about the sea."}]`
@@ -157,15 +159,29 @@ func TestToolChoiceForcesACall(t *testing.T) {
 				}
 				return text.String(), calls, finish
 			}
-			// The violation arm: nothing forces a call, and the reply fails
-			// the named arm below -- text (Qwen3), or a call to the other
-			// tool (Llama 3.2 1B calls get_weather whatever it is asked). A
-			// model that called get_time here would leave the gate nothing
-			// to prove.
+			// The violation arm: nothing forces a call. The named arms below
+			// force a tool whose call the unforced reply does not already
+			// match: one it did not call, or, when it called every tool (Llama
+			// 3.2 1B calls each tool it is given whatever it is asked), one
+			// tool alone where it called several -- the named check holds
+			// every call to that one name. An unforced reply of exactly the
+			// forced call would leave the gate nothing to prove.
 			txt, calls, _ := oa(`,"tool_choice":"auto"`, false)
+			called := map[string]bool{}
 			for _, tc := range calls {
-				if tc.Function.Name == "get_time" {
-					t.Fatalf("unforced, the model called %+v: this prompt cannot show the constraint forcing get_time", calls)
+				called[tc.Function.Name] = true
+			}
+			forced := ""
+			for _, name := range []string{"get_time", "get_stock_price"} {
+				if !called[name] {
+					forced = name
+					break
+				}
+			}
+			if forced == "" {
+				forced = "get_time"
+				if len(called) < 2 {
+					t.Fatalf("unforced, the model called %+v: this prompt cannot show the constraint forcing %s", calls, forced)
 				}
 			}
 			t.Logf("auto: %q calls %+v", txt, calls)
@@ -188,8 +204,8 @@ func TestToolChoiceForcesACall(t *testing.T) {
 			}
 			txt, calls, fin := oa(`,"tool_choice":"required"`, false)
 			check("required", calls, fin, txt, "")
-			txt, calls, fin = oa(`,"tool_choice":{"type":"function","function":{"name":"get_time"}}`, false)
-			check("named get_time", calls, fin, txt, "get_time")
+			txt, calls, fin = oa(`,"tool_choice":{"type":"function","function":{"name":"`+forced+`"}}`, false)
+			check("named "+forced, calls, fin, txt, forced)
 			txt, calls, fin = oa(`,"tool_choice":{"type":"function","function":{"name":"get_weather"}}`, true)
 			check("named get_weather, streamed", calls, fin, txt, "get_weather")
 			for i, tc := range calls {
@@ -203,7 +219,9 @@ func TestToolChoiceForcesACall(t *testing.T) {
 				`{"name":"get_weather","description":"Get the current weather for a city","input_schema":`+
 				`{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}},`+
 				`{"name":"get_time","description":"Get the time in a time zone","input_schema":`+
-				`{"type":"object","properties":{"zone":{"type":"string"}},"required":["zone"]}}]`, forcedPrompt)
+				`{"type":"object","properties":{"zone":{"type":"string"}},"required":["zone"]}},`+
+				`{"name":"get_stock_price","description":"Get a stock's last price","input_schema":`+
+				`{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}}]`, forcedPrompt)
 			status, b := postRaw(t, c.url+"/v1/messages", an+`,"tool_choice":{"type":"any"}}`)
 			var ar anResponse
 			if status != 200 || json.Unmarshal([]byte(b), &ar) != nil {
@@ -220,7 +238,7 @@ func TestToolChoiceForcesACall(t *testing.T) {
 				t.Fatalf("anthropic any: %s", b)
 			}
 			resp, err := http.Post(c.url+"/v1/messages", "application/json",
-				strings.NewReader(an+`,"stream":true,"tool_choice":{"type":"tool","name":"get_time"}}`))
+				strings.NewReader(an+`,"stream":true,"tool_choice":{"type":"tool","name":"`+forced+`"}}`))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -250,7 +268,7 @@ func TestToolChoiceForcesACall(t *testing.T) {
 				}
 			}
 			resp.Body.Close()
-			if name != "get_time" || stop != "tool_use" {
+			if name != forced || stop != "tool_use" {
 				t.Fatalf("anthropic named, streamed: tool %q stop %q", name, stop)
 			}
 			validArgs(t, "anthropic named", name, js)
