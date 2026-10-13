@@ -323,7 +323,7 @@ func (s *cudaSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
 	if err := checkWidth("ptx", ck.name, ck.group, width); err != nil {
 		return err
 	}
-	if err := checkGrid("ptx", ck.name, ck.src, groups, ck.resident, ck.residentErr); err != nil {
+	if err := checkGrid("ptx", ck.name, ck.grid, groups, ck.resident, ck.residentErr); err != nil {
 		return err
 	}
 	m := ck.m
@@ -1144,6 +1144,7 @@ type cudaKern struct {
 	// co-residency limit when it has a grid barrier (GridLimit).
 	src         *ir.Kernel
 	resident    int
+	grid        bool // src has a grid barrier: decided once at compile, read by every launch
 	residentErr error
 	// res is what the driver reported for this compile (resOK false where it
 	// would not say); see KernelResourcesOf.
@@ -1172,7 +1173,7 @@ func (k *cudaKern) Launch(groups, width int, bufs ...Buf) error {
 	if err := checkWidth("ptx", k.name, k.group, width); err != nil {
 		return err
 	}
-	if err := checkGrid("ptx", k.name, k.src, groups, k.resident, k.residentErr); err != nil {
+	if err := checkGrid("ptx", k.name, k.grid, groups, k.resident, k.residentErr); err != nil {
 		return err
 	}
 	cb := make([]*cuda.Buffer, len(bufs))

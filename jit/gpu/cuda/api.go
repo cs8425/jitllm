@@ -469,11 +469,9 @@ type Module struct {
 	Coop bool
 }
 
-// maxArgs bounds a kernel's parameter list. The widest per-op kernel is
-// kernels.MatVecSegments over q, k and v with biases, at 17; a persistent
-// kernel composed from a block's launches (ir.Persist) takes every buffer
-// they bind.
-const maxArgs = 64
+// maxArgs bounds a kernel's parameter list. The widest generated kernel is
+// kernels.MatVecSegments over q, k and v with biases, at 17.
+const maxArgs = 24
 
 // Load compiles PTX and looks up the entry point.
 //

@@ -41,8 +41,8 @@ func IROf(k Kernel) *ir.Kernel {
 // checkGrid refuses a launch of a grid-barrier kernel wider than the device
 // holds resident -- RULE 13's kind of invariant, enforced where the grid is
 // known rather than trusted to the caller.
-func checkGrid(api, name string, k *ir.Kernel, groups, limit int, limitErr error) error {
-	if k == nil || !k.GridSync() {
+func checkGrid(api, name string, grid bool, groups, limit int, limitErr error) error {
+	if !grid {
 		return nil
 	}
 	if limitErr != nil {
