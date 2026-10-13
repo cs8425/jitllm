@@ -107,11 +107,11 @@ Each of these is a way a row has gone wrong before (RULE 1):
   An engine that compiles or captures graphs on first use (vLLM, SGLang,
   jitllm's tuners) has to be past that before a round is timed.
 
-Starting each engine, one model, port 8080:
+Starting each engine, one model (jitllmd on its default port 4242, the others on 8080):
 
     # jitllmd
     ./scripts/cap 24G -- taskset -c 0,2,4,6,8,10 \
-      jitllmd serve -addr :8080 -models $JITLLM_MODELS -load model.jlm -id model -max-batch 64
+      jitllmd serve -addr 127.0.0.1:4242 -models $JITLLM_MODELS -load model.jlm -id model -max-batch 64
 
     # llama.cpp
     ./scripts/cap 24G -- taskset -c 0,2,4,6,8,10 \
@@ -132,13 +132,13 @@ Starting each engine, one model, port 8080:
 
 A single endpoint, a sweep:
 
-    go run ./dev/httpbench -arm jitllm=http://127.0.0.1:8080 -model model \
+    go run ./dev/httpbench -arm jitllm=http://127.0.0.1:4242 -model model \
       -c 1,2,4,8,16,32,64 -max-tokens 128 -prompt-lens 128,512 -o jitllm.json
 
 **The A/A self-control first (RULE 2).** One endpoint as two arms, on the
 harness and box the A/B will use:
 
-    go run ./dev/httpbench -aa -arm jitllm=http://127.0.0.1:8080 -model model \
+    go run ./dev/httpbench -aa -arm jitllm=http://127.0.0.1:4242 -model model \
       -rounds 8 -c 1,8,32
 
 Every ratio must read 1.0 inside its IQR. If it does not, this harness cannot
@@ -148,7 +148,7 @@ Then the comparison, two servers up at once on different ports (each
 idle while the other is measured, since a round runs one arm, then the
 other):
 
-    go run ./dev/httpbench -arm jitllm=http://127.0.0.1:8080 -arm llama=http://127.0.0.1:8081 \
+    go run ./dev/httpbench -arm jitllm=http://127.0.0.1:4242 -arm llama=http://127.0.0.1:8081 \
       -model model -rounds 8 -c 1,8,32
 
 Rounds are interleaved per level (A B A B ...), each round sends the same
@@ -186,7 +186,7 @@ process, so their arm is **one server per model on the same box, under the
 same cgroup memory limit** as the jitllm arm, each routed:
 
     go run ./dev/httpbench \
-      -arm jitllm=http://127.0.0.1:8080 -arm vllm=http://127.0.0.1:9000 \
+      -arm jitllm=http://127.0.0.1:4242 -arm vllm=http://127.0.0.1:9000 \
       -model small:3 -model big:1 \
       -route vllm/small=http://127.0.0.1:9000#Qwen3-0.6B \
       -route vllm/big=http://127.0.0.1:9001#Qwen3-8B \

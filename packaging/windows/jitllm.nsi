@@ -19,7 +19,7 @@
 ;     scripts/install.ps1 uses too, so either replaces the other's copy);
 ;   - that directory goes on the user PATH (optional, on by default);
 ;   - Start menu shortcuts for the desktop app and the uninstaller;
-;   - optionally, jitllmd starts at login on 127.0.0.1:8080, over the desktop
+;   - optionally, jitllmd starts at login on localhost:4242, over the desktop
 ;     app's model folder, with no console window;
 ;   - an Add/Remove Programs entry whose uninstaller undoes each of these.
 ;
@@ -127,7 +127,7 @@ SectionEnd
 
 ; `jitllmd service install` writes the login entry: a script in
 ; %LOCALAPPDATA%\jitllm that starts jitllmd hidden (window style 0, so the
-; console program opens no window) on 127.0.0.1:8080 over the models folder,
+; console program opens no window) on localhost:4242 over the models folder,
 ; logging to jitllmd.log beside it, and the Run key value that runs it. It
 ; starts the server now too. `jitllmd service` manages it afterwards.
 Section /o "Start the server at login" SecLogin

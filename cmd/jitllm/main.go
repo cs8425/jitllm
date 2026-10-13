@@ -1456,6 +1456,7 @@ func runCmd(args []string) error {
 	spec := addSpecFlags(fs)
 	addr := fs.String("addr", localserver.DefaultAddr,
 		"the jitllmd a model NAME is run through when one answers there (see -embedded)")
+	apiKey := fs.String("api-key", "", "the API key the jitllmd wants, if it has one (default: $JITLLM_API_KEY)")
 	embedded := fs.Bool("embedded", false,
 		"run in this process even when a jitllmd answers; a path, or any flag about this process's engine, does too")
 	if err := fs.Parse(args); err != nil {
@@ -1500,12 +1501,12 @@ func runCmd(args []string) error {
 	} else if *system != "" {
 		return fmt.Errorf("-system needs -chat: without a template there is no system turn to put it in")
 	}
-	svc, path, err := runTarget(context.Background(), fs.Arg(0), *addr, *embedded, engineFlags(fs, remoteFlags), os.Stderr)
+	svc, path, err := runTarget(context.Background(), fs.Arg(0), *addr, keyOf(*apiKey), *embedded, engineFlags(fs, remoteFlags), os.Stderr)
 	if err != nil {
 		return err
 	}
 	if svc != nil {
-		r := newRemoteRun(*addr, fs.Arg(0), *n, *system, fs, samplingFlags{temp: *temp, topP: *topP,
+		r := newRemoteRun(svc.Addr, keyOf(*apiKey), fs.Arg(0), *n, *system, fs, samplingFlags{temp: *temp, topP: *topP,
 			minP: *minP, repPen: *repPen, topK: *topK, seed: *seed})
 		if interactive {
 			return r.repl(os.Stdin, os.Stdout)

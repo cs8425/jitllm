@@ -3,9 +3,9 @@
 // more endpoints run as interleaved arms. docs/perf/http-bench.md is how to
 // set each engine up for a fair arm.
 //
-//	go run ./dev/httpbench -arm jitllm=http://127.0.0.1:8080 -model stories15M
-//	go run ./dev/httpbench -arm jitllm=http://a:8080 -arm llama=http://b:8081 -rounds 8
-//	go run ./dev/httpbench -aa -arm jitllm=http://a:8080 -rounds 8   # A/A self-control
+//	go run ./dev/httpbench -arm jitllm=http://127.0.0.1:4242 -model stories15M
+//	go run ./dev/httpbench -arm jitllm=http://a:4242 -arm llama=http://b:8081 -rounds 8
+//	go run ./dev/httpbench -aa -arm jitllm=http://a:4242 -rounds 8   # A/A self-control
 //	go run ./dev/httpbench -config run.json                          # hb.Config as JSON
 package main
 

@@ -164,7 +164,7 @@ prompt store a Speculator does not use).
 
 | `jitllmd` verb | What it does |
 |---|---|
-| `serve` | run the daemon (`-addr`, `-models`, `-load`, `-id`, `-devices`, `-maxmem`, `-max-batch`, `-max-queue`, `-kv-cache`; `jitllmd serve -h` lists every flag) |
+| `serve` | run the daemon (`-addr`, `-api-key`, `-allow-origin`, `-models`, `-load`, `-id`, `-devices`, `-maxmem`, `-max-batch`, `-max-queue`, `-kv-cache`; `jitllmd serve -h` lists every flag) |
 | `run` | stream a generation from a running daemon |
 | `models` | list, describe, load and unload models (`-unload ID -force` closes sessions holding it instead of refusing) |
 | `devices` | the hardware and the memory that is actually spendable |
@@ -172,6 +172,41 @@ prompt store a Speculator does not use).
 | `place` | read and move the CPU/device seam and the pager budget |
 | `stats` | engine counters, once or streamed (`-watch`) |
 | `service` | `install`, `uninstall`, `start`, `stop`, `status`: jitllmd as this person's background service |
+
+## Who can reach it
+
+The server is for the machine it runs on until told otherwise.
+
+- **Address.** `-addr` defaults to `localhost:4242`, loopback only: the server
+  listens on `127.0.0.1:4242` and `[::1]:4242` (the second where the host has IPv6), so
+  a client that resolves `localhost` to either reaches it, and never on `0.0.0.0` or
+  `::`. Clients dial `localhost` at its loopback addresses only. An address
+  with no host (`:4242`) or a non-loopback one opens the server to the network;
+  `serve` then prints a warning unless an API key is set.
+- **API key.** `-api-key KEY` (or `JITLLM_API_KEY`, which only the command
+  reads) makes every route but `/healthz` and `/health` require
+  `Authorization: Bearer KEY`; `/v1/messages` also takes `x-api-key: KEY`, as
+  the Anthropic SDKs send it. The key is compared in constant time. A refusal
+  is a 401 in each API's own error shape: `{"error": {"code": "invalid_api_key",
+  ...}}` on the OpenAI routes, `{"type": "error", "error": {"type":
+  "authentication_error", ...}}` on `/v1/messages`, and
+  `{"code": "unauthenticated", ...}` on the Connect routes.
+- **Host header.** Bound to loopback, the server answers only requests whose
+  `Host` is its own address, `localhost`, `127.0.0.1` or `[::1]`: a web page that
+  points its own DNS name at `127.0.0.1` (DNS rebinding) gets a 403.
+- **Origin.** A browser sends an `Origin` header; a request whose origin is
+  not a loopback one is refused with a 403 unless `-allow-origin` lists it
+  (`-allow-origin https://app.example.com`), which also answers its CORS
+  preflight. Clients that send no `Origin` (the SDKs, curl, the jitllm
+  programs) are unaffected.
+
+The clients send the key when they have one: `jitllm` and `jitllmd` verbs take
+`-api-key` (default `JITLLM_API_KEY`); the window and the terminal app read
+`service_key` (the key to ask a jitllmd with) and `api_key` (the key their own
+API requires) from the settings file, and `JITLLM_API_KEY` for either. Both
+settings screens have a masked field for each (with a show toggle); a blank field
+is no key, and the file is written private (mode 0600). The settings file records
+an address only when you type one: empty means the default.
 
 ## The native API and the OpenAI routes
 
@@ -258,10 +293,20 @@ The same is `ModelService.SetModelOptions` on the Connect API, and
 
 ## The service
 
-`jitllmd service install` runs `jitllmd serve -addr 127.0.0.1:8080 -models
+`jitllmd service install` runs `jitllmd serve -addr localhost:4242 -models
 <the models folder>` in the background, now and at every login, restarted
 after a crash and not after a clean stop. Loopback only: nothing is opened to
-the network unless `-addr` says so.
+the network unless `-addr` says so. `jitllmd service install -api-key KEY`
+(default `JITLLM_API_KEY`) writes the key into the service's arguments, in a
+file only the user can read.
+
+A service installed by an earlier release listens on `127.0.0.1:8080` and keeps
+doing so: only `jitllmd service install` rewrites the unit. Clients that find
+nothing on `localhost:4242` look at `127.0.0.1:8080` too, and use a jitllmd
+that answers there (an open port is not enough: it must return the capability
+manifest, or `ServerInfo`). They say once that the service runs on the old
+port; `jitllmd service install` moves it to `localhost:4242`. An address given
+with `-addr` or in the settings is never swapped for the old one.
 
 | System | What runs it | Log |
 |---|---|---|

@@ -54,7 +54,7 @@ func cmdPlace(ctx context.Context, c cli, args []string) error {
 		return usagef("place: -session and -model address different halves of this service; " +
 			"give one")
 	}
-	cn, err := dial(*addr)
+	cn, err := target(ctx, c, fs, *addr)
 	if err != nil {
 		return err
 	}

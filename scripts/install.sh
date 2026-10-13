@@ -20,7 +20,7 @@
 #   JITLLM_NO_SERVICE   set to skip the service, as --no-service does
 #
 # On Linux, installing jitllmd also installs it as a systemd user service on
-# 127.0.0.1:8080 (`jitllmd service install`); --no-service skips that.
+# localhost:4242 (`jitllmd service install`); --no-service skips that.
 set -eu
 
 repo=jitllm/jitllm
@@ -139,7 +139,7 @@ case ":$PATH:" in
 esac
 
 # On Linux, jitllmd runs as this person's systemd user service on
-# 127.0.0.1:8080, as the Mac app and the Windows installer start it at login.
+# localhost:4242, as the Mac app and the Windows installer start it at login.
 # --no-service or JITLLM_NO_SERVICE=1 skips it; `jitllmd service install`
 # does it later. As root there is no person's session to start it in.
 case " $progs " in *" jitllmd "*) has_server=yes ;; *) has_server=no ;; esac

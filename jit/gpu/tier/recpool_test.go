@@ -48,9 +48,10 @@ func TestRecurrentPoolReturnsEveryByte(t *testing.T) {
 		case d.reads != 0:
 			t.Fatalf("%s: %d read(s), %d bytes, to the host: a pool's resize must carry its states "+
 				"on the device", when, d.reads, d.readBytes)
-		case d.copyBytes != want || dt.RecCarryBytes != uint64(want):
-			t.Fatalf("%s: %d bytes copied on the device (RecCarryBytes %d), want %d -- %d seat(s) "+
-				"carried in two pools", when, d.copyBytes, dt.RecCarryBytes, want, seats)
+		case d.copyBytes != want+int(dt.RecZeroBytes) || dt.RecCarryBytes != uint64(want):
+			t.Fatalf("%s: %d bytes copied on the device (RecCarryBytes %d, RecZeroBytes %d), want %d "+
+				"carried -- %d seat(s) in two pools -- beside the zeroing", when, d.copyBytes,
+				dt.RecCarryBytes, dt.RecZeroBytes, want, seats)
 		}
 	}
 
@@ -97,9 +98,9 @@ func TestRecurrentPoolReturnsEveryByte(t *testing.T) {
 	check("three sessions", 3, map[uint64]int{1: 0, 2: 1, 3: 2})
 	// The second arrival carried one seat across, the third two (one run).
 	carried("three sessions", 1+2)
-	if d.copies != 2*4*2 {
-		t.Fatalf("%d device copies, want 16: two resizes of two pools, four buffers each, "+
-			"each seat run one copy", d.copies)
+	if d.copies-int(dt.RecZeroCopies) != 2*4*2 {
+		t.Fatalf("%d device copies beside %d zeroings, want 16: two resizes of two pools, four buffers each, "+
+			"each seat run one copy", d.copies, dt.RecZeroCopies)
 	}
 	// The top seat leaving shrinks every pool; one from the middle frees its
 	// slot for the next arrival.
@@ -116,7 +117,7 @@ func TestRecurrentPoolReturnsEveryByte(t *testing.T) {
 	attach(4)
 	check("a seat reused", 2, map[uint64]int{2: 1, 4: 0})
 	// A batch of three grows its seat into a run of its own.
-	w0 = d.writeBytes
+	w0, z0, s0 := d.writeBytes, dt.RecZeroBytes, dt.RecZeroSource
 	if !dt.growSeat(4, 3) {
 		t.Fatalf("growSeat: %s", dt.LastErr)
 	}
@@ -131,10 +132,15 @@ func TestRecurrentPoolReturnsEveryByte(t *testing.T) {
 	// while it holds a live state), so three seats' worth moves. The host
 	// zeroes the four slots the carry does not fill, and the new seat once
 	// more as it is taken: seven slots in each pool, not the whole of either.
+	// A seat's zeroing copies from zeros uploaded once a call
+	// (recZeroLayers) where the resize writes its slots from the host: the
+	// two together are the seven slots.
 	carried("a batch grown", 5+1+2)
-	if up, want := d.writeBytes-w0, 2*7*int(slot); up != want {
-		t.Fatalf("growing a seat to a batch of three uploaded %d bytes, want %d -- the slots no "+
-			"carry fills and the new seat, not the pools", up, want)
+	host := d.writeBytes - w0 - int(dt.RecZeroSource-s0)
+	if zb, want := host+int(dt.RecZeroBytes-z0), 2*7*int(slot); zb != want {
+		t.Fatalf("growing a seat to a batch of three zeroed %d bytes (%d from the host, %d on the "+
+			"device), want %d -- the slots no carry fills and the new seat, not the pools",
+			zb, host, dt.RecZeroBytes-z0, want)
 	}
 	dt.dropSession(4)
 	check("the batch left", 2, map[uint64]int{2: 1})

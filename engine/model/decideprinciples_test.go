@@ -81,6 +81,7 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 			// moved runs the prompt with the blocks onto g at a and home at b;
 			// lose clears the recurrent summaries just before they would go,
 			// the violation: a migration that carried nothing.
+			headHome := false
 			moved := func(t *testing.T, g *tier.GPU, lose bool) ([]float32, int) {
 				d.st.Reset()
 				if _, err := d.st.Prefill(ids[:a]); err != nil {
@@ -99,6 +100,7 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 				if placed == 0 {
 					t.Fatalf("%s took no block: %v", g.Name(), g.Err())
 				}
+				headHome = d.st.headReady == nil
 				if _, err := d.st.Prefill(ids[a:b]); err != nil {
 					t.Fatal(err)
 				}
@@ -120,6 +122,36 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 					w = math.Max(w, math.Abs(float64(got[i]-host[i])))
 				}
 				return w
+			}
+			// Under a budget that holds a few blocks and not the head as
+			// well, placeHead gives blocks back for the head's room after
+			// their history went up: each must take it home first, and a
+			// block restored must take it up again. Before that fix a block
+			// so given back lost its recurrent summary (lev: a label logit
+			// 8.1 off on a V100 at 1200 MiB, worse than losing every summary).
+			// Selected (RULE 10): at least one budget must leave the head home
+			// with blocks placed, the case that walks the release.
+			budgeted := 0
+			for _, mb := range []uint64{500, 700, 900, 1200, 1600, 2400} {
+				g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(stepDevices()[0]),
+					tier.WithDeviceTune(tier.TuneOff), tier.WithBudget(mb << 20)}, testTierOpts(t)...)...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, placed := moved(t, g, false)
+				w := worst(got)
+				if headHome && placed > 0 {
+					budgeted++
+				}
+				g.Close()
+				t.Logf("budget %d MiB: %d blocks onto the device at token %d and home at %d (worst %.4f)", mb, placed, a, b, w)
+				if tol := decisionRelocTol[c.name]; !(w <= tol) {
+					t.Errorf("relocated mid-prompt under a %d MiB budget, a label logit moved %.4f from the host's (bound %.2f)",
+						mb, w, tol)
+				}
+			}
+			if budgeted == 0 {
+				t.Errorf("no budget left the head at home with blocks placed: the release for the head's room never ran")
 			}
 			for _, g := range gpus {
 				t.Run(g.Name(), func(t *testing.T) {

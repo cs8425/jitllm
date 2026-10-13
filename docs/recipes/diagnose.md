@@ -24,14 +24,14 @@ jitllm convert stories260K.gguf models/stories260K.jlm
 
 <!-- test: background -->
 ```sh
-jitllmd serve -addr 127.0.0.1:8080 -models models -load stories260K.jlm -devices cpu
+jitllmd serve -addr 127.0.0.1:4242 -models models -load stories260K.jlm -devices cpu
 ```
 
 ## 1. Is it up, and what is loaded?
 
 ```sh
-for i in $(seq 60); do curl -sf http://127.0.0.1:8080/healthz && break; sleep 1; done
-jitllmd models -addr 127.0.0.1:8080
+for i in $(seq 60); do curl -sf http://127.0.0.1:4242/healthz && break; sleep 1; done
+jitllmd models -addr 127.0.0.1:4242
 ```
 <!-- test: expect ok -->
 <!-- test: expect loaded (1) -->
@@ -47,14 +47,14 @@ server will not run as asked, 404 for a model that is neither loaded nor in the 
 model's queue is full (with `Retry-After`), 500 for an engine failure.
 
 ```sh
-curl -s -w '\nHTTP %{http_code}\n' http://127.0.0.1:8080/v1/completions -H 'Content-Type: application/json' \
+curl -s -w '\nHTTP %{http_code}\n' http://127.0.0.1:4242/v1/completions -H 'Content-Type: application/json' \
   -d '{"model":"no-such-model","prompt":"x"}'
 ```
 <!-- test: expect no model \"no-such-model\" is loaded or in the models folder -->
 <!-- test: expect HTTP 404 -->
 
 ```sh
-curl -s -w '\nHTTP %{http_code}\n' http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' \
+curl -s -w '\nHTTP %{http_code}\n' http://127.0.0.1:4242/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"stories260K","messages":[{"role":"user","content":"hi"}]}'
 ```
 <!-- test: expect carries no chat template -->
@@ -77,7 +77,7 @@ jitllmd serve -addr 127.0.0.1:8081 -models models -load stories260K.gguf -device
 ## 3. A slow request: read the reply's `jitllm` object
 
 ```sh
-curl -s http://127.0.0.1:8080/v1/completions -H 'Content-Type: application/json' \
+curl -s http://127.0.0.1:4242/v1/completions -H 'Content-Type: application/json' \
   -d '{"model":"stories260K","prompt":"Once upon a time","max_tokens":16,"temperature":0}'
 ```
 <!-- test: expect "host_blocks":5 -->
@@ -94,7 +94,7 @@ curl -s http://127.0.0.1:8080/v1/completions -H 'Content-Type: application/json'
 ## 4. Where memory went
 
 ```sh
-jitllmd stats -addr 127.0.0.1:8080
+jitllmd stats -addr 127.0.0.1:4242
 ```
 <!-- test: expect page-in(s) -->
 
@@ -116,7 +116,7 @@ budgets and device placement](memory-and-placement.md) changes them.
 | Symptom | First look | Usual cause |
 |---|---|---|
 | connection refused | the server's terminal | it exited at load; the reason is its last line |
-| 404 | `curl http://127.0.0.1:8080/v1/models` | the `model` field names an id that is not loaded |
+| 404 | `curl http://127.0.0.1:4242/v1/models` | the `model` field names an id that is not loaded |
 | 400 | the error message | a field or combination the server refuses by name |
 | 429 | `queue_depth_on_entry` on the replies that did get in | more concurrent requests than `-max-queue` |
 | slow first token | `prefill_ms`, `queued_ms` | a long prompt, a queue, or a cold device on its first request |

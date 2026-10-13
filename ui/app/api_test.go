@@ -29,8 +29,8 @@ func TestTheBadgeFollowsTheAPI(t *testing.T) {
 	if got := badge.Get(); got != "Embedded · API off" {
 		t.Fatalf("API off, badge %q", got)
 	}
-	sh.Store.Engine.Set(core.Where{Service: true, Addr: "127.0.0.1:8080", Version: "1.0"})
-	if got := badge.Get(); got != "Service · 127.0.0.1:8080 (jitllmd 1.0)" {
+	sh.Store.Engine.Set(core.Where{Service: true, Addr: "localhost:4242", Version: "1.0"})
+	if got := badge.Get(); got != "Service · localhost:4242 (jitllmd 1.0)" {
 		t.Fatalf("connected, badge %q", got)
 	}
 }

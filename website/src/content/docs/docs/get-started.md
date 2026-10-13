@@ -30,10 +30,10 @@ When the jitllm service is running, `run` goes through it: the service loads the
 
 ## 3. The service
 
-The Linux install script installs `jitllmd` as a systemd user service on `127.0.0.1:8080`, and the macOS app and the Windows installer offer to start it at login. On any of them:
+The Linux install script installs `jitllmd` as a systemd user service on `localhost:4242`, and the macOS app and the Windows installer offer to start it at login. On any of them:
 
 ```sh
-jitllmd service install   # start it now and at every login, on 127.0.0.1:8080
+jitllmd service install   # start it now and at every login, on localhost:4242
 jitllmd service status    # address, version, models folder, loaded models
 ```
 
@@ -42,17 +42,17 @@ Every model in the models folder is available to it by file name or alias, loade
 ## 4. Send it a request
 
 ```sh
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://localhost:4242/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-30b-a3b","messages":[{"role":"user","content":"Why is the sky blue?"}],"stream":true}'
 ```
 
-Any OpenAI client works with the base URL `http://127.0.0.1:8080/v1`:
+Any OpenAI client works with the base URL `http://localhost:4242/v1`:
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:4242/v1", api_key="unused")
 for chunk in client.chat.completions.create(
     model="qwen3-30b-a3b",
     messages=[{"role": "user", "content": "Why is the sky blue?"}],

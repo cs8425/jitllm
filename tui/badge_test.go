@@ -42,8 +42,8 @@ func TestTheStatusBarAlwaysSaysWhichEngine(t *testing.T) {
 	if f := footerOf(r); !strings.Contains(f, "Embedded · API on :") {
 		t.Errorf("API on, the badge says %q", f)
 	}
-	r.env.where = engine.Where{Service: true, Addr: "127.0.0.1:8080", Version: "1.2.3"}
-	if f := footerOf(r); !strings.Contains(f, "Service · 127.0.0.1:8080 (jitllmd 1.2.3)") {
+	r.env.where = engine.Where{Service: true, Addr: "localhost:4242", Version: "1.2.3"}
+	if f := footerOf(r); !strings.Contains(f, "Service · localhost:4242 (jitllmd 1.2.3)") {
 		t.Errorf("connected, the badge says %q", f)
 	}
 }

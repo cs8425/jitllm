@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
+	"github.com/jitllm/jitllm/common/api"
 	"github.com/jitllm/jitllm/common/hardware"
 	"github.com/jitllm/jitllm/common/session"
 )
@@ -27,12 +28,16 @@ type settingsPage struct {
 // draft is the settings as the form edits them: text for every number, so a
 // half-typed value is the form's to validate rather than lost.
 type draft struct {
-	chat, kvCache     bool
-	api               bool
-	apiAddr           string
-	system, spec, ctx string
-	knobs             []string
-	seed, folders     string
+	chat, kvCache bool
+	api           bool
+	apiAddr       string
+	// serviceKey is the key to ask a jitllmd with, apiKey the one this app's
+	// own API requires; showKeys unmasks both. Blank is no key.
+	serviceKey, apiKey string
+	showKeys           bool
+	system, spec, ctx  string
+	knobs              []string
+	seed, folders      string
 }
 
 func newSettingsPage(env *env) *settingsPage {
@@ -67,6 +72,7 @@ func (p *settingsPage) rebuild() {
 	cfg := p.env.cfg
 	d := &draft{
 		chat: cfg.Chat, kvCache: !cfg.NoKVCache, api: cfg.API, apiAddr: cfg.APIAddr,
+		serviceKey: cfg.ServiceKey, apiKey: cfg.APIKey,
 		system: cfg.System, spec: cfg.DeviceSpec, ctx: strconv.Itoa(cfg.MaxSeq),
 		seed: strconv.FormatInt(cfg.Sampling.Seed, 10), folders: strings.Join(cfg.ModelDirs, "\n"),
 	}
@@ -127,14 +133,23 @@ func (p *settingsPage) rebuild() {
 			}),
 			huh.NewConfirm().Title("API").Description("serve the OpenAI, Anthropic and Connect API while this app runs").
 				Affirmative("on").Negative("off").Value(&d.api),
-			huh.NewInput().Title("API address").Description("host:port · 127.0.0.1 keeps it on this machine").
+			huh.NewInput().Title("API address").Description("host:port · empty is the default, "+api.DefaultAddr+", this machine only").
 				Value(&d.apiAddr).Validate(func(s string) error {
+				if strings.TrimSpace(s) == "" {
+					return nil
+				}
 				if _, _, err := net.SplitHostPort(strings.TrimSpace(s)); err != nil {
-					return errors.New("host:port, e.g. 127.0.0.1:8080")
+					return errors.New("host:port, e.g. localhost:4242")
 				}
 				return nil
 			}),
+			huh.NewConfirm().Title("Show API keys").Description("unmask the two key fields that follow").
+				Affirmative("show").Negative("hide").Value(&d.showKeys),
 		).Title("Engine"),
+		// The same two values twice, masked and plain; the toggle above picks
+		// which group is on screen.
+		keyGroup(d, true),
+		keyGroup(d, false),
 		huh.NewGroup(knobs...).Title("Sampling"),
 	).WithTheme(theme()).WithShowHelp(false).WithLayout(huh.LayoutColumns(3))
 	p.form.SubmitCmd = func() tea.Msg { return settingsDoneMsg{} }
@@ -182,6 +197,7 @@ func (p *settingsPage) apply() tea.Cmd {
 	cfg.ModelDirs = dirs
 	p.env.dirs = dirs
 	cfg.API, cfg.APIAddr = d.api, strings.TrimSpace(d.apiAddr)
+	cfg.ServiceKey, cfg.APIKey = strings.TrimSpace(d.serviceKey), strings.TrimSpace(d.apiKey)
 	msg := "settings saved"
 	if s := p.env.syncAPI(); s != "" {
 		msg += " · " + s
@@ -191,6 +207,21 @@ func (p *settingsPage) apply() tea.Cmd {
 		cmds = append(cmds, rescan())
 	}
 	return tea.Batch(cmds...)
+}
+
+// keyGroup is the two key fields, masked or plain. Exactly one of the pair is
+// shown, by the draft's showKeys.
+func keyGroup(d *draft, masked bool) *huh.Group {
+	mode := huh.EchoModeNormal
+	if masked {
+		mode = huh.EchoModePassword
+	}
+	return huh.NewGroup(
+		huh.NewInput().Title("Key for the service").EchoMode(mode).Value(&d.serviceKey).
+			Description("sent to a jitllmd that was started with -api-key · blank is none · next start"),
+		huh.NewInput().Title("Key for this app's API").EchoMode(mode).Value(&d.apiKey).
+			Description("required of clients of the API above · blank is none"),
+	).Title("API keys").WithHideFunc(func() bool { return d.showKeys == masked })
 }
 
 func (p *settingsPage) Help() []key.Binding {

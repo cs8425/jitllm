@@ -18,11 +18,11 @@ jitllm convert -o models qwen3-0.6b
 
 <!-- test: background -->
 ```sh
-jitllmd serve -addr 127.0.0.1:8080 -models models -load Qwen3-0.6B-Q8_0.jlm -id qwen3-0.6b -devices cpu
+jitllmd serve -addr 127.0.0.1:4242 -models models -load Qwen3-0.6B-Q8_0.jlm -id qwen3-0.6b -devices cpu
 ```
 
 ```sh
-for i in $(seq 60); do curl -sf http://127.0.0.1:8080/healthz && break; sleep 1; done
+for i in $(seq 60); do curl -sf http://127.0.0.1:4242/healthz && break; sleep 1; done
 ```
 <!-- test: expect ok -->
 
@@ -33,7 +33,7 @@ held to the model's own tool-call syntax around that function's parameter
 schema, so the arguments always parse.
 
 ```sh
-curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+curl -s http://127.0.0.1:4242/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model": "qwen3-0.6b", "max_tokens": 200, "temperature": 0,
   "messages": [{"role": "user", "content": "What is the weather in Paris? /no_think"}],
   "tools": [{"type": "function", "function": {
@@ -65,7 +65,7 @@ Send the call's result back as a `tool` message, and the model answers with it:
 import json
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="unused")
+client = OpenAI(base_url="http://127.0.0.1:4242/v1", api_key="unused")
 tools = [{"type": "function", "function": {
     "name": "get_weather", "description": "Current weather for a city",
     "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]
@@ -94,7 +94,7 @@ print(final.choices[0].message.content)
 schema, and the reply ends where the schema does:
 
 ```sh
-curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+curl -s http://127.0.0.1:4242/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model": "qwen3-0.6b", "max_tokens": 64, "temperature": 0,
   "messages": [{"role": "user", "content": "Give me a person. /no_think"}],
   "response_format": {"type": "json_schema", "json_schema": {"name": "person", "schema": {
@@ -110,7 +110,7 @@ A schema keyword the grammar builder does not support is refused by name, not
 ignored:
 
 ```sh
-curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+curl -s http://127.0.0.1:4242/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model": "qwen3-0.6b", "messages": [{"role": "user", "content": "x"}],
   "response_format": {"type": "json_schema", "json_schema": {"name": "p",
     "schema": {"type": "string", "pattern": "a+"}}}}'

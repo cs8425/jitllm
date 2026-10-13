@@ -23,6 +23,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jitllm/jitllm/common/config"
 	"github.com/jitllm/jitllm/common/engine"
+	"github.com/jitllm/jitllm/internal/localserver"
 	"github.com/muesli/termenv"
 )
 
@@ -30,7 +31,8 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "demo" {
 		os.Exit(runDemo(os.Args[2:]))
 	}
-	config.UseEnv(config.Env{Models: os.Getenv("JITLLM_MODELS"), DataHome: os.Getenv("XDG_DATA_HOME")})
+	config.UseEnv(config.Env{Models: os.Getenv("JITLLM_MODELS"), DataHome: os.Getenv("XDG_DATA_HOME"),
+		APIKey: os.Getenv("JITLLM_API_KEY")})
 	cfg := config.LoadConfig()
 	chat := flag.Bool("chat", cfg.Chat, "apply the model's chat template")
 	device := flag.String("device", cfg.DeviceSpec, "device spec, as the window's setting")
@@ -62,7 +64,7 @@ func main() {
 	// Service first: under Auto a jitllmd that answers is used, and this app
 	// runs its own engine only when none does. Asked before the API starts
 	// (root.Init), or Auto would find this app.
-	ch := engine.Choose(context.Background(), mode, addr)
+	ch := engine.Choose(context.Background(), mode, addr, localserver.WithAPIKey(cfg.ServiceAPIKey()))
 	var r *root
 	var e engine.Driver
 	if ch.Conn != nil {

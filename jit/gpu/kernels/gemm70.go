@@ -128,11 +128,15 @@ func voltaSwizzle(b *ir.Builder, r ir.Value, c int, weights bool) ir.Value {
 // GemmVoltaGrouped(s, t, used) workgroups; the row block varies fastest, so
 // token blocks past `used` are never launched.
 func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
-	if !Volta70OK(s.T) {
+	if !GemmVoltaOK(s.T) {
 		return nil, fmt.Errorf("kernels: GemmVolta: %v has no Volta layout", s.T)
 	}
 	qi := qtab[s.T]
 	grouped := s.Experts > 1
+	fl := qi.float > 0
+	if fl && grouped {
+		return nil, fmt.Errorf("kernels: GemmVolta: a grouped %v bank has no Volta layout", s.T)
+	}
 	if grouped && (s.NTok < 2 || max(s.Split, 1) > 1) {
 		return nil, fmt.Errorf("kernels: GemmVolta: a grouped shape takes no split (ntok %d split %d)",
 			s.NTok, s.Split)
@@ -154,6 +158,14 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 	}
 	trips := nsub / split / t.KB
 	words := qi.sub*qi.bits/32 + qi.sub*qi.hi/32
+	// subStride and rowStride place a row's sub-block in the weight's words: a
+	// packed format's planes are sub-block-major with the rows interleaved by
+	// word, a float weight row-major (MatVec's layout; GemmVoltaOK).
+	subStride, rowStride := int64(words*s.Rows), int64(1)
+	if fl {
+		words = qi.sub * qi.float / 4
+		subStride, rowStride = int64(words), int64(s.K*qi.float/4)
+	}
 	kHalf := t.KB * qi.sub / 2 // u32 (two f16) per row per trip
 	C := kHalf / 4             // 16-byte chunks per row per trip
 	subC := qi.sub / 8         // chunks per sub-block
@@ -280,7 +292,7 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 		aRow0, aSb0 = tid, c(0)
 		for i := range aC {
 			r, sb := int64(nth*(i%per)), int64(i/per)
-			aC[i].g, aC[i].s, aC[i].row, aC[i].sb = sb*int64(words*s.Rows)+r, r*int64(kHalf), r, sb
+			aC[i].g, aC[i].s, aC[i].row, aC[i].sb = sb*subStride+r*rowStride, r*int64(kHalf), r, sb
 		}
 	case nth%BM == 0:
 		aRow0, aSb0 = b.Rem(ir.U32, tid, c(int64(BM))), b.Div(ir.U32, tid, c(int64(BM)))
@@ -292,7 +304,7 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 		}
 		for i := range aC {
 			sb := int64(i * (nth / BM))
-			aC[i].g, aC[i].sb = sb*int64(words*s.Rows), sb
+			aC[i].g, aC[i].sb = sb*subStride, sb
 		}
 	case BM*t.KB < nth:
 		// Fewer items than threads with rows that do not nest in them (a
@@ -304,7 +316,7 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 		return nil, fmt.Errorf("kernels: GemmVolta: %d rows and %d threads do not nest", BM, nth)
 	}
 	aRowG := b.Add(ir.U32, rowBlk, aRow0)
-	aGBase := b.Add(ir.U32, b.Mul(ir.U32, aSb0, c(int64(words*s.Rows))), aRowG)
+	aGBase := b.Add(ir.U32, b.Mul(ir.U32, aSb0, c(subStride)), b.Mul(ir.U32, aRowG, c(rowStride)))
 	aSBase := b.Mul(ir.U32, aRow0, c(int64(kHalf)))
 	// aAt[i][q] is where item i's chunk q goes in its row: chunk
 	// (sub-block)*subC+q, swizzled. The item's sub-block is a constant when a
@@ -431,7 +443,10 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 			if carry {
 				xi = x[i]
 			}
-			s2, m2 := dq.scalesOfX(ra[i][words:], xi, add(sbBase, aC[i].sb), add(aRowG, aC[i].row))
+			var s2, m2 ir.Value
+			if !fl {
+				s2, m2 = dq.scalesOfX(ra[i][words:], xi, add(sbBase, aC[i].sb), add(aRowG, aC[i].row))
+			}
 			vals[i] = dq.frags(ra[i][:words], s2, m2)
 		}
 		for i := 0; i < nA; i++ {
@@ -452,12 +467,12 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 	advance := func(sub, W, Bc ir.Value) (ir.Value, ir.Value, ir.Value) {
 		n := b.Min(ir.U32, add(sub, int64(t.KB)), last)
 		delta := b.Sub(ir.U32, n, sub) // 0 or KB
-		return n, b.Add(ir.U32, W, b.Mul(ir.U32, delta, c(int64(words*s.Rows)))),
+		return n, b.Add(ir.U32, W, b.Mul(ir.U32, delta, c(subStride))),
 			b.Add(ir.U32, Bc, b.Mul(ir.U32, delta, c(int64(qi.sub/2))))
 	}
 	sub0 := b.Mul(ir.U32, seg, c(int64(trips*t.KB)))
 	last = b.Add(ir.U32, sub0, c(int64((trips-1)*t.KB)))
-	w0 := b.Mul(ir.U32, sub0, c(int64(words*s.Rows)))
+	w0 := b.Mul(ir.U32, sub0, c(subStride))
 	b0 := b.Mul(ir.U32, sub0, c(int64(qi.sub/2)))
 	// Double-buffered, so a trip's dequant runs under the previous trip's MMAs:
 	// trip t's MMAs read buffer t%2 while the same straight-line block

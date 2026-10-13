@@ -9,6 +9,8 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"time"
@@ -33,16 +35,20 @@ type Conn struct {
 	Session   jitllmv1connect.SessionServiceClient
 	Inference jitllmv1connect.InferenceServiceClient
 	Telemetry jitllmv1connect.TelemetryServiceClient
+	// Legacy is a service found on localserver.LegacyAddr when the default
+	// address was asked (see Discover).
+	Legacy bool
 }
 
 // Dial makes the clients for addr (host:port, :port or a URL; "" is
-// DefaultAddr) without touching the network.
-func Dial(addr string) *Conn {
+// DefaultAddr) without touching the network. localserver.WithAPIKey makes
+// every call carry the service's API key.
+func Dial(addr string, opts ...localserver.Option) *Conn {
 	if addr == "" {
 		addr = DefaultAddr
 	}
 	base := localserver.BaseURL(addr)
-	h := &http.Client{}
+	h := &http.Client{Transport: localserver.KeyTransport(localserver.APIKey(opts...), nil)}
 	return &Conn{
 		Base:      base,
 		Model:     jitllmv1connect.NewModelServiceClient(h, base),
@@ -57,13 +63,36 @@ func Dial(addr string) *Conn {
 // Discover asks addr for its ServerInfo, within two seconds. An error that
 // wraps localserver.ErrIncompatible is a jitllmd that answered and speaks
 // another API version: say so and stop. Any other error is no jitllmd there,
-// and a front end runs embedded.
-func Discover(ctx context.Context, addr string) (*Conn, error) {
-	c := Dial(addr)
+// and a front end runs embedded. An error wrapping localserver.ErrUnauthorized
+// is one that wants an API key.
+//
+// When addr is the default and nothing answers there, a jitllmd on the old
+// default port (localserver.LegacyAddr) is used instead and the Conn says so
+// in Legacy: a service installed before the default moved keeps its address.
+func Discover(ctx context.Context, addr string, opts ...localserver.Option) (*Conn, error) {
+	c, err := discoverAt(ctx, addr, opts)
+	legacy, ok := localserver.LegacyFor(addr, opts...)
+	if err == nil || !ok || errors.Is(err, localserver.ErrIncompatible) ||
+		errors.Is(err, localserver.ErrUnauthorized) {
+		return c, err
+	}
+	old, lerr := discoverAt(ctx, legacy, opts)
+	if lerr == nil || errors.Is(lerr, localserver.ErrIncompatible) || errors.Is(lerr, localserver.ErrUnauthorized) {
+		old.Legacy = true
+		return old, lerr
+	}
+	return c, err
+}
+
+func discoverAt(ctx context.Context, addr string, opts []localserver.Option) (*Conn, error) {
+	c := Dial(addr, opts...)
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	r, err := c.Telemetry.GetServerInfo(ctx, connect.NewRequest(&v1.GetServerInfoRequest{}))
 	if err != nil {
+		if connect.CodeOf(err) == connect.CodeUnauthenticated {
+			return c, fmt.Errorf("%w at %s: give it the key (-api-key, or JITLLM_API_KEY)", localserver.ErrUnauthorized, addr)
+		}
 		return nil, err
 	}
 	c.Info = r.Msg.GetInfo()

@@ -1383,9 +1383,26 @@ func (s *State) placeHead() {
 	// loop cannot tell them apart. PrepHead is asked rather than the space
 	// predicted, because the device's accounting has slack and fragmentation.
 	was := s.gpuLayers
+	// A block given back mid-sequence takes its history home first, and one
+	// restored takes it up again, as SetDeviceLayers' placement does:
+	// releasing first frees the only copy of a linear block's summary and an
+	// attention block's keys (TestDecisionRelocatesMidPrompt under a budget
+	// the head does not fit).
 	restore := func() {
-		if s.gpuLayers < was {
-			s.offerRange(s.gpuLayers, was)
+		if s.gpuLayers >= was {
+			return
+		}
+		from := s.gpuLayers
+		s.offerRange(from, was)
+		if s.pos == 0 {
+			return
+		}
+		for _, li := range s.placedFrom(from) {
+			if !s.migrateKV(li, s.pos, true) || !s.migrateRec(li, true) {
+				s.shrinkOnDev(li)
+				s.ld.ReleaseLayers(li, s.hi)
+				return
+			}
 		}
 	}
 	for {
@@ -1411,8 +1428,13 @@ func (s *State) placeHead() {
 			restore()
 			return
 		}
+		li := s.gpuLayers - 1
+		if s.pos > 0 && (!s.migrateKV(li, s.pos, false) || !s.migrateRec(li, false)) {
+			restore()
+			return
+		}
 		budget -= cost
-		s.shrinkOnDev(s.gpuLayers - 1)
+		s.shrinkOnDev(li)
 		s.ld.ReleaseLayers(s.gpuLayers, s.gpuLayers+1)
 	}
 }

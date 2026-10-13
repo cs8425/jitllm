@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# jitllm in a container: jitllmd serving on :8080, with the jitllm CLI beside
+# jitllm in a container: jitllmd serving on :4242, with the jitllm CLI beside
 # it. docs/docker.md has the run commands, CPU and NVIDIA.
 #
 #   docker buildx build --platform linux/amd64,linux/arm64 -t jitllm .
@@ -76,13 +76,13 @@ WORKDIR /models
 # Numeric, so a runtime that must prove the user is not root (Kubernetes'
 # runAsNonRoot) can.
 USER 10001:10001
-EXPOSE 8080
+EXPOSE 4242
 
 # The daemon's own client asks the control plane for its loaded models: a
 # real round trip through the server, with no curl in the image.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["jitllmd", "models", "-loaded", "-addr", "localhost:8080"]
+    CMD ["jitllmd", "models", "-loaded", "-addr", "localhost:4242"]
 
 # Flags given to `docker run` are appended: `-load model.jlm -devices cuda`.
 # The CLI is `docker run --entrypoint jitllm ...`.
-ENTRYPOINT ["jitllmd", "serve", "-addr", ":8080"]
+ENTRYPOINT ["jitllmd", "serve", "-addr", ":4242"]

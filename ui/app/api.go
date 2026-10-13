@@ -41,7 +41,7 @@ func (s *Shell) ServeAPI(e *server.Engine) (stop func()) {
 		}
 		var msg string
 		var held localserver.Info
-		srv, msg, held = api.Toggle(srv, s.Store.API.Get(), s.Store.APIAddr.Get(), e)
+		srv, msg, held = api.Toggle(srv, s.Store.API.Get(), s.Store.APIAddr.Get(), e, api.WithKey(s.Cfg.ServingKey()))
 		serving := ""
 		if srv != nil {
 			serving = srv.Addr()

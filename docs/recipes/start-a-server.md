@@ -29,25 +29,25 @@ leave it out and jitllm picks a device by measuring.
 
 <!-- test: background -->
 ```sh
-jitllmd serve -addr 127.0.0.1:8080 -models models -load stories260K.jlm -devices cpu
+jitllmd serve -addr 127.0.0.1:4242 -models models -load stories260K.jlm -devices cpu
 ```
 
 It prints the addresses it serves once the model is loaded:
 
 ```text
 loaded m-1791686969634-1 in 5ms
-jitllmd on 127.0.0.1:8080
-  connect   http://127.0.0.1:8080/jitllm.v1.ModelService/ListModels
-  openai    http://127.0.0.1:8080/v1/chat/completions
-  anthropic http://127.0.0.1:8080/v1/messages
+jitllmd on 127.0.0.1:4242
+  connect   http://127.0.0.1:4242/jitllm.v1.ModelService/ListModels
+  openai    http://127.0.0.1:4242/v1/chat/completions
+  anthropic http://127.0.0.1:4242/v1/messages
 ```
 
 Wait for it to answer, then list the models it serves. A model is addressed by
 its file name without `.jlm` (or by the `-id` you give it):
 
 ```sh
-for i in $(seq 60); do curl -sf http://127.0.0.1:8080/healthz && break; sleep 1; done
-curl -s http://127.0.0.1:8080/v1/models
+for i in $(seq 60); do curl -sf http://127.0.0.1:4242/healthz && break; sleep 1; done
+curl -s http://127.0.0.1:4242/v1/models
 ```
 <!-- test: expect ok -->
 <!-- test: expect "id":"stories260K" -->
@@ -56,7 +56,7 @@ Ask for a completion. `temperature` 0 is greedy, so the reply is the same on
 every machine:
 
 ```sh
-curl -s http://127.0.0.1:8080/v1/completions -H 'Content-Type: application/json' \
+curl -s http://127.0.0.1:4242/v1/completions -H 'Content-Type: application/json' \
   -d '{"model":"stories260K","prompt":"Once upon a time","max_tokens":16,"temperature":0}'
 ```
 <!-- test: expect there was a little girl named Lily -->
@@ -85,12 +85,12 @@ jitllm convert -o models qwen3-0.6b
 ```
 
 ```sh
-jitllmd models -addr 127.0.0.1:8080 -load Qwen3-0.6B-Q8_0.jlm -id qwen3-0.6b -devices cpu
+jitllmd models -addr 127.0.0.1:4242 -load Qwen3-0.6B-Q8_0.jlm -id qwen3-0.6b -devices cpu
 ```
 <!-- test: expect qwen3-0.6b -->
 
 ```sh
-curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+curl -s http://127.0.0.1:4242/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model": "qwen3-0.6b",
   "messages": [{"role": "user", "content": "Say hello in one word. /no_think"}],
   "max_tokens": 32, "temperature": 0}'

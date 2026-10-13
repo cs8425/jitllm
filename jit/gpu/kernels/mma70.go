@@ -91,6 +91,25 @@ func MMAVoltaProbe() *ir.Kernel {
 // a binary16 (sign at 15) is its value times 2^-14, subnormals included, so
 // the dequant is a mask, two shifts and two f16 multiplies (voltaDeq.frags).
 func Volta70OK(q Quant) bool {
+	return volta70Packed(q)
+}
+
+// GemmVoltaOK reports whether GemmVolta (and the ActF16T layout it reads)
+// takes q: every format Volta70OK takes, and the two-byte float weights,
+// binary16 and bfloat16. A float weight is staged as binary16 -- a bfloat16
+// rounded to binary16's ten-bit mantissa from its seven, so exactly unless
+// it lies outside binary16's range (above 65504 it is infinite, below 2^-14
+// it loses bits as a subnormal), which no projection of a trained model
+// reaches -- and its sub-block takes the 8-bit formats' step order.
+func GemmVoltaOK(q Quant) bool {
+	return volta70Packed(q) || int(q) < len(qtab) && qtab[q].float == 2
+}
+
+// byteOrder says a sub-block's m8n8k4 steps take consecutive elements
+// (voltaSteps): an 8-bit format's, and a two-byte float's.
+func (qi qinfo) byteOrder() bool { return qi.bits == 8 || qi.float == 2 }
+
+func volta70Packed(q Quant) bool {
 	if int(q) >= len(qtab) {
 		return false
 	}
@@ -111,7 +130,7 @@ func Volta70OK(q Quant) bool {
 // one step: {4w, 4w+2, 4w+1, 4w+3}.
 func voltaSteps(qi qinfo) (steps int, elem func(step, slot int) int) {
 	order := [4]int{0, 2, 1, 3}
-	if qi.bits == 8 {
+	if qi.byteOrder() {
 		return qi.sub / 4, func(s, j int) int { return 4*s + order[j] }
 	}
 	h := qi.sub / 2
@@ -182,7 +201,7 @@ func ActMulF16T(q Quant, ntok, k int, kind ActKind) (*ir.Kernel, error) {
 	if err := actMulKind(kind); err != nil {
 		return nil, err
 	}
-	if !Volta70OK(q) {
+	if !GemmVoltaOK(q) {
 		return nil, fmt.Errorf("kernels: ActMulF16T: %v has no Volta layout", q)
 	}
 	qi := qtab[q]
@@ -221,7 +240,7 @@ func f16WordElems(b *ir.Builder, qi qinfo, wt ir.Value) (e0, e1 ir.Value) {
 	w := b.Rem(ir.U32, wt, c(int64(half)))
 	s, h := b.Shr(ir.U32, w, c(1)), b.And(ir.U32, w, c(1))
 	var base ir.Value
-	if qi.bits == 8 {
+	if qi.byteOrder() {
 		base = b.Shl(ir.U32, s, c(2))
 	} else {
 		// (s/2)*4 + (s%2)*sub/2
@@ -232,7 +251,7 @@ func f16WordElems(b *ir.Builder, qi qinfo, wt ir.Value) (e0, e1 ir.Value) {
 }
 
 func actF16T(q Quant, ntok, k int) (*ir.Kernel, error) {
-	if !Volta70OK(q) {
+	if !GemmVoltaOK(q) {
 		return nil, fmt.Errorf("kernels: ActF16T: %v has no Volta layout", q)
 	}
 	qi := qtab[q]
@@ -498,6 +517,7 @@ type voltaDeq struct {
 	t                   Quant
 	pQS, pD, pSC        ir.Value
 	rows                int
+	wstride             int64 // words between a sub-block's consecutive words
 	pw, hw, steps       int
 	magic, off2, m4, m8 ir.Value
 	zeroF               ir.Value
@@ -544,8 +564,13 @@ func newVoltaDeq(b *ir.Builder, t Quant, pQS, pD, pSC ir.Value, rows int) *volta
 	if qi.bits == 8 {
 		offBits = 0x6480 // 1152.0: the signed byte flipped to unsigned
 	}
-	return &voltaDeq{b: b, qi: qi, t: t, pQS: pQS, pD: pD, pSC: pSC, rows: rows,
-		pw: qi.sub * qi.bits / 32, hw: qi.sub * qi.hi / 32, steps: steps,
+	pw, wstride := qi.sub*qi.bits/32, int64(rows)
+	if qi.float > 0 {
+		// A float row is row-major: a sub-block's words are consecutive.
+		pw, wstride = qi.sub*qi.float/4, 1
+	}
+	return &voltaDeq{b: b, qi: qi, t: t, pQS: pQS, pD: pD, pSC: pSC, rows: rows, wstride: wstride,
+		pw: pw, hw: qi.sub * qi.hi / 32, steps: steps,
 		magic: c(0x64006400), off2: c(offBits | offBits<<16), m4: c(0x000F000F), m8: c(0x00FF00FF),
 		zeroF: b.ConstF32(0)}
 }
@@ -598,7 +623,7 @@ func (v *voltaDeq) wordsN(idx ir.Value, im int64, n int) []ir.Value {
 	out := make([]ir.Value, n+v.hw)
 	idx = v.plus(idx, v.qBase)
 	for w := range out {
-		out[w] = v.b.Load(ir.U32, v.pQS, idx, im+int64(w)*int64(v.rows))
+		out[w] = v.b.Load(ir.U32, v.pQS, idx, im+int64(w)*v.wstride)
 	}
 	return out
 }
@@ -613,6 +638,9 @@ func (v *voltaDeq) scales(subIdx, row ir.Value) (s2, m2 ir.Value) {
 // from the arithmetic so a pipelined kernel can issue it a trip early.
 func (v *voltaDeq) scaleWords(subIdx, row ir.Value) []ir.Value {
 	b, qi := v.b, v.qi
+	if qi.float > 0 {
+		return nil // a float weight carries no scale
+	}
 	c := func(x int64) ir.Value { return b.Const(ir.U32, x) }
 	super := subIdx
 	if qi.perSuper > 1 {
@@ -769,6 +797,27 @@ func (v *voltaDeq) fragsN(raw []ir.Value, s2, m2 ir.Value, n int) [][]ir.Value {
 	}
 	deq := func(p ir.Value) ir.Value { return b.FmaF16x2(p, s2, m2) }
 	out := make([][]ir.Value, v.steps*n/v.pw)
+	if qi.float == 2 {
+		// Words 2s and 2s+1 hold elements 4s..4s+3, low half first; step s
+		// is the pairs (4s, 4s+2) and (4s+1, 4s+3) as binary16.
+		lo := func(w ir.Value) ir.Value {
+			if qi.bf16 {
+				return b.Bitcast(ir.F32, b.Shl(ir.U32, w, c(16)))
+			}
+			return b.CvtF16H(w)
+		}
+		hi := func(w ir.Value) ir.Value {
+			if qi.bf16 {
+				return b.Bitcast(ir.F32, b.And(ir.U32, w, c(0xFFFF0000)))
+			}
+			return b.CvtF16H(b.Shr(ir.U32, w, c(16)))
+		}
+		for s := range out {
+			w0, w1 := raw[2*s], raw[2*s+1]
+			out[s] = []ir.Value{b.PackF16(lo(w0), lo(w1)), b.PackF16(hi(w0), hi(w1))}
+		}
+		return out
+	}
 	if qi.e8m0 {
 		// An e2m1 code at bits 9-11 of a binary16, sign at 15, is its value
 		// times 2^-14. 2^15 makes it the doubled value mxfp4Codes holds
