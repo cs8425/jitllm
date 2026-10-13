@@ -137,7 +137,7 @@ func (m *mtlDev) Compile(k *ir.Kernel) (Kernel, error) {
 			k.Name, k.Lanes, m.c.Name(), simd)
 	}
 	kern.SetWrites(k.WrittenParams())
-	mk := &mtlKern{k: kern, group: k.Group, name: k.Name, src: k}
+	mk := &mtlKern{k: kern, group: k.Group, name: k.Name, src: k, grid: k.GridSync()}
 	if k.GridSync() {
 		mk.resident, mk.residentErr = mtlGridLimit(k)
 	}
@@ -250,6 +250,7 @@ type mtlKern struct {
 	// co-residency limit when it has a grid barrier.
 	src         *ir.Kernel
 	resident    int
+	grid        bool // src has a grid barrier: decided once at compile, read by every launch
 	residentErr error
 }
 
@@ -263,7 +264,7 @@ func (k *mtlKern) Launch(groups, width int, bufs ...Buf) error {
 	if err := k.checkWidth(width); err != nil {
 		return err
 	}
-	if err := checkGrid("msl", k.name, k.src, groups, k.resident, k.residentErr); err != nil {
+	if err := checkGrid("msl", k.name, k.grid, groups, k.resident, k.residentErr); err != nil {
 		return err
 	}
 	mb := make([]*metal.Buf, len(bufs))
@@ -362,7 +363,7 @@ func (s *mtlSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
 	if err := mk.checkWidth(width); err != nil {
 		return err
 	}
-	if err := checkGrid("msl", mk.name, mk.src, groups, mk.resident, mk.residentErr); err != nil {
+	if err := checkGrid("msl", mk.name, mk.grid, groups, mk.resident, mk.residentErr); err != nil {
 		return err
 	}
 	if s.batch == nil {

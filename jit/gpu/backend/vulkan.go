@@ -138,7 +138,7 @@ func (v *vkDev) Compile(k *ir.Kernel) (Kernel, error) {
 	if err != nil {
 		return nil, err
 	}
-	vk := &vkKern{k: kern, group: k.Group, name: k.Name, src: k}
+	vk := &vkKern{k: kern, group: k.Group, name: k.Name, src: k, grid: k.GridSync()}
 	if k.GridSync() {
 		vk.resident, vk.residentErr = v.GridLimit(vk)
 	}
@@ -207,6 +207,7 @@ type vkKern struct {
 	// co-residency limit when it has a grid barrier.
 	src         *ir.Kernel
 	resident    int
+	grid        bool // src has a grid barrier: decided once at compile, read by every launch
 	residentErr error
 }
 
@@ -234,7 +235,7 @@ func (k *vkKern) Launch(groups, width int, bufs ...Buf) error {
 	if err := checkWidth("spirv", k.name, k.group, width); err != nil {
 		return err
 	}
-	if err := checkGrid("spirv", k.name, k.src, groups, k.resident, k.residentErr); err != nil {
+	if err := checkGrid("spirv", k.name, k.grid, groups, k.resident, k.residentErr); err != nil {
 		return err
 	}
 	if !same(k.bound, bufs) {
@@ -319,7 +320,7 @@ func (s *vkSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
 	if err := checkWidth("spirv", vk.name, vk.group, width); err != nil {
 		return err
 	}
-	if err := checkGrid("spirv", vk.name, vk.src, groups, vk.resident, vk.residentErr); err != nil {
+	if err := checkGrid("spirv", vk.name, vk.grid, groups, vk.resident, vk.residentErr); err != nil {
 		return err
 	}
 	if s.batch == nil {
