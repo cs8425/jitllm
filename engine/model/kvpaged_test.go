@@ -1109,7 +1109,7 @@ func (d *mirrorDevice) MigrateEnt(li, base int, ent []float32, n int, toDevice b
 	copy(ent, d.ent[li])
 	if d.corrupt {
 		for i := range ent {
-			ent[i] = -ent[i]
+			ent[i] *= -1.5 // not a negation alone, which a second crossing undoes
 		}
 	}
 	return true
@@ -1143,11 +1143,14 @@ func (d *mirrorDevice) MigrateKV(li int, k, v []float32, pos int, toDevice bool)
 		for i := range k {
 			k[i] *= 1.5
 		}
-		// And v, negated: a model whose scores barely move with k's scale
-		// (Gemma 4's fixture, whose normed k and unit scale keep the
-		// softmax near flat over a short history) still reads every value.
+		// And v, negated and scaled: a model whose scores barely move with
+		// k's scale (Gemma 4's fixture, whose normed k and unit scale keep
+		// the softmax near flat over a short history) still reads every
+		// value. Not a negation alone, which is its own inverse: a block
+		// placeHead gives back for the head's room comes home and goes up
+		// again, so a history can cross twice before the gate reads it.
 		for i := range v {
-			v[i] = -v[i]
+			v[i] *= -1.5
 		}
 	}
 	return true
