@@ -25,13 +25,12 @@ type dhHead struct {
 	bytes uint64
 }
 
-// dhState is the device's Clef state: the resident heads and the compiled
-// kernels, and the request scratch, regrown as requests grow.
+// dhState is the device's Clef state: the resident heads, the compiled
+// kernels and the programs of the request shapes seen last.
 type dhState struct {
-	heads   map[*nn.ClefHead]*dhHead
-	kerns   map[dhKey]backend.Kernel
-	scratch map[string]backend.Buf
-	sizes   map[string]int
+	heads map[*nn.ClefHead]*dhHead
+	kerns map[dhKey]backend.Kernel
+	progs []*dhProg
 }
 
 type dhKey struct {
@@ -132,8 +131,8 @@ func (g *devTier) dhClose() {
 			k.Close()
 		}
 	}
-	for _, b := range g.dh.scratch {
-		b.Free()
+	for _, p := range g.dh.progs {
+		p.free()
 	}
 	g.dh = dhState{}
 }
@@ -162,20 +161,9 @@ func (g *devTier) dhKern(key dhKey, build func() (*ir.Kernel, error)) (backend.K
 	return k, nil
 }
 
-// dhBuf is the request scratch buffer name, at least n floats, poisoned when
-// made (RULE 13). Callers hold g.mu.
-func (g *devTier) dhBuf(name string, n int) (backend.Buf, error) {
-	if g.dh.scratch == nil {
-		g.dh.scratch, g.dh.sizes = map[string]backend.Buf{}, map[string]int{}
-	}
+// dhNewBuf is a buffer of n floats, poisoned (RULE 13). Callers hold g.mu.
+func (g *devTier) dhNewBuf(n int) (backend.Buf, error) {
 	n = max(n, 1)
-	if b, ok := g.dh.scratch[name]; ok && g.dh.sizes[name] >= n {
-		return b, nil
-	}
-	if b, ok := g.dh.scratch[name]; ok {
-		b.Free()
-		delete(g.dh.scratch, name)
-	}
 	b, err := g.dev.Alloc(4 * n)
 	if err != nil {
 		return nil, err
@@ -188,7 +176,6 @@ func (g *devTier) dhBuf(name string, n int) (backend.Buf, error) {
 		b.Free()
 		return nil, err
 	}
-	g.dh.scratch[name], g.dh.sizes[name] = b, n
 	return b, nil
 }
 
@@ -199,28 +186,133 @@ type dhStep struct {
 	bufs    []backend.Buf
 }
 
-// clefHead builds the request's program, runs it in one submission and
-// reads the logits back.
-func (g *devTier) clefHead(h *nn.ClefHead, in *nn.ClefHeadInput, out []float32) (ok bool) {
+// dhProg is one request shape's program: its launches, the buffers they
+// run against (its own, so another shape's growth never moves them), and
+// the inputs' constant parts. Kept per shape (dhProgs), so a warm request
+// writes its inputs, launches and reads back, allocating nothing.
+type dhProg struct {
+	key                            dhShape
+	prog                           []dhStep
+	own                            []backend.Buf
+	resid, pool, lex, owner, qtype backend.Buf
+	zero, mask, logits             backend.Buf
+	sel                            [3]backend.Buf
+	selB                           [3][]byte
+	zeroB                          []byte
+	in                             *nn.ClefHeadInput
+	out                            []float32
+	err                            error
+	run                            func(backend.Session)
+}
+
+// dhShape keys a program: the head and the request's rows, questions and
+// options.
+type dhShape struct {
+	h         *nn.ClefHead
+	n, nq, no int
+}
+
+// dhProgs is how many request shapes a device keeps programs for; the oldest
+// goes first.
+const dhProgs = 8
+
+func (p *dhProg) free() {
+	for _, b := range p.own {
+		b.Free()
+	}
+	p.own = nil
+}
+
+// clefHead runs the request's program, building it on the first request of
+// its shape, in one submission, and reads the logits back.
+func (g *devTier) clefHead(h *nn.ClefHead, in *nn.ClefHeadInput, out []float32) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
-		return false
-	}
-	fail := func(err error) bool {
-		g.LastErr = "the decision head: " + err.Error()
 		return false
 	}
 	hd, okUp := g.dhUpload(h)
 	if !okUp {
 		return false
 	}
-	w := func(v []float32) backend.Buf { return hd.bufs[&v[0]] }
 	n, nq, no := in.N, in.NQ, in.NO
-	D, W, H, F := h.D, h.W, h.Heads, h.FFN
-	if len(in.Resid) != n*D || len(in.Pool) != (nq+1+no)*n || len(in.Lex) != no*D || len(out) < no {
-		return fail(fmt.Errorf("an input of the wrong shape (%d rows, %d questions, %d options)", n, nq, no))
+	if len(in.Resid) != n*h.D || len(in.Pool) != (nq+1+no)*n || len(in.Lex) != no*h.D || len(out) < no ||
+		len(in.Owner) != no || len(in.QType) != nq || len(in.Mask) != nq*no {
+		g.LastErr = fmt.Sprintf("the decision head: an input of the wrong shape (%d rows, %d questions, %d options)", n, nq, no)
+		return false
 	}
+	key := dhShape{h, n, nq, no}
+	var pr *dhProg
+	for i, p := range g.dh.progs {
+		if p.key == key {
+			pr = p
+			// Most recent last.
+			copy(g.dh.progs[i:], g.dh.progs[i+1:])
+			g.dh.progs[len(g.dh.progs)-1] = p
+			break
+		}
+	}
+	if pr == nil {
+		var err error
+		if pr, err = g.dhBuild(h, hd, n, nq, no); err != nil {
+			g.LastErr = "the decision head: " + err.Error()
+			return false
+		}
+		if len(g.dh.progs) == dhProgs {
+			g.dh.progs[0].free()
+			g.dh.progs = append(g.dh.progs[:0], g.dh.progs[1:]...)
+		}
+		g.dh.progs = append(g.dh.progs, pr)
+	}
+	pr.in, pr.out, pr.err = in, out[:no], nil
+	g.dev.Session(pr.run)
+	pr.in, pr.out = nil, nil
+	if pr.err != nil {
+		g.LastErr = "the decision head: " + pr.err.Error()
+		return false
+	}
+	g.ClefHeads++
+	return true
+}
+
+// dhRun is a program's submission: the inputs up, the launches, the logits
+// back.
+func (p *dhProg) dhRun(s backend.Session) {
+	in := p.in
+	w := func(b backend.Buf, x []byte) {
+		if p.err == nil {
+			p.err = s.Write(b, x)
+		}
+	}
+	w(p.resid, f32b(in.Resid))
+	w(p.pool, f32b(in.Pool))
+	w(p.lex, f32b(in.Lex))
+	w(p.owner, u32b(in.Owner))
+	w(p.qtype, u32b(in.QType))
+	w(p.mask, f32b(in.Mask))
+	w(p.zero, p.zeroB)
+	for i := range p.sel {
+		w(p.sel[i], p.selB[i])
+	}
+	for i := range p.prog {
+		if p.err != nil {
+			return
+		}
+		st := &p.prog[i]
+		p.err = s.Launch(st.k, (st.threads+127)/128, 128, st.bufs...)
+	}
+	if p.err == nil {
+		p.err = s.Read(p.logits, f32b(p.out))
+	}
+}
+
+// dhBuild compiles a request shape's program. Callers hold g.mu.
+func (g *devTier) dhBuild(h *nn.ClefHead, hd *dhHead, n, nq, no int) (*dhProg, error) {
+	pr := &dhProg{key: dhShape{h, n, nq, no}}
+	pr.run = pr.dhRun
+	named := map[string]backend.Buf{}
+	w := func(v []float32) backend.Buf { return hd.bufs[&v[0]] }
+	D, W, H, F := h.D, h.W, h.Heads, h.FFN
 	var prog []dhStep
 	var err error
 	launch := func(k backend.Kernel, threads int, bufs ...backend.Buf) {
@@ -230,8 +322,15 @@ func (g *devTier) clefHead(h *nn.ClefHead, in *nn.ClefHeadInput, out []float32) 
 		if err != nil {
 			return nil
 		}
+		if b, ok := named[name]; ok {
+			return b
+		}
 		var b backend.Buf
-		b, err = g.dhBuf(name, floats)
+		if b, err = g.dhNewBuf(floats); err != nil {
+			return nil
+		}
+		named[name] = b
+		pr.own = append(pr.own, b)
 		return b
 	}
 	kern := func(key dhKey, build func() (*ir.Kernel, error)) backend.Kernel {
@@ -414,52 +513,22 @@ func (g *devTier) clefHead(h *nn.ClefHead, in *nn.ClefHeadInput, out []float32) 
 			return kernels.DHCombine(no, h.Scales[0], h.Scales[1], h.Scales[2])
 		}), no, prior, cosv, res, logits)
 	if err != nil {
-		return fail(err)
+		pr.free()
+		return nil, err
 	}
 	// The selection rows: identity rows picking pooled rows from..from+rows.
-	sel := func(from, rows int) []float32 {
+	sel := func(from, rows int) []byte {
 		m := make([]float32, rows*(nq+1+no))
 		for i := 0; i < rows; i++ {
 			m[i*(nq+1+no)+from+i] = 1
 		}
-		return m
+		return f32b(m)
 	}
-	u := func(v []uint32) []byte { return f32b(u2f(v)) }
-	zeros := make([]uint32, max(nq, no))
-	g.dev.Session(func(s backend.Session) {
-		for _, x := range []struct {
-			b backend.Buf
-			p []byte
-		}{{resid, f32b(in.Resid)}, {pool, f32b(in.Pool)}, {lex, f32b(in.Lex)}, {owner, u(in.Owner)},
-			{qtype, u(in.QType)}, {zero, u(zeros)}, {mask, f32b(in.Mask)},
-			{g.dh.scratch["sel0"], f32b(sel(0, nq))}, {g.dh.scratch[fmt.Sprint("sel", nq)], f32b(sel(nq, 1))},
-			{g.dh.scratch[fmt.Sprint("sel", nq+1)], f32b(sel(nq+1, no))}} {
-			if err == nil {
-				err = s.Write(x.b, x.p)
-			}
-		}
-		for _, st := range prog {
-			if err != nil {
-				break
-			}
-			err = s.Launch(st.k, (st.threads+127)/128, 128, st.bufs...)
-		}
-		if err == nil {
-			err = s.Read(logits, f32b(out[:no]))
-		}
-	})
-	if err != nil {
-		return fail(err)
-	}
-	g.ClefHeads++
-	return true
-}
-
-// u2f views u32 words as f32 bits, for a write that carries indexes.
-func u2f(v []uint32) []float32 {
-	out := make([]float32, len(v))
-	for i, x := range v {
-		out[i] = math.Float32frombits(x)
-	}
-	return out
+	pr.prog = prog
+	pr.resid, pr.pool, pr.lex, pr.owner, pr.qtype = resid, pool, lex, owner, qtype
+	pr.zero, pr.mask, pr.logits = zero, mask, logits
+	pr.sel = [3]backend.Buf{named["sel0"], named[fmt.Sprint("sel", nq)], named[fmt.Sprint("sel", nq+1)]}
+	pr.selB = [3][]byte{sel(0, nq), sel(nq, 1), sel(nq+1, no)}
+	pr.zeroB = u32b(make([]uint32, max(nq, no)))
+	return pr, nil
 }

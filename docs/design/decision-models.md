@@ -128,8 +128,18 @@ it covers most of the family with no new architecture.
   every field jointly...") and the whole schema with JSON keys sorted, choice
   options sorted by key, noul shown true first.
 - **llama.cpp**: arch `clef` (PR 29831), text only, one sequence per batch.
-- jitllm needs: a container for the head, the span pooling and the head
-  blocks as generated kernels, and the order map through prefill.
+- **jitllm**: the arch `clef` converts into qwen35's container
+  (`ArchQwen3Next`) with `jlm.DecisionClef`; `decision.*` and `dec.blk.N.*`
+  are a role group of their own (`format/jlm/decisionroles.go`) at
+  `DenseBlock` with the head block in `Index`, and the container states the
+  routing and joint block counts, the head count and the head's LayerNorm
+  epsilon (`Config.DecisionRouting`, `DecisionBlocks`, `DecisionHeads`,
+  `DecisionEps`). The prompt is built as `encode_record` builds it, piece by
+  piece, and one prefill keeps every row's final residual (`State.rowTap`
+  under an embedding mode with no pooling, so no output projection runs);
+  the head (`engine/model/decideclef.go`) runs on the host's generated
+  kernels, or on the device holding the output projection
+  (`engine/model/decideclefdev.go`, `jit/gpu/tier/dechead.go`).
 
 ### d1-3B (LiquidAI/d1-3B; GGUF LiquidAI/d1-3B-GGUF Q4_K_M/Q8_0/BF16 + mmproj)
 
@@ -265,6 +275,8 @@ Order, by what each unlocks (coordinator's priorities):
 | Laya sequence | template rendered whole, then re-cut | each piece tokenized alone | the reference; token for token equal to both on the gates' requests |
 | Laya GELU | tanh (GeGLU), erf (scorer) | erf in both | the reference: `ActGELUErf` on every tier (host and device); worst logit 1e-6 on the f32 fixture, where the tanh form left 3e-4 |
 | Laya state cut | the context | `max_len` (512) | the context: the GGUF does not carry `max_len` |
+| Clef confidence | TypeSafe's formula | `systemone_answer`: the chosen option's probability, a score's largest | the reference |
+| Clef state cut | the context | `max_length` (16384) less the schema | the Decider's sequence less the schema, as the reference cuts it |
 
 ## 9. What was built, and the gates
 
@@ -272,6 +284,7 @@ Order, by what each unlocks (coordinator's priorities):
 |---|---|---|---|---|
 | d1-3B (Q8_0) | label logits, lfm2 | `TestDecisionMatchesLlamaCpp`, `TestDecisionReadoutIsLoadBearing` (noul shown true first) | not run: the reference is transformers remote code (>=5.14) and was not run here | worst probability 0.021 (f16 kv, llama.cpp's own), 0.020 (f32 kv); prompts token for token |
 | Lev (Q8_0 of the merged adapter) | label logits, qwen35 | same, plus two option orders, sorted keys and calibration load-bearing | the graph only: Qwen3.5-4B with the adapter merged, f32 in transformers, on jitllm's prompt ids: raw label logits within 0.3 on a scale of 20 (Q8_0 against BF16); `lev serve`'s own prompt code was not run | worst 0.029 (f16 kv), 0.090 (f32 kv, lev's tone near-tie; see decide_test.go) |
+| Clef-Flash (Q8_0) | joint span head, qwen35 | `TestClefMatchesReference`, `TestClefFeaturesAreLoadBearing` (noul true first, sorted choices, the hidden norm, the lexical projection, the type row, the self-attention, the prior, the cosine, the span mean, erf GELU) and every decision gate | the random fixture: prompts, spans and logits within 1.7e-6 of Clef's own code (f32); the release not run against the reference (9B in torch does not fit the laptop) | the release: worst probability 0.0095 and 0.0079 (f32 kv), 0.017 and 0.010 (f16 kv) on the two requests, prompts token for token (627 and 535); the fixture 2e-5 |
 | Laya (BF16) | marker head, ModernBERT | `TestLayaMatchesReference`, `TestLayaFeaturesAreLoadBearing` (window, local base, GeGLU's gated half, type row, head count, erf GELU), `TestLayaPagesWithTheSameAnswer`, `TestDecisionMatchesLlamaCpp` | logits within 1e-6 (random fixture, f32) and 0.027 (checkpoint) of Laya's own code | worst probability 0.0039 |
 
 Features the gates could not show load-bearing, kept as the reference has them:
@@ -279,7 +292,7 @@ d1's second code form (" A" beside "A", at most 0.004 on either request), and
 lev's sorted keys moved the answers 0.019 against a 0.02 tolerance on the
 object state (the gate keeps it at five questions).
 
-Not done, named: Clef-Flash's joint head; Kev's pointer head, NanoJev, Nimble;
+Not done, named: Kev's pointer head, NanoJev, Nimble;
 lev's mode-B head (option sets past the 255 single-token codes) and its
 safetensors adapter merge (the GGUF path reads ggml-org's merged file); the
 label pick on the device (section 10: the head's logits come home whole and
@@ -378,6 +391,6 @@ Batching is per readout: a decoder's prompts are rows of one batch session; an
 encoder's sequences run one encoder pass each, inside the same batch call,
 because its blocks attend over every row of a call and the device's
 non-causal set has one window list, not a sequence partition beside the local
-windows. Packing several Laya sequences into one pass is open. Clef is not a
-container this converter writes (no `clef` decision kind), so no gate runs it.
+windows. Packing several Laya sequences into one pass is open. Clef answers a request in one pass of its own, in a batch too: its head reads
+every row of the prompt, and a batch session gives back each row's last.
 
