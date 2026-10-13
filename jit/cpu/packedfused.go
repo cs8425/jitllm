@@ -6,8 +6,6 @@ import (
 	"fmt"
 
 	"github.com/jitllm/jitllm/format/quant"
-
-	"github.com/jitllm/jitllm/jit/gpu/kernels"
 )
 
 // EmitPackedMatVecFused runs every word of a sub-block in one pass over the
@@ -60,9 +58,10 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 	// Eight words ahead in the same row group is exactly the set of lines this
 	// call reads next.
 	wordAhead := ahead == FusedAheadWords
-	q, ok := kernels.QuantOf(t)
-	if !ok {
-		return nil, fmt.Errorf("jit: EmitPackedMatVecFused: %s has no device layout", t)
+	const who = "EmitPackedMatVecFused"
+	f, err := packedFormatOf(t, who)
+	if err != nil {
+		return nil, err
 	}
 	// The saturation refusal, before anything is emitted; see PreVNNIPacked.
 	if dk == DotVEX {
@@ -70,21 +69,14 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 			return nil, err
 		}
 	}
-	sub, bits, biasK, biasArray := kernels.Layout(q)
-	perSuper, scOff := kernels.ScaleLayout(q)
-	signed := kernels.SignedPayload(q)
-	minD := kernels.MinInD(q)
-	hi := kernels.HiPlane(q)
-	codes, err := hasCodes(q)
-	if err != nil {
-		return nil, err
-	}
+	sub, bits, biasK, biasArray := f.sub, f.bits, f.biasK, f.biasArray
+	perSuper, scOff := f.perSuper, f.scOff
+	signed, minD, hi, codes := f.signed, f.minD, f.hi, f.codes
 	// The payload is pw primary words then hw secondary ones. The hi code
 	// reaches the same accumulator as the primary because its mask is
 	// pre-shifted by 4 (see PackedScratch).
-	pw, hw := sub*bits/32, sub*hi/32
-	words := pw + hw
-	halfSub := sub / 2
+	pw, hw := f.pw, f.hw
+	halfSub := f.halfSub
 	const vec = 32
 	group := PackedFusedGroupOf(t)
 	grp := group / 8
@@ -126,7 +118,7 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 	// A straddling SC field reads the next word with no register to hold its
 	// address (R14 is g): the cursor steps one plane stride and back around the
 	// load (scstream.go).
-	stream := kernels.ScStream(q)
+	stream := f.stream
 	nextSC := func(off int32) func(Reg) {
 		return func(r Reg) {
 			a.ADDQ(R9, R13)
@@ -161,19 +153,9 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 		lut = take()
 	}
 
-	// R10 is AHalf or the minimum scratch, never both: a format with a minimum
-	// array has 32-element sub-blocks and no per-16 sums, and a 16-wide format is
-	// the reverse. That is what closes the GPR budget at thirteen with R14 unused.
-	a.MOVLoad(RCX, At(RDI, 0))  // Out
-	a.MOVLoad(R11, At(RDI, 16)) // A
-	a.MOVLoad(R12, At(RDI, 24)) // AScale
-	a.MOVLoad(R13, At(RDI, 48)) // RowStr
-	a.MOVLoad(RBX, At(RDI, 56)) // Scr, for the constants below
-	if biasArray {
-		a.MOVLoad(R10, At(RDI, 112)) // Q32 -> the minimum scratch
-	} else {
-		a.MOVLoad(R10, At(RDI, 64)) // AHalf
-	}
+	// R10 is AHalf or the minimum scratch, never both (packedArgs): that is
+	// what closes the GPR budget at thirteen with R14 unused.
+	packedArgs(&a, &f)
 	switch {
 	case bits == 4:
 		a.VMOVDQULoad(mask, At(RBX, 0))
@@ -183,92 +165,17 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 	case signed:
 		a.VMOVDQULoad(mask, At(RBX, 192))
 	}
-	if scOff != 0 {
-		a.VMOVDQULoad(scOffV, At(RBX, 224+int32(scOffSlot(scOff))))
-	}
-	if hi != 0 {
-		a.VMOVDQULoad(hiMask, At(RBX, hiMaskSlot(hi)))
-	}
-	if codes {
-		a.VMOVDQULoad(lut, At(RBX, codesSlot))
-	}
+	packedConsts(&a, &f, scOffV, hiMask, lut)
 	// The two shuffle masks are needed only by the precompute pass, which runs
 	// while the activation registers are still free.
 	shufLo, shufHi := act[0], act[1]
 
-	rowLoop := func(body func()) {
-		a.MOVLoad(RBX, At(RDI, 32))
-		a.SUBQ(R15, R15)
-		l := a.Label()
-		a.Bind(l)
-		body()
-		a.ADDimm(R15, int32(group*4))
-		a.DEC(RBX)
-		a.JNZ(l)
-	}
-
-	a.MOVLoad(RDX, At(RDI, 8)) // QS
-	// R9 is the SC cursor, and a narrow format has no SC plane, so there it
-	// carries the d plane's own row offset; no other register is free.
-	narrow := NarrowD(t)
-	e8 := E8M0D(t)
-	drow := int32(DRowBytes(t))
-	if !narrow {
-		a.MOVLoad(R9, At(RDI, 152)) // SC
-	}
-	a.MOVLoad(RAX, At(RDI, 40)) // K, in super-blocks
-	a.MOVLoad(R8, At(RDI, 144)) // D, held for the whole kernel
-
+	packedCursors(&a, &f)
 	outer := a.Label()
 	a.Bind(outer)
 
 	// --- precompute this super-block's scales, once ------------------------
-	// RBX is reloaded because rowLoop owns it as the row counter: after the
-	// first loop it is zero. R8 is not reloaded: it is the d cursor for the
-	// whole kernel and advances one super-block per outer iteration.
-	a.MOVLoad(RBX, At(RDI, 56))
-	a.MOVLoad(RSI, At(RDI, 72)) // Scratch
-	a.VMOVDQULoad(shufLo, At(RBX, 64))
-	a.VMOVDQULoad(shufHi, At(RBX, 96))
-	if narrow {
-		a.SUBQ(R9, R9)
-	}
-	rowLoop(func() {
-		for g := 0; g < grp; g++ {
-			off := int32(g * vec)
-			if e8 {
-				// MXFP4's super-scale is a biased E8M0 exponent, so the byte
-				// shifted left 23 is the f32, exactly (exp.go's 2^x trick).
-				a.VPMOVZXBD(tmp, Idx(R8, R9, 1, off/4))
-				a.VPSLLD(tmp, tmp, 23)
-			} else if narrow {
-				// Eight f16 are sixteen bytes and VCVTPH2PS widens them in one
-				// instruction, where the wide plane needs a load, a VPSHUFB and
-				// a VPERMQ to gather eight halves out of eight words.
-				a.VCVTPH2PS(tmp, Idx(R8, R9, 1, off/2))
-			} else {
-				a.VMOVDQULoad(pay, Idx(R8, R15, 1, off))
-				a.VPSHUFB(tmp, pay, shufLo)
-				a.VPERMQ(tmp, tmp, 0xD8)
-				a.VCVTPH2PSReg(tmp, tmp)
-			}
-			a.VMOVDQUStore(Idx(RSI, R15, 1, off), tmp)
-			if biasArray {
-				a.VPSHUFB(t2, pay, shufHi)
-				a.VPERMQ(t2, t2, 0xD8)
-				a.VCVTPH2PSReg(t2, t2)
-				a.VMOVDQUStore(Idx(R10, R15, 1, off), t2)
-			}
-		}
-		if narrow {
-			a.ADDimm(R9, int32(group)*drow)
-		}
-	})
-	if narrow {
-		a.ADDQmem(R8, At(RDI, 160)) // half the payload's stride; see DSuperBytes
-	} else {
-		a.ADDQ(R8, R13) // D advances one super-block
-	}
+	packedScalePass(&a, &f, t, group, grp, shufLo, shufHi, pay, tmp, t2, true)
 
 	// pl is the payload word at off in the current row group, and prefetch
 	// issues the software prefetch this kernel was emitted with; pfd is set
@@ -291,8 +198,8 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 
 	// --- the sub-blocks ----------------------------------------------------
 	for sn := 0; sn < perSuper; sn++ {
-		pairOff := int32(sub * sn / Q8Block * 8)
-		sh := byte((sn % perWordOf(biasArray)) * strideOf(biasArray))
+		pairOff := f.pairOff(sn)
+		sh := f.scShift(sn)
 		for w := 0; w < pw; w++ {
 			a.VPBROADCASTD(act[w], At(R11, int32(sub*sn+4*w)))
 			if bits == 4 {
@@ -300,14 +207,14 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 			}
 		}
 		a.VBROADCASTSS(da, At(R12, pairOff))
-		a.MOVLoad(RBX, At(RDI, 56)) // rowLoop clobbered it
+		a.MOVLoad(RBX, At(RDI, 56)) // the row loop clobbered it
 		switch {
 		case biasArray:
 			a.VBROADCASTSS(bscale, At(R12, pairOff+4))
 			a.VMOVDQULoad(tmp, At(RBX, 128)) // -8
 			a.VMULPS(bscale, bscale, tmp)
 			a.VMULPS(bscale, bscale, da)
-		case sub == Q8Block/2:
+		case f.sub16:
 			a.VBROADCASTSS(bscale, At(R10, int32(4*sn)))
 			a.VMOVDQULoad(tmp, At(RBX, 288)) // +4
 			a.VMULPS(bscale, bscale, tmp)
@@ -316,7 +223,7 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 			a.VMOVDQULoad(tmp, At(RBX, 160)) // +8
 			a.VMULPS(bscale, bscale, tmp)
 		}
-		rowLoop(func() {
+		packedRowLoop(&a, group, func() {
 			// RSI is the payload cursor and then the scratch base: the cursor
 			// dies when the last word has issued, and the scratch is only read
 			// in the epilogue.
@@ -365,39 +272,17 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 				a.ADDQ(RSI, R13)
 			}
 			// The secondary plane, after the cursor has walked the primary
-			// one, so RSI already points at hi word 0. packSub's pairing makes
-			// each extraction a single shift: byte j of a hi word carries every
-			// element with l%4 == j, ordered by l/4.
-			lanes := 0
-			if hi != 0 {
-				lanes = 8 / hi
-			}
+			// one, so RSI already points at hi word 0; each field is a single
+			// shift (packedFormat.hiFields).
 			for hwi := 0; hwi < hw; hwi++ {
 				prefetch()
 				for g := 0; g < grp; g++ {
 					off := int32(g * vec)
 					a.VMOVDQULoad(pay, pl(off))
-					for half := 0; half < 2; half++ {
-						for w := 0; w < pw; w++ {
-							gi := w + half*pw
-							if gi/lanes != hwi {
-								continue
-							}
-							// The mask already carries the <<4, so the shift is
-							// relative to bit 4 and can go either way.
-							switch sh := hi * (gi % lanes); {
-							case sh < 4:
-								a.VPSLLD(tmp, pay, byte(4-sh))
-								a.VPAND(tmp, tmp, hiMask)
-							case sh == 4:
-								a.VPAND(tmp, pay, hiMask)
-							default:
-								a.VPSRLD(tmp, pay, byte(sh-4))
-								a.VPAND(tmp, tmp, hiMask)
-							}
-							dot.unsigned(&a, iac[g], tmp, act[half*pw+w])
-						}
-					}
+					f.hiFields(hwi, func(half, w, s int) {
+						hiField(&a, tmp, pay, hiMask, s)
+						dot.unsigned(&a, iac[g], tmp, act[half*pw+w])
+					})
 				}
 				a.ADDQ(RSI, R13)
 			}
@@ -424,12 +309,7 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 				} else if perSuper > 1 {
 					a.VMOVDQULoad(tmp, Idx(RSI, R15, 1, off)) // d, precomputed f32
 					a.VMOVDQULoad(pay, Idx(R9, R15, 1, off))  // the scale word
-					if 24-sh > 0 {
-						a.VPSLLD(t2, pay, 24-sh)
-					} else {
-						a.VMOVAPSReg(t2, pay)
-					}
-					a.VPSRLD(t2, t2, 24)
+					scByte(&a, t2, pay, sh)
 					if scOff != 0 {
 						a.VPSUBD(t2, t2, scOffV)
 					}
@@ -453,8 +333,7 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 				} else if biasArray {
 					a.VMOVDQULoad(tmp, Idx(R10, R15, 1, off)) // dmin, precomputed
 					if !minD {                                // Q5_1's m is one: no sc word to read it from
-						a.VPSLLD(pay, pay, 16-sh)
-						a.VPSRLD(pay, pay, 24)
+						scMinByte(&a, pay, pay, sh)
 						a.VCVTDQ2PS(pay, pay)
 						a.VMULPS(tmp, tmp, pay)
 					}
@@ -467,44 +346,10 @@ func EmitPackedMatVecFusedAhead(t quant.Type, dk DotKind, ahead int) ([]byte, er
 				a.VMOVDQUStore(Idx(RCX, R15, 1, off), t2)
 			}
 		})
-		for w := 0; w < words; w++ {
-			a.ADDQ(RDX, R13)
-		}
-		if stream && scStep(sn) || !stream && perSuper > 1 && sn%perWordOf(biasArray) == perWordOf(biasArray)-1 {
-			a.ADDQ(R9, R13)
-		}
+		packedSubStep(&a, &f, sn)
 	}
-	a.ADDimm(R11, int32(perSuper*sub))
-	a.ADDimm(R12, int32(perSuper*sub/Q8Block*8))
-	if sub == Q8Block/2 {
-		a.ADDimm(R10, int32(perSuper*4))
-	}
-	if perSuper == 1 {
-		a.ADDQ(R9, R13)
-	}
+	packedSuperStep(&a, &f, true)
 	a.DEC(RAX)
 	a.JNZ(outer)
-
-	a.VZEROUPPER()
-	a.RET()
-	code := a.Bytes()
-	if len(code) > PackedWideBudget {
-		return nil, fmt.Errorf("jit: EmitPackedMatVecFused: %s is %d bytes, over the %d budget",
-			t, len(code), PackedWideBudget)
-	}
-	return code, nil
-}
-
-func perWordOf(biasArray bool) int {
-	if biasArray {
-		return 2
-	}
-	return 4
-}
-
-func strideOf(biasArray bool) int {
-	if biasArray {
-		return 16
-	}
-	return 8
+	return packedCode(&a, who, t)
 }
