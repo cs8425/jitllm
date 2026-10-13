@@ -1031,6 +1031,7 @@ func (g *devTier) streamStage(m, pl, n int) []byte {
 type mvTail struct {
 	kern    backend.Kernel
 	threads int
+	width   int
 }
 
 type mv struct {
@@ -1059,6 +1060,9 @@ type mv struct {
 	// threads overrides rows*groups when the launch is not one thread per
 	// output row, as for the matrix-instruction kernel (a warp per tile).
 	threads int
+	// width is a staged GEMM's workgroup (its tile's threads) where that is
+	// not 128; zero is 128.
+	width int
 	// rowt is how many rows one decode thread carries, so the grid is
 	// rows/rowt rather than rows. Zero and one both mean one row per thread.
 	rowt int
@@ -6743,6 +6747,8 @@ func (g *devTier) layersSession(s backend.Session) {
 		w := 128
 		if m.group {
 			w = kernels.GroupSplitWidth(m.split)
+		} else if m.width > 0 && k == m.kern {
+			w = m.width
 		}
 		if err == nil {
 			err = lc.launch(k, (threads+w-1)/w, w, bufs...)
@@ -6779,15 +6785,15 @@ func (g *devTier) layersSession(s backend.Session) {
 				out = g.partBuf
 			}
 			if bm.bias != nil {
-				lc.la(bm.kern, bm.threads, r.qs, d, r.sc, g.f16Buf, out, bm.bias)
+				lc.law(bm.kern, bm.threads, bm.width, r.qs, d, r.sc, g.f16Buf, out, bm.bias)
 			} else {
-				lc.la(bm.kern, bm.threads, r.qs, d, r.sc, g.f16Buf, out)
+				lc.law(bm.kern, bm.threads, bm.width, r.qs, d, r.sc, g.f16Buf, out)
 			}
 			if t := bm.tail; t != nil {
 				if bm.bias != nil {
-					lc.la(t.kern, t.threads, r.qs, d, r.sc, g.f16Buf, out, bm.bias)
+					lc.law(t.kern, t.threads, t.width, r.qs, d, r.sc, g.f16Buf, out, bm.bias)
 				} else {
-					lc.la(t.kern, t.threads, r.qs, d, r.sc, g.f16Buf, out)
+					lc.law(t.kern, t.threads, t.width, r.qs, d, r.sc, g.f16Buf, out)
 				}
 			}
 			if bm.split > 1 {

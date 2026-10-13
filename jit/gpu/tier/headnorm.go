@@ -95,3 +95,35 @@ func (g *devTier) freeAltNorms() {
 	}
 	g.altNorms = nil
 }
+
+// dropHead gives back the output projection a device holds once it holds no
+// block: the projection, its norm and logits, and the scratch they ran in.
+// A head that moved to another device left this copy behind with nothing to
+// run it -- the model's largest single tensor, charged to a card that serves
+// none of the model -- so the move frees it (GPU.PrepHeadOn). A device that
+// still holds a block keeps its head: the scratch is that block's too.
+func (g *devTier) dropHead() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	bs := g.bs
+	if bs == nil || bs.head == nil || len(g.layers) > 0 {
+		return
+	}
+	r := bs.head
+	g.dropGraph()
+	g.dropHeadScratch(bs)
+	if r.ok && !r.shared {
+		for k, v := range g.res {
+			if v == r {
+				delete(g.res, k)
+				break
+			}
+		}
+		if n := r.bytes(); n > 0 {
+			g.refund(n)
+		}
+		g.freeResident(r)
+	}
+	g.headSrc, g.headNormHost = nil, nil
+	g.dropAllScratch()
+}

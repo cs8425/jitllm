@@ -39,7 +39,7 @@ func connectErr(err error) error {
 		return connect.NewError(connect.CodeAlreadyExists, err)
 	case errors.Is(err, ErrInvalid):
 		return connect.NewError(connect.CodeInvalidArgument, err)
-	case errors.Is(err, ErrInUse):
+	case errors.Is(err, ErrInUse), errors.Is(err, ErrPlacement):
 		return connect.NewError(connect.CodeFailedPrecondition, err)
 	case errors.Is(err, ErrOverloaded):
 		// Nothing ran; the caller retries after the queue drains.

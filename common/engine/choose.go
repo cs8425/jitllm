@@ -19,6 +19,9 @@ type Driver interface {
 	Pin(path string, bytes uint64)
 	SetPriority(on bool)
 	Relocate(n int)
+	// MoveToNextDevice moves the chat's device blocks to the next device of
+	// its tier, their history with them.
+	MoveToNextDevice()
 	Run(job func()) bool
 	Send(r session.ChatRequest)
 	Stop()
@@ -126,6 +129,7 @@ func (s *Switch) Unload(p string)        { s.do(func(d Driver) { d.Unload(p) }) 
 func (s *Switch) Pin(p string, b uint64) { s.do(func(d Driver) { d.Pin(p, b) }) }
 func (s *Switch) SetPriority(on bool)    { s.do(func(d Driver) { d.SetPriority(on) }) }
 func (s *Switch) Relocate(n int)         { s.do(func(d Driver) { d.Relocate(n) }) }
+func (s *Switch) MoveToNextDevice()      { s.do(func(d Driver) { d.MoveToNextDevice() }) }
 func (s *Switch) Send(r session.ChatRequest) {
 	s.do(func(d Driver) { d.Send(r) })
 }

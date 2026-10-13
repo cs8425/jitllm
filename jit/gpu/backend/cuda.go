@@ -81,6 +81,87 @@ type cudaDev struct {
 	// reqFree is Session's free list; see Session.
 	reqMu   sync.Mutex
 	reqFree []*sessReq
+	// peers is, per other device a CopyPeer has read from, whether peer
+	// access is enabled between the two: asked once (peerTo).
+	peerMu sync.Mutex
+	peers  map[*cudaDev]bool
+}
+
+// CopyPeer is backend.PeerCopier: cuMemcpyPeer from another CUDA device's
+// buffer into one of this device's, after the source's work has landed. The
+// first copy from a device asks the driver whether the two cards address
+// each other (NVLink or PCIe peer-to-peer) and enables it both ways; where
+// they cannot, the driver stages the copy through the host itself, and
+// direct says so.
+func (c *cudaDev) CopyPeer(dst Buf, dstOff int, from Device, src Buf, srcOff, n int) (bool, error) {
+	f, ok := from.(*cudaDev)
+	db, ok1 := dst.(*cudaBuf)
+	sb, ok2 := src.(*cudaBuf)
+	if !ok || !ok1 || !ok2 || db == nil || sb == nil || db.dev != c || sb.dev != f {
+		return false, fmt.Errorf("backend: cuda: a peer copy needs this device's buffer and one of the CUDA device it names")
+	}
+	if f == c {
+		return false, c.Copy(dst, dstOff, src, srcOff, n)
+	}
+	if err := copyRange(db.b.Len(), dstOff, sb.b.Len(), srcOff, n, false); err != nil || n == 0 {
+		return false, err
+	}
+	if !cuda.PeerCopyAvailable() {
+		return false, fmt.Errorf("backend: cuda: this driver has no cuMemcpyPeer")
+	}
+	err := errCUDAClosed
+	f.do(func() { err = f.syncAll() })
+	if err != nil {
+		return false, err
+	}
+	direct := c.peerTo(f)
+	err = errCUDAClosed
+	c.do(func() {
+		if c.hasQueues() {
+			if err = c.syncAll(); err != nil {
+				return
+			}
+		}
+		if err = cuda.CopyPeer(db.b, c.d, dstOff, sb.b, f.d, srcOff, n); err == nil {
+			err = c.syncAll()
+		}
+	})
+	return direct, err
+}
+
+// PeerAccess is backend.PeerCopier's: peerTo for a CUDA device of the same
+// process.
+func (c *cudaDev) PeerAccess(from Device) bool {
+	f, ok := from.(*cudaDev)
+	if !ok || f == c || !cuda.PeerCopyAvailable() {
+		return false
+	}
+	return c.peerTo(f)
+}
+
+// peerTo enables peer access between c and f once, both ways, and reports
+// whether the driver granted it.
+func (c *cudaDev) peerTo(f *cudaDev) bool {
+	c.peerMu.Lock()
+	defer c.peerMu.Unlock()
+	if v, ok := c.peers[f]; ok {
+		return v
+	}
+	ok := c.d.CanAccessPeer(f.d) && f.d.CanAccessPeer(c.d)
+	if ok {
+		err := errCUDAClosed
+		c.do(func() { err = c.d.EnablePeerAccess(f.d) })
+		if err == nil {
+			err = errCUDAClosed
+			f.do(func() { err = f.d.EnablePeerAccess(c.d) })
+		}
+		ok = err == nil
+	}
+	if c.peers == nil {
+		c.peers = map[*cudaDev]bool{}
+	}
+	c.peers[f] = ok
+	return ok
 }
 
 // openCUDA is what backend.Open uses: the first card.

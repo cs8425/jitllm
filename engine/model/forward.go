@@ -78,6 +78,9 @@ func ResetProfile() {
 // forward pass reuses. One State is one conversation; it is not safe to share.
 type State struct {
 	m *Model
+	// pending is the move between devices PrepareMove started and no Commit
+	// or Cancel has ended (moveblocks.go).
+	pending *PendingMove
 	// c is the configuration of the segment this State runs: the text model's
 	// (m.Cfg) for every session a caller makes, the vision tower's for the
 	// State an image is encoded in (vision.go). The blocks are the model's
@@ -904,6 +907,10 @@ func (s *State) dev() nn.LayerDevice {
 // State must be closed before its Model (`defer m.Close()` then
 // `defer st.Close()` gives that order).
 func (s *State) Close() error {
+	// A move prepared and never committed gives its target's copies back.
+	if s.pending != nil {
+		s.pending.Cancel()
+	}
 	if s.expReq != nil {
 		close(s.expReq)
 		s.expReq = nil
@@ -1710,39 +1717,9 @@ func (s *State) offerRange(lo, hi int) {
 				continue
 			}
 		}
-		if err := s.m.pageIn(li); err != nil {
+		plan, w, err := s.blockOffer(li)
+		if err != nil {
 			return
-		}
-		l := &s.m.layers[li]
-		w := s.layerWeightsAt(li)
-		// Every block, not only a mixture's: a device pager needs the host
-		// page re-read on every swap.
-		w.Ensure, w.EnsureExperts = s.ensureLayer(li), s.ensureSelected(li)
-		w.PrefetchExperts = s.prefetchSelected(li)
-		w.HostExperts, w.HostExpertsRows = s.hostExpertsFor(li), s.hostExpertsRowsFor(li)
-		if c.MoE() {
-			// The expert banks are fetched by the tier through Ensure once it
-			// admits the block: pageIn does not read them (the host fetches
-			// only the experts it routes to), and reading here would spend a
-			// bank on every block the budget then refuses.
-			w.Router = wt(l.router)
-			// The expert, not its gate; see the twin above.
-			if l.shGate.rows != 0 || l.shUp.rows != 0 {
-				w.ShGate, w.ShUp, w.ShDown = wt(l.shGate), wt(l.shUp), wt(l.shDown)
-				w.ShRouter = l.shRouter
-			}
-		}
-		// The block is offered and the device decides (PrepLayer). Wq carries
-		// the fused q|k|v projection for a linear block. planFor, not s.plan:
-		// it adds what this block is (its kind, sinks, mixture biases).
-		plan := *s.planFor(li)
-		if k := c.LayerKind(li); k.Recurrent() && !k.Attends() {
-			// A linear block has none of these; leaving the attention four set
-			// would offer a device four matrices whose shapes do not match the
-			// plan it was handed. (planFor clears AttnOutGate for the same
-			// reason: s.plan sets it on every block of a qwen3next.)
-			w.Wk, w.Wv, w.Wo = nn.Weight{}, nn.Weight{}, nn.Weight{}
-			w.QNorm, w.KNorm = nil, nil
 		}
 		took := false
 		if named && place.On != "host" && s.placing {
@@ -1806,35 +1783,96 @@ func (s *State) offerRange(lo, hi int) {
 			continue
 		}
 		s.markOnDev(li)
-		// The block is on the card, so the host gives up its page; pageIn
-		// re-reads it if the seam later moves the block back. Asked, not
-		// assumed: a unified device's buffers alias host memory.
-		// A prediction block keeps its page: its eh_proj runs on the host every
-		// draft step (Speculator.draftRows), and re-reading the page for it
-		// would cost a block of I/O a step.
-		if r, ok := ld.(nn.HostPageReleaser); ok && r.ReleasesHostPage(li) && l.mtp == nil {
-			// Under bind, as pageIn binds: another State may be binding or
-			// reading this block's spans while this one places it. A State
-			// that runs the block on the host keeps it bound (hostUse): it
-			// faults the block in once and then reads its spans unlocked
-			// through every matvec of the block.
-			s.m.bind.Lock()
-			if s.m.hostUse[li] == 0 {
-				keep := false
-				if eh, ok := ld.(nn.ExpertHolder); ok {
-					keep = !eh.HoldsExperts(li)
-				}
-				releaseLayer(s.m.container, li, l, keep)
+		s.releasePlacedPage(ld, li)
+	}
+}
+
+// releasePlacedPage gives back the host page of block li once a device holds
+// it, or tells the devices to drop their lone-matvec copies of a page that
+// stays. offerRange and MoveBlocks share it.
+func (s *State) releasePlacedPage(ld nn.LayerDevice, li int) {
+	l := &s.m.layers[li]
+	// The block is on the card, so the host gives up its page; pageIn
+	// re-reads it if the seam later moves the block back. Asked, not
+	// assumed: a unified device's buffers alias host memory.
+	// A prediction block keeps its page: its eh_proj runs on the host every
+	// draft step (Speculator.draftRows), and re-reading the page for it
+	// would cost a block of I/O a step.
+	if r, ok := ld.(nn.HostPageReleaser); ok && r.ReleasesHostPage(li) && l.mtp == nil {
+		// Under bind, as pageIn binds: another State may be binding or
+		// reading this block's spans while this one places it. A State
+		// that runs the block on the host keeps it bound (hostUse): it
+		// faults the block in once and then reads its spans unlocked
+		// through every matvec of the block.
+		s.m.bind.Lock()
+		if s.m.hostUse[li] == 0 {
+			keep := false
+			if eh, ok := ld.(nn.ExpertHolder); ok {
+				keep = !eh.HoldsExperts(li)
 			}
-			s.m.bind.Unlock()
-		} else if buf := s.m.container.Page(li); len(buf) > 0 {
-			// The page stays (a streamed block's host side reads it), so no
-			// recycle tells the devices to drop the lone-matvec copies they
-			// made of its weights while the host ran it; the block is placed
-			// now and they are dead weight. Said here instead.
-			s.m.forgetCopies(unsafe.Pointer(&buf[0]), uintptr(len(buf)))
+			releaseLayer(s.m.container, li, l, keep)
+		}
+		s.m.bind.Unlock()
+	} else if buf := s.m.container.Page(li); len(buf) > 0 {
+		// The page stays (a streamed block's host side reads it), so no
+		// recycle tells the devices to drop the lone-matvec copies they
+		// made of its weights while the host ran it; the block is placed
+		// now and they are dead weight. Said here instead.
+		s.m.forgetCopies(unsafe.Pointer(&buf[0]), uintptr(len(buf)))
+	}
+}
+
+// blockOffer reads block li's page and gathers what a device is offered for
+// it: the block's plan and its weights with every callback. offerRange and
+// MoveBlocks share it, so a block moved between devices is offered exactly as
+// a placement offers it.
+func (s *State) blockOffer(li int) (nn.LayerPlan, nn.LayerWeights, error) {
+	w, err := s.blockWeights(li)
+	if err != nil {
+		return nn.LayerPlan{}, nn.LayerWeights{}, err
+	}
+	// The block is offered and the device decides (PrepLayer). Wq carries
+	// the fused q|k|v projection for a linear block. planFor, not s.plan:
+	// it adds what this block is (its kind, sinks, mixture biases).
+	return *s.planFor(li), w, nil
+}
+
+// blockWeights is blockOffer's weights: the page read and every callback set.
+// It reads the model and nothing of the State's placement, so a move's
+// staging runs it beside the State's own tokens (PendingMove).
+func (s *State) blockWeights(li int) (nn.LayerWeights, error) {
+	if err := s.m.pageIn(li); err != nil {
+		return nn.LayerWeights{}, err
+	}
+	c := s.c
+	l := &s.m.layers[li]
+	w := s.layerWeightsAt(li)
+	// Every block, not only a mixture's: a device pager needs the host
+	// page re-read on every swap.
+	w.Ensure, w.EnsureExperts = s.ensureLayer(li), s.ensureSelected(li)
+	w.PrefetchExperts = s.prefetchSelected(li)
+	w.HostExperts, w.HostExpertsRows = s.hostExpertsFor(li), s.hostExpertsRowsFor(li)
+	if c.MoE() {
+		// The expert banks are fetched by the tier through Ensure once it
+		// admits the block: pageIn does not read them (the host fetches
+		// only the experts it routes to), and reading here would spend a
+		// bank on every block the budget then refuses.
+		w.Router = wt(l.router)
+		// The expert, not its gate; see the twin above.
+		if l.shGate.rows != 0 || l.shUp.rows != 0 {
+			w.ShGate, w.ShUp, w.ShDown = wt(l.shGate), wt(l.shUp), wt(l.shDown)
+			w.ShRouter = l.shRouter
 		}
 	}
+	if k := c.LayerKind(li); k.Recurrent() && !k.Attends() {
+		// A linear block has none of these; leaving the attention four set
+		// would offer a device four matrices whose shapes do not match the
+		// plan it was handed. (planFor clears AttnOutGate for the same
+		// reason: s.plan sets it on every block of a qwen3next.)
+		w.Wk, w.Wv, w.Wo = nn.Weight{}, nn.Weight{}, nn.Weight{}
+		w.QNorm, w.KNorm = nil, nil
+	}
+	return w, nil
 }
 
 // planExtra is what a placement of blocks [0,hi) must leave room for besides
