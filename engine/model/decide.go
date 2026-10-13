@@ -109,6 +109,10 @@ type Decider struct {
 	batch  *Scheduler
 	dev    nn.Device
 	devMax int
+	// jobs is DecideBatch's prompts, kept from batch to batch (batchJob).
+	jobs []*batchJob
+	// batchN is how many of jobs the last batch ran.
+	batchN int
 
 	// violation names one feature of the readout a test removes, to show the
 	// gate sees it (RULE 10). Empty in every caller but those tests.

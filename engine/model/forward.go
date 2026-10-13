@@ -398,6 +398,9 @@ type State struct {
 	// tailPos is a ragged tail step's positions, kept so the step allocates
 	// nothing once grown.
 	tailPos []int
+	// rtTook, rtStart and rtSeen are rowsTake's scratch, kept from step to step.
+	rtTook, rtStart []int
+	rtSeen          []bool
 	// relocate hands the device's highest block to the host when its history
 	// cannot grow, rather than letting the token fail. See SetRelocate.
 	relocate     bool

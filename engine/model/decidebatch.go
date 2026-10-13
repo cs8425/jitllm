@@ -34,30 +34,77 @@ type DecisionResult struct {
 	Err         error
 }
 
+// batchJob is one prompt of a batch: which request, question and variant it
+// asks, what its readout reads, and the scores it came out with. A Decider
+// keeps its jobs from batch to batch (Decider.jobs), each with its sequence
+// and the function that reads the sequence's logits made once, so a warm
+// batch's engine half allocates nothing.
+type batchJob struct {
+	d       *Decider
+	r, q, v int
+	qt      jlm.QuestionType
+	ids     []int32
+	groups  [][]int32
+	markers []int
+	scores  []float32
+	seq     Seq
+	sample  func([]float32) int32
+	err     error
+}
+
+// read is the job's sequence's Sample: the label scores at the prompt's last
+// row, into the job's own scores.
+func (j *batchJob) read(lg []float32) int32 {
+	vals := j.scores[:0]
+	for _, g := range j.groups {
+		for _, id := range g {
+			if int(id) >= len(lg) {
+				j.err = fmt.Errorf("label id %d is past the %d logits", id, len(lg))
+				return 0
+			}
+			vals = append(vals, lg[id])
+		}
+	}
+	j.scores = vals
+	s, err := j.d.labelScoresOf(vals, j.groups, 0)
+	if err != nil {
+		j.err = err
+		return 0
+	}
+	j.scores = append(j.scores[:0], s...)
+	return 0
+}
+
+// job is the Decider's i-th kept job, cleared for a new prompt.
+func (d *Decider) job(i int) *batchJob {
+	for len(d.jobs) <= i {
+		j := &batchJob{d: d}
+		j.sample = j.read
+		d.jobs = append(d.jobs, j)
+	}
+	j := d.jobs[i]
+	j.err = nil
+	return j
+}
+
 // DecideBatch answers every request, in order: out[i] is what Decide would
 // answer for reqs[i] alone. A request that fails its checks fails alone
 // (out[i].Err); an error running the batch fails it whole.
 func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) {
 	out := make([]DecisionResult, len(reqs))
-	type job struct {
-		r, q, v int
-		ids     []int32
-		groups  [][]int32
-		markers []int
-		scores  []float32
-	}
-	var jobs []*job
+	n := 0
 	for r := range reqs {
 		rq, res := &reqs[r], &out[r]
 		if res.Err = d.Prepare(rq.State, rq.Questions); res.Err != nil {
 			continue
 		}
-		var mine []*job
+		first := n
 	questions:
 		for qi := range rq.Questions {
 			q := &rq.Questions[qi]
 			for v := range d.variants(q) {
-				j := &job{r: r, q: qi, v: v}
+				j := d.job(n)
+				j.r, j.q, j.v, j.qt = r, qi, v, q.Type
 				var err error
 				if d.kind == jlm.DecisionLaya {
 					j.ids, j.markers, err = d.layaSequence(rq.State, q)
@@ -66,58 +113,20 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 				}
 				if err != nil {
 					res.Err = fmt.Errorf("questions.%s: %w", q.ID, err)
+					n = first
 					break questions
 				}
-				mine = append(mine, j)
+				n++
 			}
 		}
-		if res.Err == nil {
-			jobs = append(jobs, mine...)
-		}
 	}
-	d.input = 0
+	jobs := d.jobs[:n]
+	d.batchN = n
 	for _, j := range jobs {
 		out[j.r].InputTokens += len(j.ids)
-		d.input += len(j.ids)
 	}
-	if d.kind == jlm.DecisionLaya {
-		for _, j := range jobs {
-			s, err := d.layaForward(j.ids, reqs[j.r].Questions[j.q].Type, j.markers, 0)
-			if err != nil {
-				return nil, err
-			}
-			j.scores = append([]float32(nil), s...)
-		}
-	} else if len(jobs) > 0 {
-		sc, err := d.batchSession(min(len(jobs), decisionBatchRows))
-		if err != nil {
-			return nil, err
-		}
-		var failed error
-		for _, j := range jobs {
-			sc.Submit(&Seq{Prompt: j.ids, MaxTokens: 1, Sample: func(lg []float32) int32 {
-				s, err := d.labelScores(lg, j.groups)
-				if err != nil && failed == nil {
-					failed = err
-				}
-				j.scores = s
-				return 0
-			}})
-		}
-		for sc.Pending() > 0 || sc.Live() > 0 {
-			done, err := sc.Step()
-			if err != nil {
-				return nil, err
-			}
-			for _, s := range done {
-				if s.Err != nil {
-					return nil, s.Err
-				}
-			}
-		}
-		if failed != nil {
-			return nil, failed
-		}
+	if err := d.runJobs(jobs); err != nil {
+		return nil, err
 	}
 	// The answers, each from its question's variants, in the request's order.
 	at := 0
@@ -145,6 +154,55 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 		}
 	}
 	return out, nil
+}
+
+// runJobs runs a batch's prompts and leaves each job's scores: the engine's
+// half of a batch, which makes no heap allocation once warm
+// (TestDecisionDoesNotAllocate). An encoder's run one pass each; a decoder's
+// as rows of the batch session.
+func (d *Decider) runJobs(jobs []*batchJob) error {
+	d.input = 0
+	for _, j := range jobs {
+		d.input += len(j.ids)
+	}
+	if d.kind == jlm.DecisionLaya {
+		for _, j := range jobs {
+			s, err := d.layaForward(j.ids, j.qt, j.markers, 0)
+			if err != nil {
+				return err
+			}
+			j.scores = append(j.scores[:0], s...)
+		}
+		return nil
+	}
+	if len(jobs) == 0 {
+		return nil
+	}
+	sc, err := d.batchSession(min(len(jobs), decisionBatchRows))
+	if err != nil {
+		return err
+	}
+	for _, j := range jobs {
+		j.seq = Seq{Prompt: j.ids, MaxTokens: 1, Sample: j.sample, Out: j.seq.Out[:0]}
+		sc.Submit(&j.seq)
+	}
+	for sc.Pending() > 0 || sc.Live() > 0 {
+		done, err := sc.Step()
+		if err != nil {
+			return err
+		}
+		for _, s := range done {
+			if s.Err != nil {
+				return s.Err
+			}
+		}
+	}
+	for _, j := range jobs {
+		if j.err != nil {
+			return j.err
+		}
+	}
+	return nil
 }
 
 // batchSession is the Decider's batch session, at least rows wide, placed on

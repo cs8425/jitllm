@@ -149,4 +149,42 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 	}
 	allocVerdict(t, fmt.Sprintf("%d prompt(s), %d of %d blocks placed", len(ps), placed, nb), w, len(ps),
 		m.PagerReads()-r0, 0)
+
+	// A batch: every request twice in one DecideBatch, its prompts written
+	// by the batch and then run again in the window as the batch ran them
+	// (runJobs) -- a decoder's as rows of the batch session.
+	var reqs []DecisionRequest
+	for range 2 {
+		for _, req := range decisionRequests {
+			state, qs := decisionRequest(t, filepath.Join("testdata", "decision", req+".json"))
+			reqs = append(reqs, DecisionRequest{state, qs})
+		}
+	}
+	for range 2 {
+		if _, err := d.DecideBatch(reqs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobs := d.jobs[:d.batchN]
+	if err := d.runJobs(jobs); err != nil {
+		t.Fatal(err)
+	}
+	st0 := d.BatchStats()
+	r0 = m.PagerReads()
+	w = countAllocs(func() {
+		if err := d.runJobs(jobs); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !m.IsEncoder() {
+		st := d.BatchStats()
+		if st.Steps == st0.Steps || st.MaxSeqs < 2 {
+			t.Fatalf("the batch ran %d steps, at most %d prompts in one: it was not batched", st.Steps-st0.Steps, st.MaxSeqs)
+		}
+		if got := d.BatchDeviceBlocks(); got != placed {
+			t.Fatalf("the batch session holds %d device blocks, the Decider %d", got, placed)
+		}
+	}
+	allocVerdict(t, fmt.Sprintf("a batch of %d prompt(s), %d of %d blocks placed", len(jobs), placed, nb), w, len(jobs),
+		m.PagerReads()-r0, 0)
 }
