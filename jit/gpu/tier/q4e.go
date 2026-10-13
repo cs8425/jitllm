@@ -39,8 +39,8 @@ func q4eWhyNot(p *nn.LayerPlan) string {
 	case q.HCMult < 1 || q.HCLowRank%32 != 0 || hd%32 != 0 || q.NGramWidth%32 != 0:
 		return fmt.Sprintf("hyper-connections of %d streams at rank %d and an n-gram width of %d: "+
 			"the activation quantizer works in 32-element blocks", q.HCMult, q.HCLowRank, q.NGramWidth)
-	case q.QSARatio != 0:
-		return "a QSA block: its block selection has no device kernels yet"
+	case q.QSARatio != 0 && qsaWhyNot(p) != "":
+		return qsaWhyNot(p)
 	case p.Parallel || p.AltUp != 0 || p.DS4 != nil || p.K3 != nil:
 		return "hyper-connections beside another residual structure"
 	case q.NGramHere && (p.Recurrent.Conv == 0 || p.Recurrent.TailLen < hd*q.NGramDil*(q.NGramConv-1)):

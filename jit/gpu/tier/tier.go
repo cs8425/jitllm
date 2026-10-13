@@ -651,6 +651,9 @@ type Stats struct {
 	// MSASelects counts MiniMax Sparse Attention's block selections a device
 	// ran (msa.go): one per attention call of a selecting block.
 	MSASelects int
+	// QSASelects counts QSA block selections a device ran (qsa.go): one per
+	// attention call of a Qwen3.8-Flash-Next block.
+	QSASelects int
 	// AltUpBlocks counts Gemma 3n blocks a device ran its AltUp prediction
 	// for (altup.go).
 	AltUpBlocks int
@@ -1144,6 +1147,7 @@ func (s *Stats) add(o Stats) {
 	s.MLABatched += o.MLABatched
 	s.IdxSelects += o.IdxSelects
 	s.MSASelects += o.MSASelects
+	s.QSASelects += o.QSASelects
 	s.AltUpBlocks += o.AltUpBlocks
 	s.DS4Blocks += o.DS4Blocks
 	s.DS4HC += o.DS4HC

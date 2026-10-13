@@ -596,6 +596,10 @@ type Q4EPlan struct {
 	NGramConv         int
 	NGramDil          int
 	NGramHere         bool
+	// QSARope is the rotary's folded planes at a scalar position (Rope.
+	// TabPlanes), which a QSA block's pooled keys turn by at their blocks'
+	// first positions: an M-RoPE model's text rows turn by the same table.
+	QSARope []float32
 	// Fault breaks one piece of the graph on purpose, set only by a gate;
 	// the host honours the same faults (model's q4eFault).
 	Fault Q4EFault

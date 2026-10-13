@@ -111,6 +111,8 @@ type layer struct {
 	// selects its key blocks; idxQ/mvMQ is its indexer query and nIdxQ that
 	// query's per-head norm, the key being idxK/mvIK with nIdxK.
 	msa   bool
+	// qsa is a Qwen3.8-Flash-Next attention block's QSA selection (qsa.go).
+	qsa bool
 	idxQ  *resident
 	mvMQ  mv
 	nIdxQ backend.Buf
@@ -2779,7 +2781,7 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 		if i >= 24 && i <= 28 && p.DS4 == nil {
 			// MiniMax-M3's indexer has a key (25) and its own query (30),
 			// not DeepSeek V3.2's query latent (24) or weights (26).
-			if (i < 27 && (p.IdxHeads == 0 || p.MSA() && i != 25)) || (i >= 27 && p.AltUp == 0) {
+			if (i < 27 && (p.IdxHeads == 0 || (p.MSA() || p.QSA()) && i != 25)) || (i >= 27 && p.AltUp == 0) {
 				continue
 			}
 			if len(x.Data) == 0 {
@@ -2813,7 +2815,7 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 		}
 		// MiniMax-M3's indexer query (30), absent by construction elsewhere.
 		if i == 30 {
-			if !p.MSA() {
+			if !p.MSA() && !p.QSA() {
 				continue
 			}
 			if len(x.Data) == 0 {
@@ -3315,7 +3317,8 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 		up(&l.nK, w.KNorm)
 	}
 	// MiniMax-M3's indexer norms, each one head wide.
-	if l.msa = p.MSA(); l.msa {
+	l.qsa = p.QSA()
+	if l.msa = p.MSA(); l.msa || l.qsa {
 		if len(w.IdxQNorm) != p.IdxHeadDim || len(w.IdxKNorm) != p.IdxHeadDim {
 			g.LastErr = fmt.Sprintf("block %d: the indexer norms are %d/%d wide, want %d",
 				li, len(w.IdxQNorm), len(w.IdxKNorm), p.IdxHeadDim)
@@ -5602,14 +5605,22 @@ func (g *devTier) PrepHead(h *nn.Head) bool {
 		return false
 	}
 	var err error
-	f := make([]float32, len(h.Norm))
-	for i, v := range h.Norm {
-		f[i] = float32(v)
-	}
-	if bs.hNorm, err = g.dev.Alloc(len(f) * 4); err != nil {
-		return false
-	}
-	if bs.hNorm.Write(f32b(f)) != nil {
+	// A head with no norm (Qwen3.8-Flash-Next's reads its mix as it is)
+	// leaves hNorm nil, and the emit copies the row where the norm would
+	// have written.
+	if len(h.Norm) > 0 {
+		f := make([]float32, len(h.Norm))
+		for i, v := range h.Norm {
+			f[i] = float32(v)
+		}
+		if bs.hNorm, err = g.dev.Alloc(len(f) * 4); err != nil {
+			return false
+		}
+		if bs.hNorm.Write(f32b(f)) != nil {
+			return false
+		}
+	} else if bs.copyRows == nil {
+		g.LastErr = "a head with no norm, on a scratch with no copy for it"
 		return false
 	}
 	// A LayerNorm head needs its bias; an RMSNorm one has none.
@@ -5635,7 +5646,7 @@ func (g *devTier) PrepHead(h *nn.Head) bool {
 	bs.head, bs.mvHead = r, mv{kern: kern, red: red, rows: h.W.Rows, split: split}
 	g.shapeChanged()
 	g.headSrc, g.headNormHost = &h.W.Data[0], slices.Clone(h.Norm)
-	g.charge(uint64(len(f)*4 + h.W.Rows*4))
+	g.charge(uint64(len(h.Norm)*4 + h.W.Rows*4))
 	bs.headEmbeds, bs.embScale = h.Embeds, h.EmbdScale
 	if bs.embScale == 0 {
 		bs.embScale = 1
@@ -6460,8 +6471,8 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 			if pk.st != nil && pk.idx != nil {
 				return refuse("the lightning indexer reads the whole history and part of it is evicted")
 			}
-			// So does MiniMax-M3's block selection (msa.go).
-			if pk.st != nil && pk.msa != nil {
+			// So do MiniMax-M3's and QSA's block selections (msa.go, qsa.go).
+			if pk.st != nil && (pk.msa != nil || pk.qsa != nil) {
 				return refuse("the block selection reads the whole history and part of it is evicted")
 			}
 		}
@@ -7207,6 +7218,11 @@ func (g *devTier) layersSession(s backend.Session) {
 				if l.k3 != nil {
 					ain = g.k3AttnIn(lc, bs, l, R)
 				}
+				if l.q4e != nil {
+					// The hyper-connection's mix (q4e.go); an attention
+					// block carries no n-gram embedding, so no state.
+					ain = g.q4eAttnIn(lc, bs, l, R, mvrunAct, nil, nil, nil)
+				}
 				// The operand prologue (fuseActIn): q/k/v normalise and quantize
 				// the block input themselves, and the norm launch goes. Only
 				// where q/k/v run as the fused launch below (qkvIn) or as
@@ -7492,6 +7508,20 @@ func (g *devTier) layersSession(s backend.Session) {
 						}
 						kSrc, kHeads = pk.msa.kAll, kHeads+1
 					}
+					// Qwen3.8-Flash-Next's: the raw key joins the row,
+					// which is copied whole; only k's heads turn (qsa.go).
+					if l.qsa {
+						if pk == nil || pk.qsa == nil {
+							if err == nil {
+								err = fmt.Errorf("tier: block %d selects its keys and has no paged scratch here", li)
+							}
+							return
+						}
+						if err == nil {
+							err = g.qsaKeyQuery(lc, bs, l, R, kSrc, bs.cs, mvrun)
+						}
+						kSrc = pk.qsa.kAll
+					}
 					fusedKV := false
 					if !skip["rope"] {
 						// An unrotated layer still needs K and V in the cache: q is read where
@@ -7514,7 +7544,7 @@ func (g *devTier) layersSession(s backend.Session) {
 							if bs.copyQ != nil {
 								lc.la(bs.copyQ, R*qdim, qSrc, bs.qr, qOff)
 							}
-							if copyK != nil && partialRotary(p) && !shared {
+							if copyK != nil && (partialRotary(p) || l.qsa) && !shared {
 								laKV(copyK, R*kvDim, kSrc, kDst, kOff)
 							}
 							if pk != nil && pk.ropeQKV != nil && !shared && bs.copyQ == nil && kHeads == p.NKVHead &&
@@ -7589,7 +7619,12 @@ func (g *devTier) layersSession(s backend.Session) {
 					// kernel and the softmax, so it takes the three-kernel path.
 					useFlash := g.flashOn() && flash != nil && !skip["scores"] && !skip["softmax"] && !skip["acc"] &&
 						!l.windowed
-					if !skipAttn && l.msa {
+					if !skipAttn && l.qsa {
+						if err == nil {
+							err = g.qsaAttend(s, lc, bs, R, pk, g.kvp.layers[l.kvSrc], l, qAtt, bs.n, bs.xb)
+							g.PagedLaunches++
+						}
+					} else if !skipAttn && l.msa {
 						// Each kv group's kept blocks, gathered, then the decode
 						// plan over them, a chunk's rows included (msa.go).
 						if err == nil {
@@ -8495,8 +8530,12 @@ func (g *devTier) layersSession(s backend.Session) {
 			// out because mvrun's R is the chunk's.
 			hr := hb.head
 			lc.la(hb.spanK, p.NEmbd, bs.x, hb.x, hb.spanOff)
-			lc.la(hb.normPart, hb.parts, hb.x, hb.part)
-			lc.la(hb.normApply, p.NEmbd, hb.x, hNorm, hb.part, hb.h)
+			if hNorm == nil {
+				lc.la(hb.copyRows, p.NEmbd, hb.x, hb.h)
+			} else {
+				lc.la(hb.normPart, hb.parts, hb.x, hb.part)
+				lc.la(hb.normApply, p.NEmbd, hb.x, hNorm, hb.part, hb.h)
+			}
 			lc.la(hb.quantE, kernels.QuantizeThreads(p.NEmbd/32), hb.h, hb.a, hb.ax)
 			m := hb.mvHead
 			if g.TableSplit && m.alt != nil {
@@ -8524,7 +8563,10 @@ func (g *devTier) layersSession(s backend.Session) {
 		} else if head != nil {
 			// The output norm and the vocabulary projection, in the same
 			// submission: the residual stream never comes home.
-			if bs.normVar != nil {
+			if hNorm == nil {
+				// No output norm: the row as it is.
+				lc.la(bs.copyRows, R*p.NEmbd, bs.x, bs.h)
+			} else if bs.normVar != nil {
 				// A LayerNorm head (C6): its mean, variance and apply, with
 				// the output norm's bias (zeros where the file has none).
 				norm(bs.x, hNorm, bs.hNormB)
@@ -8535,7 +8577,7 @@ func (g *devTier) layersSession(s backend.Session) {
 			// each repeat costs exactly one extra tiny dispatch, which prices whether
 			// the head's fixed per-token cost is dispatch structure or work (see the
 			// Metal entries in AGENTS.md).
-			if bs.normVar == nil {
+			if bs.normVar == nil && hNorm != nil {
 				for r := 0; r < g.HeadNormRepeat; r++ {
 					lc.la(bs.normApply, p.NEmbd, bs.x, hNorm, bs.part, bs.h)
 				}

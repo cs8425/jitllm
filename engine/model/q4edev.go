@@ -19,6 +19,9 @@ func (s *State) q4ePlan(li int, plan *nn.LayerPlan) {
 	q := &nn.Q4EPlan{HCMult: c.HCMult, HCLowRank: c.HCLowRank, Fault: c.q4eFault}
 	if c.QSAAt(li) {
 		q.QSARatio = c.QSARatio
+		if c.NRot > 0 {
+			q.QSARope = s.m.rope.TabPlanes(c.NRot / 2)
+		}
 		plan.IdxHeads, plan.IdxHeadDim, plan.IdxTopK = c.IdxHeads, c.IdxHeadDim, c.IdxTopK
 	} else {
 		plan.IdxHeads, plan.IdxHeadDim, plan.IdxTopK = 0, 0, 0
