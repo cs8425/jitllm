@@ -4,7 +4,6 @@ go 1.27.1
 
 require (
 	charm.land/lipgloss/v2 v2.0.4 // indirect
-	connectrpc.com/connect v1.21.0 // indirect
 	github.com/alecthomas/chroma/v2 v2.20.0 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
@@ -47,6 +46,7 @@ require (
 
 require (
 	charm.land/glamour/v2 v2.0.1
+	connectrpc.com/connect v1.21.0
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
