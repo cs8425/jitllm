@@ -148,6 +148,51 @@ answer arithmetic. The numbers are consistent with the host. There is no bytes p
 token or roofline figure: a request is a short prefill and the engine is
 compute-bound, not weight-bandwidth-bound.
 
+### CUDA after the device fixes: where a request's time went, and the rows
+
+The rows above were not diagnosed when they were taken. Every block was on the
+card for all three models (Laya 30 of 30, the 28 encoder blocks and the 2 head
+blocks; d1 30 of 30; Lev 32 of 32), so placement was not the gap. Measured with
+nvprof and a Go CPU profile of `jitllm decide` on the V100, a request's time
+went to:
+
+| model | where the time went | fix |
+|---|---|---|
+| d1-3B Q8_0 | about 13 ms of kernels, and about 14 ms more whenever the prompt crossed a 32-row grain: the words give 31-34 token prompts, which run at 32 or 64 rows, and the tier kept one exact-width batched scratch, rebuilt (allocation, a compile-cache lookup that gob-hashes every kernel's IR, free) at each crossing | a lane keeps up to four exact widths, least recently used given back |
+| Lev 4B Q8_0 | about 30 ms of a 70 ms request resetting the recurrent state: 96 pageable 2 MiB zero uploads, one per half of every delta-rule block | the zeros go up once and each half is copied on the card |
+| Laya BF16 | about 32 ms in the bfloat16 matvecs: sm_70 had no tensor-core batched kernel for a float weight (the FMA tile ran the 1024x2624 projection at 12 GB/s), and the staged GEMM waited on the integer MMA's refusal, which a float-only model never asks for | GemmVolta stages a two-byte float weight as binary16; 64-row tiles for ModernBERT's 2624; an encoder block skips the int8 quantize its f16 twins never read |
+
+Not done, and their measured size: the vocabulary head still runs whole before
+the label pick (0.8 ms of a Lev request, 0.33 ms of d1's); Lev's 102-104 token
+prompts run at 128 rows (no sm_70 tile is narrower than 32 tokens, so no width
+between 96 and 128 exists); a CUDA graph over Laya's fixed-width encoder call
+was tried, replayed with the same answers and moved the request 12.9 to 12.5-12.65
+ms, inside the noise: the card is busy, not the launches, so it was not kept.
+
+Same method, host, card, engines' versions and pinning as the rows above
+(jitllmd built from this branch; llama.cpp b11514 CUDA, `-ngl 99`), the A/A
+control first, then two A/B runs of 20 rounds, 8-second windows.
+
+| model | jitllm p50 | llama.cpp p50 | p50 ratio, run 1 / run 2 (IQR/median) | words ratio, run 1 / run 2 | A/A p50 ratio, words ratio |
+|---|---|---|---|---|---|
+| Laya BF16 | 13.4 ms | 14.1-14.3 ms | 1.060 / 1.054 (0.021, 0.035) | 1.100 / 1.094 | 1.000, 0.998 |
+| d1-3B Q8_0 | 13.5-13.9 ms | 16.3 ms | 1.215 / 1.176 (0.059, 0.091) | 1.154 / 1.153 | 1.000 (IQR/median 0.139: rejected), 0.998 |
+| Lev 4B Q8_0 | 45.5-46.5 ms | 53.6 ms | 1.182 / 1.151 (0.020, 0.014) | 1.191 / 1.150 | 1.007, 1.006 |
+
+d1's p50 A/A control is rejected (IQR/median 0.139): a d1 request runs at 32 or
+64 rows by its word, so its per-window median sits on either side of a
+two-valued distribution. Its words ratio (A/A 0.998, IQR/median 0.002) is the
+row to read for d1. The load average read 6-11 during Laya's A/B runs (PSI
+some avg10 at most 1.15); its A/A control was taken in the same pass.
+
+Accuracy on the 233 words is unchanged on CUDA: jitllm Laya 131/233, d1
+192/233, Lev 190/233, each as before; llama.cpp the same as before.
+
+The CPU rows, taken again with this branch's binary: Laya 1.469 / 1.472, d1
+1.221 / 1.220, Lev 1.174 / 1.173 (p50 ratios; A/A 1.027, 0.997, 0.988), against
+1.455, 1.232, 1.174 before: the changes are CUDA-side, and the CPU rows did
+not move beyond their controls.
+
 ### What this does not cover
 
 Serial single requests only: no concurrent clients, no multi-question requests.

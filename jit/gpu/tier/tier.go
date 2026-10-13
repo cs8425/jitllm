@@ -937,6 +937,13 @@ type Stats struct {
 	// selection check that an arrival or a departure moved the other sessions'
 	// states at all.
 	RecCarryBytes uint64
+	// RecZeroBytes counts the bytes a seat's zeroing copied on the device
+	// from the zeros uploaded once (recZeroLayers): device copies that are
+	// not a carry.
+	RecZeroBytes, RecZeroCopies uint64
+	// RecZeroSource counts the bytes of zeros those copies read, uploaded
+	// once a zeroing.
+	RecZeroSource uint64
 	// PagedStagedLaunches counts decode attentions that ran the staged
 	// kernels rather than FlashDecodeKV (kernels.ChooseDecodePlan).
 	PagedStagedLaunches int
@@ -1239,6 +1246,9 @@ func (s *Stats) add(o Stats) {
 	s.RowsLatent += o.RowsLatent
 	s.RecAligns += o.RecAligns
 	s.RecCarryBytes += o.RecCarryBytes
+	s.RecZeroBytes += o.RecZeroBytes
+	s.RecZeroCopies += o.RecZeroCopies
+	s.RecZeroSource += o.RecZeroSource
 	s.PagedPrefill70 += o.PagedPrefill70
 	s.PagedAccMMA += o.PagedAccMMA
 	s.FlashPrefill80 += o.FlashPrefill80
