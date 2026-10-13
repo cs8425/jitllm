@@ -57,6 +57,11 @@ const (
 	q4eFaultNoTail
 	// q4eFaultSiLUGate gates the delta rule's output by silu, qwen3next's.
 	q4eFaultSiLUGate
+	// q4eFaultUnscaledGate drops the 1/H before the gate's silu.
+	q4eFaultUnscaledGate
+	// q4eFaultHalfPlace places at sigmoid(inject/H), without the factor of
+	// two that centres a weight on one.
+	q4eFaultHalfPlace
 )
 
 // Q4E reports that the model is Qwen3.8-Flash-Next's graph: low-rank gated
@@ -392,7 +397,9 @@ func (s *State) hcMix(x []float32, n int, hc *q4eHC) error {
 		if err := s.mm(lo, hc.down, xn, n); err != nil {
 			return err
 		}
-		s.scale(lo, 1/float32(h))
+		if c.q4eFault != q4eFaultUnscaledGate {
+			s.scale(lo, 1/float32(h))
+		}
 		nn.Act32JIT(lo, nn.ActSiLU)
 		s.jit.NewInput()
 		if err := s.mm(gate, hc.up, lo, n); err != nil {
@@ -420,6 +427,9 @@ func (s *State) hcMix(x []float32, n int, hc *q4eHC) error {
 	}
 	s.scale(w, 1/float32(h))
 	nn.SigmoidMul32JIT(w, g.twos[:n*h])
+	if c.q4eFault == q4eFaultHalfPlace {
+		s.scale(w, 0.5)
+	}
 	s.jit.NewInput()
 	return nil
 }

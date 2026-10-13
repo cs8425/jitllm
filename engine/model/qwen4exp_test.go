@@ -71,3 +71,81 @@ func TestQwen4ExpMatchesTransformers(t *testing.T) {
 		})
 	}
 }
+
+// q4eViolations take one piece of the graph out at a time. Each must move the
+// logits far past c6NMSE.
+var q4eViolations = []c6Violation{
+	{"the streams mixed by their plain mean", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultNoGate })
+	}},
+	{"the gate's low rank not divided by the stream count", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultUnscaledGate })
+	}},
+	{"every stream placed at weight one", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultPlainPlace })
+	}},
+	{"the placement without its factor of two", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultHalfPlace })
+	}},
+	{"no n-gram embedding", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultNoNGram })
+	}},
+	{"the n-gram embedding without its convolution", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultNoNGramConv })
+	}},
+	{"the n-gram window not reset at the end of a sequence", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultNoEOSReset })
+	}},
+	{"another 2-gram multiplier", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) {
+			c.NGramMul = slices.Clone(c.NGramMul)
+			c.NGramMul[1] += 2
+		})
+	}},
+	{"every key read on the QSA blocks", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultDenseQSA })
+	}},
+	{"a QSA block scored by its first key", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultQSAFirstKey })
+	}},
+	{"the incomplete tail dropped from the selection", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultNoTail })
+	}},
+	{"the QSA budget a block short", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.IdxTopK -= c.QSARatio })
+	}},
+	{"the delta rule's output gated by silu", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.q4eFault = q4eFaultSiLUGate })
+	}},
+}
+
+// TestQwen4ExpFeaturesAreLoadBearing runs each violation through decode: the
+// fixture must see every one.
+func TestQwen4ExpFeaturesAreLoadBearing(t *testing.T) {
+	for _, fx := range q4eFixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			m, g := openQ4E(t, fx.name)
+			defer m.Close()
+			for _, v := range q4eViolations {
+				t.Run(v.name, func(t *testing.T) {
+					undo := v.mut(m)
+					defer undo()
+					st := m.NewState(len(g.IDs) + 1)
+					defer st.Close()
+					worst := 0.0
+					for p, id := range g.IDs {
+						lg, err := st.Forward(id)
+						if err != nil {
+							t.Fatal(err)
+						}
+						worst = max(worst, llama4Cmp(g.Pos[p].Head, lg))
+					}
+					if !(worst > 1e3*c6NMSE) {
+						t.Errorf("the gate cannot see it: worst NMSE %.3e", worst)
+					}
+					t.Logf("worst NMSE %.3e", worst)
+				})
+			}
+		})
+	}
+}
