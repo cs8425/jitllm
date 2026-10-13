@@ -58,12 +58,12 @@ between memory speed and disk speed.
 
 <!-- test: background -->
 ```sh
-jitllmd serve -addr 127.0.0.1:8080 -models models -load stories260K.jlm -id stories -devices cpu -maxmem 1M
+jitllmd serve -addr 127.0.0.1:4242 -models models -load stories260K.jlm -id stories -devices cpu -maxmem 1M
 ```
 
 ```sh
-for i in $(seq 60); do curl -sf http://127.0.0.1:8080/healthz && break; sleep 1; done
-jitllmd devices -addr 127.0.0.1:8080
+for i in $(seq 60); do curl -sf http://127.0.0.1:4242/healthz && break; sleep 1; done
+jitllmd devices -addr 127.0.0.1:4242
 ```
 <!-- test: expect spendable -->
 
@@ -74,11 +74,11 @@ silicon's are host memory, counted once).
 Read the model's pager, then lower its budget without a restart:
 
 ```sh
-jitllmd place -addr 127.0.0.1:8080 -model stories
-jitllmd place -addr 127.0.0.1:8080 -model stories -maxmem 400K
-curl -s http://127.0.0.1:8080/v1/completions -H 'Content-Type: application/json' \
+jitllmd place -addr 127.0.0.1:4242 -model stories
+jitllmd place -addr 127.0.0.1:4242 -model stories -maxmem 400K
+curl -s http://127.0.0.1:4242/v1/completions -H 'Content-Type: application/json' \
   -d '{"model":"stories","prompt":"Once upon a time","max_tokens":16,"temperature":0}'
-jitllmd stats -addr 127.0.0.1:8080
+jitllmd stats -addr 127.0.0.1:4242
 ```
 <!-- test: expect budget -->
 <!-- test: expect there was a little girl named Lily -->

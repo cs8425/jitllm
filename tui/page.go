@@ -84,7 +84,7 @@ func (env *env) syncAPI() string {
 	}
 	var msg string
 	var held localserver.Info
-	env.api, msg, held = api.Toggle(env.api, env.cfg.API, env.cfg.APIAddr, srv)
+	env.api, msg, held = api.Toggle(env.api, env.cfg.API, env.cfg.APIAddr, srv, api.WithKey(env.cfg.ServingKey()))
 	if held.Addr != "" {
 		// Refused: a jitllmd holds the address. The setting goes back off
 		// rather than claiming an API this app does not serve.

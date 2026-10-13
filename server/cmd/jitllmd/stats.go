@@ -26,7 +26,7 @@ func cmdStats(ctx context.Context, c cli, args []string) error {
 	if err := parse(c, fs, args); err != nil {
 		return err
 	}
-	cn, err := dial(*addr)
+	cn, err := target(ctx, c, fs, *addr)
 	if err != nil {
 		return err
 	}

@@ -173,7 +173,7 @@ func TestDevicesPrintsTheSpendableTotalAndNamesAUnifiedHeap(t *testing.T) {
 	// Pinned to the server's own spendable_total rather than a literal: the
 	// host budget depends on the host's cgroup, and a literal would let a
 	// client that summed every heap pass.
-	cn, err := dial(addr)
+	cn, err := dial(addr, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,14 +370,14 @@ func TestRunRefusesToGuessBetweenSeveralModels(t *testing.T) {
 
 // ---------------------------------------------------------------- addresses
 
-// TestBaseURLMeansTheSameThingOnBothSidesOfTheBinary: `-addr :8080` must mean
+// TestBaseURLMeansTheSameThingOnBothSidesOfTheBinary: `-addr :4242` must mean
 // what it means to `jitllmd serve`.
 func TestBaseURLMeansTheSameThingOnBothSidesOfTheBinary(t *testing.T) {
 	ok := []struct{ in, want string }{
-		{"", "http://127.0.0.1:8080"},
-		{":8080", "http://localhost:8080"},
+		{"", "http://localhost:4242"},
+		{":4242", "http://localhost:4242"},
 		{":9090", "http://localhost:9090"},
-		{"localhost:8080", "http://localhost:8080"},
+		{"localhost:4242", "http://localhost:4242"},
 		{"box.local:7000", "http://box.local:7000"},
 		{"http://box:7000", "http://box:7000"},
 		{"https://box", "https://box"},

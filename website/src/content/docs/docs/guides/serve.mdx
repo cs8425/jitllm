@@ -26,7 +26,7 @@ import Surfaces from '../../../../components/fig/Surfaces.astro'
 ## As a service
 
 ```sh
-jitllmd service install   # on 127.0.0.1:8080, now and at every login
+jitllmd service install   # on localhost:4242, now and at every login
 jitllmd service status
 ```
 
@@ -47,13 +47,15 @@ Aliases and enable/disable are kept in the folder's `jitllm-models.json` and sur
 ## Start the server
 
 ```sh
-jitllmd serve -addr 127.0.0.1:8080 -models ./models \
+jitllmd serve -addr localhost:4242 -models ./models \
   -load qwen3-8b.jlm -id qwen3 -devices auto
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-addr` | `:8080` | listen address |
+| `-addr` | `localhost:4242` | listen address. Loopback by default: nothing off this machine reaches it. An address with no host (`:4242`) or a non-loopback one opens it to the network, and `serve` warns unless `-api-key` is set |
+| `-api-key KEY` | `JITLLM_API_KEY`, else none | require `Authorization: Bearer KEY` (and `x-api-key: KEY` on `/v1/messages`) on every route but `/healthz` |
+| `-allow-origin LIST` | none | comma-separated browser origins that may call the server cross-origin. Loopback pages and clients that send no `Origin` are unaffected; any other origin is refused |
 | `-models DIR` | the models folder | directory scanned by the model list; its containers are available by name. `JITLLM_MODELS` sets the default. |
 | `-on-demand` | true | load a model a request names that is not loaded, unless it is disabled |
 | `-load FILE` | | a `.jlm` to load at startup, absolute or relative to `-models` |
@@ -105,7 +107,7 @@ A model split between the CPU and a device runs one request at a time.
 Any OpenAI SDK works with the base URL `http://HOST:PORT/v1`. No API key is checked, but most SDKs insist on one, so pass any string.
 
 ```sh
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://localhost:4242/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "qwen3",
@@ -137,7 +139,7 @@ An embedding model loaded on the server answers `POST /v1/embeddings`:
 ```sh
 jitllmd serve -models ./models -load minilm.jlm -id minilm
 
-curl http://127.0.0.1:8080/v1/embeddings \
+curl http://localhost:4242/v1/embeddings \
   -H 'Content-Type: application/json' \
   -d '{"model": "minilm", "input": ["a sentence to embed", "and another"]}'
 ```
@@ -147,7 +149,7 @@ curl http://127.0.0.1:8080/v1/embeddings \
 ## Anthropic messages
 
 ```sh
-curl http://127.0.0.1:8080/v1/messages \
+curl http://localhost:4242/v1/messages \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "qwen3",
@@ -161,7 +163,7 @@ curl http://127.0.0.1:8080/v1/messages \
 ```python
 import anthropic
 
-client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key="unused")
+client = anthropic.Anthropic(base_url="http://localhost:4242", api_key="unused")
 msg = client.messages.create(
     model="qwen3",
     max_tokens=256,
@@ -191,7 +193,7 @@ One picture may be 20 MiB and 4096x4096 pixels, and a request may carry 8 (`-ima
 Both APIs accept tool definitions in their own shapes: OpenAI's `tools` with `function.parameters`, Anthropic's `tools` with `input_schema`. They reach the model's own chat template, so a model trained for tool use sees the prompt it was trained on: OpenAI definitions exactly as sent, Anthropic ones converted to the OpenAI shape with `input_schema` kept byte for byte.
 
 ```sh
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://localhost:4242/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "qwen3",
@@ -282,6 +284,6 @@ Everything the client does is a Connect RPC, generated from the protobuf definit
 | `TelemetryService` | GetStats, WatchStats (streaming), GetServerInfo |
 
 ```sh
-curl http://127.0.0.1:8080/jitllm.v1.DeviceService/ListDevices \
+curl http://localhost:4242/jitllm.v1.DeviceService/ListDevices \
   -H 'Content-Type: application/json' -d '{}'
 ```

@@ -28,7 +28,7 @@ trap cleanup EXIT
 docker run --rm -v "$work:/models" -v "$PWD/testdata/models:/src:ro" \
   --entrypoint jitllm "$image" convert -o /models /src/stories260K.gguf
 
-docker run -d --name "$name" -p "127.0.0.1:$port:8080" -v "$work:/models" \
+docker run -d --name "$name" -p "127.0.0.1:$port:4242" -v "$work:/models" \
   "$image" -load stories260K.jlm -devices cpu >/dev/null
 
 for _ in $(seq 60); do

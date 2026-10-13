@@ -40,13 +40,13 @@ the keys the current screen takes.
 ## Which engine
 
 The app uses a `jitllmd` that answers at the service address first (the
-settings file's `service_addr`, the login service's `127.0.0.1:8080` by
+settings file's `service_addr`, the login service's `localhost:4242` by
 default) and runs its own engine only when none does. `--connect addr`
 connects to that address and nothing else; `--embedded` always runs its own.
 
 The right end of the bottom line always says which:
-`Service · 127.0.0.1:8080 (jitllmd 0.9.0)`, `Embedded · API off` or
-`Embedded · API on :8080`. A service that stops answering turns it red with
+`Service · localhost:4242 (jitllmd 0.9.0)`, `Embedded · API off` or
+`Embedded · API on :4242`. A service that stops answering turns it red with
 `not answering` and the palette offers to reconnect; the app never switches to
 an engine of its own. Turning the API on where a `jitllmd` already answers is
 refused, naming the address to connect to, and running embedded beside a

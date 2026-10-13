@@ -27,7 +27,7 @@ with its version and revision added:
 
     jitllm capabilities          # a summary
     jitllm capabilities -json    # the manifest
-    curl localhost:8080/v1/capabilities   # jitllmd, the routes it is serving
+    curl localhost:4242/v1/capabilities   # jitllmd, the routes it is serving
 
 ## Keeping it true
 

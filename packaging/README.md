@@ -48,7 +48,7 @@ The app (`ui/install`, `ui/screen/cli.go`):
 - **Settings > Command line** links and unlinks them, and **Start the server
   at login** installs or removes the launchd user agent
   `~/Library/LaunchAgents/org.jitllm.service.plist`, which
-  runs `jitllmd serve -addr 127.0.0.1:8080 -models <first model folder>`,
+  runs `jitllmd serve -addr localhost:4242 -models <first model folder>`,
   restarting it if it crashes, logging to `~/Library/Logs/jitllm/jitllmd.log`.
 
 There is no menu-bar icon. gogpu has one only in a separate module
@@ -73,7 +73,7 @@ double-click (or `ditto -x -k`) unpacks it whole.
 from wherever it is saved and writes nothing beside itself. Its settings,
 chats and log are in `%APPDATA%\jitllm`, the folder an installed copy uses
 (`os.UserConfigDir`), so the two share them. The app serves its API only when
-**Settings** turns it on, on `127.0.0.1:8080` by default; a second copy, or
+**Settings** turns it on, on `localhost:4242` by default; a second copy, or
 the setup's login server, already on that port makes that copy report "API
 not started" and keep running without it. `-version` prints the version and
 opens no window, which is how the release checks it.
@@ -90,7 +90,7 @@ nsis`), `unzip` and Go. The setup:
   uses;
 - adds that directory to the user `PATH` (a component, on by default);
 - creates Start menu shortcuts for the app and the uninstaller;
-- optionally starts `jitllmd serve -addr 127.0.0.1:8080 -models
+- optionally starts `jitllmd serve -addr localhost:4242 -models
   %LOCALAPPDATA%\jitllm\models` at login, from the `Run` key through a small
   script that starts it without a console window (`jitllmd` is a console
   program). The script is VBScript run by `wscript.exe`, which Windows ships

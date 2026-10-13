@@ -493,7 +493,7 @@ slower than the hand splitters, so it is a test reference, not the engine.
 ## 22. The apps say which engine they run, and can connect to a service
 
 **Built:** `common/engine`'s `Remote` (the connected engine), `Choose` (Auto, Embedded, Service) and `Badge`; the desktop's Settings > Engine and header badge, the TUI's `--connect` / `--embedded` and status-bar badge; the API refused on a held address. Before it, the desktop app and the TUI always ran an engine of their own;
-the desktop can also serve the API from it (`common/api`, `127.0.0.1:8080`),
+the desktop can also serve the API from it (`common/api`, `localhost:4242`),
 and the Mac app can install a login service, a separate `jitllmd` on the same
 address with its own models (`ui/install/agent.go`). A user can end up with two
 engines on one machine, sharing its GPU memory and RAM and wanting one port,
@@ -510,7 +510,7 @@ and nothing in either app says which one it is talking to.
   service. A lost connection is shown as a problem, never a silent fall back to
   embedded.
 - **Always visible:** a badge in the desktop header and the TUI status bar --
-  `Embedded · API off`, `Embedded · API on :8080`, `Service · 127.0.0.1:8080
+  `Embedded · API off`, `Embedded · API on :4242`, `Service · localhost:4242
   (jitllmd <version>)` -- that opens the setting.
 - **No silent second engine:** turning the API on where the login service
   already holds the address is refused with an offer to connect; starting

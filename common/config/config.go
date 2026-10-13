@@ -7,6 +7,7 @@ import (
 	"github.com/jitllm/jitllm/common/api"
 	"github.com/jitllm/jitllm/common/catalog"
 	"github.com/jitllm/jitllm/common/session"
+	"github.com/jitllm/jitllm/internal/localserver"
 
 	"encoding/json"
 	"os"
@@ -21,6 +22,9 @@ type Env struct {
 	Models string
 	// DataHome is $XDG_DATA_HOME, Linux's place for application data.
 	DataHome string
+	// APIKey is $JITLLM_API_KEY: the key the app's own API requires and the
+	// key it asks a jitllmd with, when the settings file names none.
+	APIKey string
 }
 
 var env Env
@@ -57,8 +61,18 @@ type Config struct {
 	NoKVCache bool `json:"no_kv_cache"`
 
 	// API serves jitllm's API (common/api) while the app runs, on APIAddr.
+	//
+	// APIAddr is empty for "use the default" (api.DefaultAddr) and holds only
+	// an address the person typed, so a later change of the default cannot
+	// move a choice they made.
 	API     bool   `json:"api"`
 	APIAddr string `json:"api_addr"`
+	// APIKey, when set, is required on the app's API (as a bearer token).
+	// Empty falls back to $JITLLM_API_KEY, else the API needs no key.
+	APIKey string `json:"api_key"`
+	// ServiceKey is the API key a jitllmd at ServiceAddr wants of this app.
+	// Empty falls back to $JITLLM_API_KEY.
+	ServiceKey string `json:"service_key"`
 
 	// Engine is which engine the app runs: auto (a jitllmd that answers at
 	// ServiceAddr, else its own), embedded or service (engine.Mode*). Empty
@@ -74,6 +88,22 @@ type Config struct {
 	path string
 }
 
+// ServingKey is the key the app's own API requires, "" for none.
+func (c *Config) ServingKey() string {
+	if c != nil && c.APIKey != "" {
+		return c.APIKey
+	}
+	return env.APIKey
+}
+
+// ServiceAPIKey is the key the app sends a jitllmd, "" for none.
+func (c *Config) ServiceAPIKey() string {
+	if c != nil && c.ServiceKey != "" {
+		return c.ServiceKey
+	}
+	return env.APIKey
+}
+
 // DefaultConfig is the configuration a first run gets.
 func DefaultConfig() *Config {
 	return &Config{
@@ -83,7 +113,6 @@ func DefaultConfig() *Config {
 		DeviceSpec: "auto",
 		MaxSeq:     4096,
 		Sampling:   session.DefaultSampling(),
-		APIAddr:    api.DefaultAddr,
 	}
 }
 
@@ -128,6 +157,12 @@ func LoadConfig() *Config {
 		return c
 	}
 	saved.path = c.path
+	// The API address an earlier release wrote was the default the app
+	// filled in, not a choice: it becomes "use the default", so it follows the
+	// default from here on.
+	if saved.APIAddr == localserver.LegacyAddr || saved.APIAddr == api.DefaultAddr {
+		saved.APIAddr = ""
+	}
 	if len(saved.ModelDirs) == 0 {
 		saved.ModelDirs = c.ModelDirs
 	}
@@ -151,7 +186,12 @@ func (c *Config) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.path, b, 0o644)
+	// 0600: the file may hold API keys. WriteFile keeps the mode of a file
+	// that exists, so an older, world-readable one is tightened too.
+	if err := os.WriteFile(c.path, b, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(c.path, 0o600)
 }
 
 // AddModelDir adds a directory if it is not already configured.

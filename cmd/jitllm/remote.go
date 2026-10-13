@@ -34,7 +34,16 @@ import (
 // KV cache, a picture, a profile), so the run is embedded.
 var remoteFlags = map[string]bool{
 	"n": true, "chat": true, "system": true, "temp": true, "top-k": true, "top-p": true,
-	"min-p": true, "repeat-penalty": true, "seed": true, "addr": true, "embedded": true,
+	"min-p": true, "repeat-penalty": true, "seed": true, "addr": true, "api-key": true, "embedded": true,
+}
+
+// keyOf is the API key to send: the -api-key flag, else $JITLLM_API_KEY. The
+// libraries read no environment; this command does, and hands the key in.
+func keyOf(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv("JITLLM_API_KEY")
 }
 
 // looksLikePath is an argument that names a file rather than a model: one
@@ -48,7 +57,7 @@ func looksLikePath(arg string) bool {
 }
 
 // embedRemoteFlags are embed's flags the service carries.
-var embedRemoteFlags = map[string]bool{"lines": true, "addr": true, "embedded": true}
+var embedRemoteFlags = map[string]bool{"lines": true, "addr": true, "api-key": true, "embedded": true}
 
 // engineFlags is the flags set that only an embedded run honours: those
 // not in remote.
@@ -62,21 +71,28 @@ func engineFlags(fs *flag.FlagSet, remote map[string]bool) []string {
 	return out
 }
 
+// addrOpts lets a gate stand in other default and old-default addresses
+// (localserver.WithDefaults), so it does not depend on what runs on this box.
+var addrOpts []localserver.Option
+
 // runTarget decides where `jitllm run arg` runs. It returns the service to
 // use, or the container to open in this process.
-func runTarget(ctx context.Context, arg, addr string, embedded bool, engineOnly []string, note io.Writer) (svc *localserver.Info, path string, err error) {
+func runTarget(ctx context.Context, arg, addr, key string, embedded bool, engineOnly []string, note io.Writer) (svc *localserver.Info, path string, err error) {
 	if looksLikePath(arg) {
 		fmt.Fprintf(note, "jitllm: running %s in this process\n", arg)
 		return nil, arg, nil
 	}
 	if !embedded && len(engineOnly) == 0 {
-		in, err := localserver.Probe(ctx, addr)
+		in, err := localserver.Locate(ctx, addr, append([]localserver.Option{localserver.WithAPIKey(key)}, addrOpts...)...)
 		if err == nil {
 			fmt.Fprintf(note, "jitllm: using the service at %s (jitllmd %s) for %s\n",
-				localserver.BaseURL(addr), in.Version, arg)
+				localserver.BaseURL(in.Addr), in.Version, arg)
+			if in.Legacy {
+				fmt.Fprintf(note, "jitllm: %s\n", localserver.LegacyNotice)
+			}
 			return &in, "", nil
 		}
-		if errors.Is(err, localserver.ErrIncompatible) {
+		if errors.Is(err, localserver.ErrIncompatible) || errors.Is(err, localserver.ErrUnauthorized) {
 			return nil, "", fmt.Errorf("jitllm: %v; or run it in this process with -embedded", err)
 		}
 	}
@@ -103,13 +119,13 @@ func runTarget(ctx context.Context, arg, addr string, embedded bool, engineOnly 
 
 // remoteRun is what a run asks the service for.
 type remoteRun struct {
-	base, model string
-	n           int
-	system      string
-	sampling    map[string]any
+	base, key, model string
+	n                int
+	system           string
+	sampling         map[string]any
 }
 
-func newRemoteRun(addr, model string, n int, system string, fs *flag.FlagSet, sm samplingFlags) remoteRun {
+func newRemoteRun(addr, key, model string, n int, system string, fs *flag.FlagSet, sm samplingFlags) remoteRun {
 	s := map[string]any{"temperature": sm.temp}
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
@@ -125,7 +141,7 @@ func newRemoteRun(addr, model string, n int, system string, fs *flag.FlagSet, sm
 			s["seed"] = sm.seed
 		}
 	})
-	return remoteRun{base: localserver.BaseURL(addr), model: model, n: n, system: system, sampling: s}
+	return remoteRun{base: localserver.BaseURL(addr), key: key, model: model, n: n, system: system, sampling: s}
 }
 
 // samplingFlags are run's sampling flags' values.
@@ -166,7 +182,8 @@ func (r remoteRun) complete(ctx context.Context, chat bool, msgs []chatMessage, 
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	localserver.Authorize(req, r.key)
+	resp, err := localserver.Client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -225,13 +242,19 @@ func (r remoteRun) complete(ctx context.Context, chat bool, msgs []chatMessage, 
 
 // embed asks the service's /v1/embeddings for each text's vector and writes
 // one JSON array per text, as `jitllm embed` does in this process.
-func embedRemote(addr, model string, texts []string, out io.Writer) error {
+func embedRemote(addr, key, model string, texts []string, out io.Writer) error {
 	for _, t := range texts {
 		b, err := json.Marshal(map[string]any{"model": model, "input": t})
 		if err != nil {
 			return err
 		}
-		resp, err := http.Post(localserver.BaseURL(addr)+"/v1/embeddings", "application/json", bytes.NewReader(b))
+		req, err := http.NewRequest(http.MethodPost, localserver.BaseURL(addr)+"/v1/embeddings", bytes.NewReader(b))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		localserver.Authorize(req, key)
+		resp, err := localserver.Client.Do(req)
 		if err != nil {
 			return err
 		}

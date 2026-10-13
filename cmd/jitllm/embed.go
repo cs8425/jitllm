@@ -31,6 +31,7 @@ func embedCmd(args []string) error {
 	dev := fs.String("devices", "auto", "where the blocks run, as run's -devices")
 	layers := fs.Int("gpu-layers", -1, "cap the blocks offered to the device; -1 fits as many as the card holds")
 	addr := fs.String("addr", localserver.DefaultAddr, "the jitllmd a model NAME is embedded through when one answers there")
+	apiKey := fs.String("api-key", "", "the API key the jitllmd wants, if it has one (default: $JITLLM_API_KEY)")
 	embedded := fs.Bool("embedded", false, "embed in this process even when a jitllmd answers")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -41,7 +42,7 @@ func embedCmd(args []string) error {
 	if fs.NArg() < 1 || (fs.NArg() < 2 && !*lines) {
 		return fmt.Errorf("usage: jitllm embed [-ids] [-lines] <model.jlm|NAME> <text...>")
 	}
-	svc, path, err := runTarget(context.Background(), fs.Arg(0), *addr, *embedded, engineFlags(fs, embedRemoteFlags), os.Stderr)
+	svc, path, err := runTarget(context.Background(), fs.Arg(0), *addr, keyOf(*apiKey), *embedded, engineFlags(fs, embedRemoteFlags), os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -58,7 +59,7 @@ func embedCmd(args []string) error {
 				return err
 			}
 		}
-		return embedRemote(*addr, fs.Arg(0), texts, os.Stdout)
+		return embedRemote(svc.Addr, keyOf(*apiKey), fs.Arg(0), texts, os.Stdout)
 	}
 	t0 := time.Now()
 	m, err := model.Open(path, loadOpts(nil, 0)...)

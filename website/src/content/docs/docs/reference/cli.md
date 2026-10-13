@@ -129,13 +129,15 @@ Every size, on `jitllm` and `jitllmd` alike, is a byte count or a number with a 
 | `jitllmd place` | read and move a session's blocks, tune its seam, and re-budget a model's pager |
 | `jitllmd stats` | engine counters, once or streamed |
 
-Every client command takes `-addr` (`host:port`, `:port` or a full URL; default `localhost:8080`).
+Every client command takes `-addr` (`host:port`, `:port` or a full URL; default `localhost:4242`). `-api-key KEY` (or `JITLLM_API_KEY`) sends the key a server started with `-api-key` wants. With the default address and nothing answering on it, a server on the old default port `127.0.0.1:8080` is used and the command says so once.
 
 ### serve
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-addr` | `:8080` | listen address |
+| `-addr` | `localhost:4242` | listen address. Loopback by default: nothing off this machine reaches it. An address with no host (`:4242`) or a non-loopback one opens it to the network, and `serve` warns unless `-api-key` is set |
+| `-api-key KEY` | `JITLLM_API_KEY`, else none | require `Authorization: Bearer KEY` (and `x-api-key: KEY` on `/v1/messages`) on every route but `/healthz` |
+| `-allow-origin LIST` | none | comma-separated browser origins that may call the server cross-origin. Loopback pages and clients that send no `Origin` are unaffected; any other origin is refused |
 | `-models DIR` | `JITLLM_MODELS`, else `models` | directory scanned by the model list and used to resolve a bare model name |
 | `-load FILE` | | a `.jlm` to load at startup, absolute or relative to `-models` |
 | `-id NAME` | derived | the model name clients send |

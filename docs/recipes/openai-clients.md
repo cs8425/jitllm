@@ -16,11 +16,11 @@ jitllm convert -o models qwen3-0.6b
 
 <!-- test: background -->
 ```sh
-jitllmd serve -addr 127.0.0.1:8080 -models models -load Qwen3-0.6B-Q8_0.jlm -id qwen3-0.6b -devices cpu
+jitllmd serve -addr 127.0.0.1:4242 -models models -load Qwen3-0.6B-Q8_0.jlm -id qwen3-0.6b -devices cpu
 ```
 
 ```sh
-for i in $(seq 60); do curl -sf http://127.0.0.1:8080/healthz && break; sleep 1; done
+for i in $(seq 60); do curl -sf http://127.0.0.1:4242/healthz && break; sleep 1; done
 ```
 <!-- test: expect ok -->
 
@@ -32,7 +32,7 @@ Non-streaming, then streaming (`"stream": true` sends server-sent events, one
 `data:` line per chunk, and `data: [DONE]` at the end):
 
 ```sh
-curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+curl -s http://127.0.0.1:4242/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model": "qwen3-0.6b",
   "messages": [{"role": "system", "content": "You answer in one short sentence."},
                {"role": "user", "content": "What is the capital of France? /no_think"}],
@@ -41,7 +41,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/
 <!-- test: expect Paris -->
 
 ```sh
-curl -sN http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+curl -sN http://127.0.0.1:4242/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model": "qwen3-0.6b", "stream": true,
   "messages": [{"role": "user", "content": "Count to three. /no_think"}],
   "max_tokens": 32, "temperature": 0}'
@@ -53,7 +53,7 @@ curl -sN http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="unused")
+client = OpenAI(base_url="http://127.0.0.1:4242/v1", api_key="unused")
 
 reply = client.chat.completions.create(
     model="qwen3-0.6b",
@@ -83,7 +83,7 @@ Save as `chat.mjs` and run `node chat.mjs`:
 ```js
 import OpenAI from 'openai'
 
-const client = new OpenAI({ baseURL: 'http://127.0.0.1:8080/v1', apiKey: 'unused' })
+const client = new OpenAI({ baseURL: 'http://127.0.0.1:4242/v1', apiKey: 'unused' })
 
 const reply = await client.chat.completions.create({
   model: 'qwen3-0.6b',
@@ -108,10 +108,10 @@ console.log()
 ## Anthropic clients
 
 The same server answers Anthropic's `POST /v1/messages`; an Anthropic SDK takes
-`base_url="http://127.0.0.1:8080"`:
+`base_url="http://127.0.0.1:4242"`:
 
 ```sh
-curl -s http://127.0.0.1:8080/v1/messages -H 'Content-Type: application/json' -d '{
+curl -s http://127.0.0.1:4242/v1/messages -H 'Content-Type: application/json' -d '{
   "model": "qwen3-0.6b", "max_tokens": 48,
   "messages": [{"role": "user", "content": "What is the capital of France? /no_think"}]}'
 ```
@@ -121,7 +121,7 @@ curl -s http://127.0.0.1:8080/v1/messages -H 'Content-Type: application/json' -d
 
 | You see | Cause | Do this |
 |---|---|---|
-| `openai.APIConnectionError` / `ECONNREFUSED` | wrong base URL or the server is down | the base URL ends in `/v1` for OpenAI SDKs and has no `/v1` for Anthropic ones; check `curl http://127.0.0.1:8080/healthz` |
+| `openai.APIConnectionError` / `ECONNREFUSED` | wrong base URL or the server is down | the base URL ends in `/v1` for OpenAI SDKs and has no `/v1` for Anthropic ones; check `curl http://127.0.0.1:4242/healthz` |
 | `404` with `no model ... is loaded or in the models folder` | the `model` string names no loaded model and no file or alias in the models folder | `client.models.list()` lists the ids |
 | `429` with `Retry-After` | the model's queue (`-max-queue`, 64 by default) is full | retry after the header's delay, or raise `-max-queue` |
 | a field you sent is ignored or refused | not every OpenAI field is implemented | the 400 names the field; `docs/server.md` lists what is supported |

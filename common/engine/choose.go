@@ -60,34 +60,50 @@ type Choice struct {
 // Choose decides the engine for a setting. addr empty is the default address
 // (the login service's). It asks the network once, within two seconds; ask it
 // before the front end's own API starts, or Auto finds the app itself.
-func Choose(ctx context.Context, mode, addr string) Choice {
+//
+// A service on the old default port (localserver.LegacyAddr) is found when
+// the default address answers nothing, and the Choice's Warning says it runs
+// there. localserver.WithAPIKey is the key to ask the service with.
+func Choose(ctx context.Context, mode, addr string, opts ...localserver.Option) Choice {
 	if addr == "" {
 		addr = localserver.DefaultAddr
 	}
 	ch := Choice{Addr: addr}
 	switch mode {
 	case ModeEmbedded:
-		if in, w, ok := Beside(ctx, addr); ok {
+		if in, w, ok := Beside(ctx, addr, opts...); ok {
 			ch.Warning = w
 			ch.Beside = localserver.Compatible(in.APIVersion) == nil
 		}
 		return ch
 	case ModeService:
-		c, err := client.Discover(ctx, addr)
+		c, err := client.Discover(ctx, addr, opts...)
 		if err != nil {
-			c = client.Dial(addr)
+			at := addr
+			if c != nil && c.Legacy {
+				at = c.Base
+			}
+			c = client.Dial(at, opts...)
 			c.Info = nil
 		}
 		ch.Conn = c
-		if errors.Is(err, localserver.ErrIncompatible) {
+		switch {
+		case errors.Is(err, localserver.ErrIncompatible) || errors.Is(err, localserver.ErrUnauthorized):
 			ch.Warning = err.Error()
+		case c.Legacy:
+			ch.Warning = localserver.LegacyNotice
 		}
 		return ch
 	}
-	c, err := client.Discover(ctx, addr)
+	c, err := client.Discover(ctx, addr, opts...)
 	switch {
 	case err == nil:
 		ch.Conn = c
+		if c.Legacy {
+			ch.Warning = localserver.LegacyNotice
+		}
+	case errors.Is(err, localserver.ErrUnauthorized):
+		ch.Warning = err.Error() + ". Running this app's own engine beside it; the two share the GPU's memory."
 	case errors.Is(err, localserver.ErrIncompatible):
 		// Refused, and said: the app runs its own engine beside it.
 		ch.Warning = err.Error() + ". Running this app's own engine beside it; the two share the GPU's memory."

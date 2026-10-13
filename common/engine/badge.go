@@ -20,9 +20,9 @@ type Where struct {
 
 // Badge is the one line both front ends show for the engine, always:
 //
-//	Service · 127.0.0.1:8080 (jitllmd 0.9.0)
+//	Service · localhost:4242 (jitllmd 0.9.0)
 //	Embedded · API off
-//	Embedded · API on :8080
+//	Embedded · API on :4242
 //
 // api is the address the embedded engine's API listens on, empty when it is
 // off.
@@ -45,7 +45,7 @@ func Badge(w Where, api string) string {
 	return "Embedded · API on " + portOf(api)
 }
 
-// portOf is ":8080" for a loopback address, since the host says nothing a
+// portOf is ":4242" for a loopback address, since the host says nothing a
 // person needs, and the whole address otherwise: an API open to the network
 // must say so.
 func portOf(addr string) string {

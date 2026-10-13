@@ -346,9 +346,9 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '')
             <p>Start the API server with automatic device selection, then stream a chat from another terminal.</p>
             <div class="cmd">
               <div class="cmd-head"><span>shell</span><button class="copy" type="button" data-copy>Copy</button></div>
-<pre><code><span class="p">$</span> jitllmd serve -addr 127.0.0.1:8080 -models ./models \
+<pre><code><span class="p">$</span> jitllmd serve -addr localhost:4242 -models ./models \
     -load qwen3.jlm -id qwen3 -devices auto
-<span class="p">$</span> curl http://127.0.0.1:8080/v1/chat/completions \
+<span class="p">$</span> curl http://localhost:4242/v1/chat/completions \
     -H 'Content-Type: application/json' \
     -d '&#123;"model":"qwen3","stream":true,
          "messages":[&#123;"role":"user","content":"Hi"&#125;]&#125;'</code></pre>
@@ -416,7 +416,7 @@ const base = import.meta.env.BASE_URL.replace(/\/$/, '')
           <div class="head">
             <div>
               <h2 class="h2">The server</h2>
-              <p class="desc">One binary, <code>jitllmd</code>, many models and many sessions at once. Applications reach it through APIs they already speak: point a client at <code>http://127.0.0.1:8080/v1</code> and use the model's id as its name.</p>
+              <p class="desc">One binary, <code>jitllmd</code>, many models and many sessions at once. Applications reach it through APIs they already speak: point a client at <code>http://localhost:4242/v1</code> and use the model's id as its name.</p>
             </div>
             <a class="more" href={`${base}/docs/guides/serve/`}>API guide <span aria-hidden="true">→</span></a>
           </div>

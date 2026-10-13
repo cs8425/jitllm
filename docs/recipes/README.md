@@ -17,7 +17,7 @@ stops working fails a test instead of a reader.
 
 All of them need the two binaries, `jitllm` and `jitllmd`, on your `PATH`
 ([install](../../README.md#install)), and `curl`. They run on a machine with no
-GPU. Every server in them listens on `127.0.0.1:8080`.
+GPU. Every server in them listens on `127.0.0.1:4242`.
 
 The capability manifest (`docs/capabilities.json`, `jitllm capabilities`) and
 `jitllm doctor` answer "does this build support my model and workload" and "what
@@ -38,7 +38,7 @@ and runs the fenced blocks in order:
   `node_modules` when that is set), and are skipped by name when it cannot.
 - ` ```text ` and ` ```json ` blocks are shown, not run.
 
-Every `127.0.0.1:80NN` address is rewritten to a free port, the same one for the
+Every `127.0.0.1:4242` and `127.0.0.1:80NN` address is rewritten to a free port, the same one for the
 same address throughout a recipe. An HTML comment directly before or after a
 block steers it:
 

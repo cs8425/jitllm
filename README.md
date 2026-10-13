@@ -241,12 +241,12 @@ jitllm run -chat qwen3-30b-a3b "Why is the sky blue?"
 ```
 
 On Linux the install script starts `jitllmd` as a systemd user service on
-`127.0.0.1:8080`; the macOS app and the Windows installer offer the same at
+`localhost:4242`; the macOS app and the Windows installer offer the same at
 login, and `jitllmd service install` does it on any of them. Every model in
 the models folder is available to it by name, loaded on demand:
 
 ```sh
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://localhost:4242/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-30b-a3b","messages":[{"role":"user","content":"Why is the sky blue?"}],"stream":true}'
 ```
@@ -265,7 +265,7 @@ and the [server reference](docs/server.md) for endpoints and daemon commands.
 ```sh
 docker volume create jitllm-models
 docker run --rm -v jitllm-models:/models --entrypoint jitllm ghcr.io/jitllm/jitllm convert qwen3-30b-a3b
-docker run -d -p 8080:8080 -v jitllm-models:/models ghcr.io/jitllm/jitllm -load Qwen3-30B-A3B-Q4_K_M.jlm -id qwen3
+docker run -d -p 4242:4242 -v jitllm-models:/models ghcr.io/jitllm/jitllm -load Qwen3-30B-A3B-Q4_K_M.jlm -id qwen3
 ```
 
 Add `--gpus all` (with the NVIDIA Container Toolkit) to run on an NVIDIA GPU. The image is
