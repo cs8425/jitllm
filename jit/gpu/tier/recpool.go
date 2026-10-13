@@ -282,10 +282,13 @@ func (g *devTier) recZeroLayers(ls []*layer, base, rows int) error {
 					if zb, err = g.allocBytes(make([]byte, n)); err != nil {
 						return err
 					}
+					g.RecZeroSource += uint64(n)
 				}
 				if err := g.dev.Copy(b.buf, base*b.w*4, zb, 0, rows*b.w*4); err != nil {
 					return err
 				}
+				g.RecZeroBytes += uint64(rows * b.w * 4)
+				g.RecZeroCopies++
 			}
 		}
 	}
