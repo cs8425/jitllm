@@ -1644,12 +1644,6 @@ func (s *State) offerRange(lo, hi int) {
 	// A group the device took part of (a decline mid-group) comes home whole.
 	defer s.fixKVGroups()
 	c := s.c
-	// Qwen3.8-Flash-Next's blocks stay on the host until the device path
-	// (tier's q4e.go) matches it: the hyper-connection and n-gram kernels are
-	// wired and run, and the answers do not agree yet; QSA has no kernels.
-	if c.Q4E() {
-		return
-	}
 	for li := lo; li < hi; li++ {
 		// A block already on a device keeps its place: offering it again
 		// would read its page for nothing and prepare it a second time.

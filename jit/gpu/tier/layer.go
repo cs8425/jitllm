@@ -3863,9 +3863,9 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 	}
 	// Every AltUp stream, stream-major (altup.go); one stream elsewhere.
 	al(&bs.x, rows*p.ResidW()*4)
-	// x2 is every stream too where a DeepSeek V4 hyper-connection writes it.
+	// x2 is every stream too where a hyper-connection or Kimi-K3 writes it.
 	x2 := p.NEmbd
-	if p.DS4 != nil || p.K3 != nil {
+	if p.DS4 != nil || p.K3 != nil || p.Q4E != nil {
 		x2 = p.ResidW()
 	}
 	al(&bs.x2, rows*x2*4)
@@ -9577,7 +9577,8 @@ func (g *devTier) prepBatch(width int) bool {
 			&l.mvQA, &l.mvQB, &l.mvKVA, &l.mvKB, &l.mvVB,
 			&l.mvFA, &l.mvFB, &l.mvGA, &l.mvGB, &l.mvpg, &l.mvpp,
 			&l.mvIQ, &l.mvIK, &l.mvIW, &l.mvLL, &l.mvLR, &l.mvSI, &l.mvMQ,
-			&l.mvCKV, &l.mvCG, &l.mvICKV, &l.mvICG} {
+			&l.mvCKV, &l.mvCG, &l.mvICKV, &l.mvICG,
+			&l.mvHAD, &l.mvHAU, &l.mvHAI, &l.mvHFD, &l.mvHFU, &l.mvHFI, &l.mvNGK, &l.mvNGV} {
 			if m.kern == nil {
 				continue
 			}
