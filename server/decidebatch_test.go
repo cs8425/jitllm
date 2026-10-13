@@ -32,6 +32,9 @@ var decisionServerModels = []struct {
 	{"d1-3B", "d1/d1-3B-Q8_0.jlm", 0.03},
 	{"lev", "lev/lev-Q8_0.jlm", 0.05},
 	{"laya", "laya/gguf/Laya-BF16.jlm", 0},
+	// Clef answers a request in one pass of its own: batched is alone.
+	{"clef", "clef/Clef-Flash-Q8_0.jlm", 0},
+	{"clef-fixture", "clef/fixture/clef-fixture.jlm", 0},
 }
 
 // TestSystemOneBatchesConcurrentRequests sends concurrent /v1/systemone

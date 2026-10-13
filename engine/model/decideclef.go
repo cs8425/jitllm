@@ -420,6 +420,7 @@ type clefRun struct {
 	glob               []float32
 	rows               int
 	attn               *nn.AttnSet
+	tap                func(int, []float32)
 	at                 clefAttnRegion
 }
 
@@ -484,6 +485,9 @@ func (d *Decider) clefInit() error {
 	hd := h.width / h.heads
 	d.clef.attn = d.st.jit.AttnSetFor(hd, hd, h.width, cpu.KVF32)
 	d.clef.at.fn = d.clefHeads
+	// The tap as a value made once: a method value per prompt is a heap
+	// object per prompt.
+	d.clef.tap = d.clefTap
 	return nil
 }
 
@@ -491,29 +495,50 @@ func (d *Decider) clefInit() error {
 // option of every question in out, question by question, each in the order
 // the prompt shows it.
 func (d *Decider) clefForward(p *clefPrompt, out []float32) error {
-	r, h, s, c := d.clef, d.clefH, d.st, d.m.Cfg
-	D, W := c.NEmbd, h.width
-	n, nq, no := len(p.ids), len(p.qs), len(p.opts)
-	d.clefGrow(n, nq, no)
-	copy(r.owner, p.owner)
-	copy(r.qtype, p.qtype)
-
 	// 1. The backbone over the prompt, every row's final residual kept: the
 	// prefill stops at the residual (no output projection) and hands each
 	// chunk's rows over as they come out.
-	s.Reset()
-	r.rows = 0
-	s.emb = &d.clefEmb
-	s.rowTap = d.clefTap
-	_, err := s.Prefill(p.ids)
-	s.emb, s.rowTap = nil, nil
+	d.clefBegin(p)
+	_, err := d.st.Prefill(p.ids)
+	d.clefEnd()
 	if err != nil {
 		return err
 	}
+	return d.clefHead(p, out)
+}
+
+// clefBegin readies the State to keep every row of p's prefill (one call or
+// several, as a relocation mid-prompt runs it) and clefEnd stops it.
+func (d *Decider) clefBegin(p *clefPrompt) {
+	r, s := d.clef, d.st
+	d.clefGrow(len(p.ids), len(p.qs), len(p.opts))
+	copy(r.owner, p.owner)
+	copy(r.qtype, p.qtype)
+	if d.violation != "no-reset" {
+		s.Reset()
+	}
+	r.rows = 0
+	s.emb = &d.clefEmb
+	s.rowTap = r.tap
+}
+
+func (d *Decider) clefEnd() { d.st.emb, d.st.rowTap = nil, nil }
+
+// clefHead is the head over p's rows, kept by the prefill since clefBegin.
+func (d *Decider) clefHead(p *clefPrompt, out []float32) error {
+	r, h, s, c := d.clef, d.clefH, d.st, d.m.Cfg
+	D, W := c.NEmbd, h.width
+	n, nq, no := len(p.ids), len(p.qs), len(p.opts)
 	if r.rows != n {
 		return fmt.Errorf("model: the prompt's %d rows gave %d hidden rows", n, r.rows)
 	}
 	d.input += n
+	// Where the backbone's head is on a device, the decision head runs there
+	// over the rows (decideclefdev.go); a device that declines leaves them
+	// for the host below.
+	if ok, err := d.clefOnDevice(p, out); ok || err != nil {
+		return err
+	}
 	hid := r.hid[:n*D]
 	// The backbone's output norm, then the head's LayerNorm over it.
 	s.batchNormB(r.tmp[:n*D], hid, s.outNorm, d.m.outNormB, D, n)

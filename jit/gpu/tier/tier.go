@@ -1693,11 +1693,15 @@ type devShared struct {
 	pcache     *persistCache                 // composed persistent kernels; see persist.go
 	// convK, conv and convN are the convolutional blocks' kernels, their
 	// shared scratch and how many hold it (conv.go).
-	convK   map[convKey]backend.Kernel
-	conv    convScratch
-	convN   int
-	ragSeg  map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
-	argmaxK backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
+	convK map[convKey]backend.Kernel
+	conv  convScratch
+	// dh is Clef's decision head on this device (dechead.go), and ClefHeads
+	// how many requests it has answered.
+	dh        dhState
+	ClefHeads int64
+	convN     int
+	ragSeg    map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
+	argmaxK   backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
 	// samplePenK and sampleKs are the device sampler's kernels: the penalty
 	// over the head's rows and, per k, the two top-k passes (sample.go).
 	samplePenK backend.Kernel
@@ -2379,6 +2383,7 @@ func (g *devTier) Close() {
 	// Every session's queue, before the device that owns them, once nothing
 	// runs on one.
 	g.quiesce()
+	g.dhClose()
 	for _, ds := range g.sess {
 		ds.closeQueue()
 	}

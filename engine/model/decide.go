@@ -120,6 +120,10 @@ type Decider struct {
 	clefH   *clefHead
 	clef    *clefRun
 	clefEmb embedMode
+	// clefIn is the device head's input, kept; clefDevRuns counts the
+	// requests whose head ran on a device.
+	clefIn      nn.ClefHeadInput
+	clefDevRuns int
 
 	// violation names one feature of the readout a test removes, to show the
 	// gate sees it (RULE 10). Empty in every caller but those tests.
@@ -341,6 +345,15 @@ func (d *Decider) order(q *DecisionQuestion) []DecisionOption {
 // for a noul. The scores are the Decider's, good until the next run of the
 // same variant.
 func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32, error) {
+	if d.kind == jlm.DecisionClef {
+		// A request of this one question, its scores in the prompt's order.
+		p, err := d.clefPrompt(state, []DecisionQuestion{*q})
+		if err != nil {
+			return nil, err
+		}
+		out := d.variantScores(v, len(p.opts))
+		return out, d.clefForward(p, out)
+	}
 	if d.kind == jlm.DecisionLaya {
 		ids, markers, err := d.layaSequence(state, q)
 		if err != nil {

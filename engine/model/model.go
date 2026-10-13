@@ -1234,6 +1234,9 @@ type Model struct {
 	// clef is a Clef decision model's joint schema head, loaded by the first
 	// Decider (decideclef.go) under bind; nil on every other model.
 	clef *clefHead
+	// clefDev is that head as a device reads it (decideclefdev.go), built
+	// the first time a device runs it.
+	clefDev *nn.ClefHead
 	// outNormB and outB are the output LayerNorm's bias and the head's bias
 	// (phi-2), nil everywhere else.
 	outNormB, outB []float32

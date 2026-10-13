@@ -57,6 +57,7 @@ type decisionPrompt struct {
 	markers []int
 	qt      jlm.QuestionType
 	v       int
+	clef    *clefPrompt // a Clef request's whole prompt
 }
 
 // decisionPrompts writes every question variant of both requests.
@@ -65,6 +66,14 @@ func decisionPrompts(t *testing.T, d *Decider) []decisionPrompt {
 	var out []decisionPrompt
 	for _, req := range decisionRequests {
 		state, qs := decisionRequest(t, filepath.Join("testdata", "decision", req+".json"))
+		if d.kind == jlm.DecisionClef {
+			p, err := d.clefPrompt(state, qs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, decisionPrompt{ids: p.ids, clef: p})
+			continue
+		}
 		for i := range qs {
 			q := &qs[i]
 			for v := range d.variants(q) {
@@ -119,9 +128,12 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 	pass := func() {
 		for _, p := range ps {
 			var err error
-			if m.IsEncoder() {
+			switch {
+			case p.clef != nil:
+				err = d.clefForward(p.clef, d.variantScores(0, len(p.clef.opts)))
+			case m.IsEncoder():
 				_, err = d.layaForward(p.ids, p.qt, p.markers, p.v)
-			} else {
+			default:
 				_, err = d.forward(p.ids, p.groups, p.v)
 			}
 			if err != nil {
@@ -176,7 +188,7 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 			t.Fatal(err)
 		}
 	})
-	if !m.IsEncoder() {
+	if !m.IsEncoder() && d.kind != jlm.DecisionClef {
 		st := d.BatchStats()
 		if st.Steps == st0.Steps || st.MaxSeqs < 2 {
 			t.Fatalf("the batch ran %d steps, at most %d prompts in one: it was not batched", st.Steps-st0.Steps, st.MaxSeqs)
