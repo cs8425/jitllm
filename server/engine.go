@@ -1051,6 +1051,14 @@ type placementSnapshot struct {
 	// on is the device each block is on, by block; "" for a host block or a
 	// device the tier did not name.
 	on []string
+	// hist is each block's history cost (model.State.BlockHistory).
+	hist []blockHistory
+}
+
+// blockHistory is one block's model.State.BlockHistory.
+type blockHistory struct {
+	perPos, state uint64
+	window        int
 }
 
 // refresh republishes the snapshot. The caller MUST hold s.mu.
@@ -1074,6 +1082,7 @@ func (s *Session) refresh() {
 		relocating:  s.st.Relocating(),
 		takenAt:     time.Now(),
 		on:          blocksOn(s.st, s.lm.m.Cfg.NLayer),
+		hist:        historyOf(s.st, s.lm.m.Cfg.NLayer),
 	})
 }
 
@@ -1084,6 +1093,15 @@ func blocksOn(st *model.State, n int) []string {
 		on[li], _ = st.DeviceOf(li)
 	}
 	return on
+}
+
+// historyOf is what each block of st's history costs.
+func historyOf(st *model.State, n int) []blockHistory {
+	h := make([]blockHistory, n)
+	for li := range h {
+		h[li].perPos, h[li].window, h[li].state = st.BlockHistory(li)
+	}
+	return h
 }
 
 // placement returns the last published snapshot, never nil.
