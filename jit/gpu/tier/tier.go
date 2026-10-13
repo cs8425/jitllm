@@ -480,6 +480,16 @@ type Config struct {
 	// comes home (block index, the k expert ids in rank order). The slice is
 	// reused; copy it to keep it.
 	StreamSelLog func(block int, sel []uint32)
+	// Persist composes each decode block's launches into persistent kernels
+	// (persist.go): one cooperative grid per run of launches, phases
+	// separated by a grid barrier, the per-op kernels' own bodies. Off by
+	// default: on a V100 a grid barrier costs more than the launch boundary
+	// it replaces inside a CUDA graph (gpu-kernels.md, "A persistent decode
+	// block"). CUDA only; elsewhere it is declined (Stats.PersistWhy).
+	Persist bool
+	// PersistGrid caps a persistent kernel's grid below the co-residency
+	// limit; zero takes the limit, or the widest launch's groups when fewer.
+	PersistGrid int
 	// NoGraph issues the token's launches one driver call at a time instead of
 	// replaying a captured graph: the other arm of that comparison, a field so
 	// both arms can be live in one process.
@@ -671,6 +681,13 @@ type Stats struct {
 	// launch, the residual added by the projection, and act(gate)*up written
 	// by the up projection.
 	RagQKVFused, RagResFused, RagGateFused int
+	// PersistLaunches counts persistent kernels launched (Config.Persist),
+	// PersistParts the per-op launches they ran, PersistPhases their
+	// grid-barrier-separated phases, PersistCompiles the compositions built
+	// and PersistFallbacks those that failed and ran per-op; PersistWhy is
+	// why the path is declined on this device.
+	PersistLaunches, PersistParts, PersistPhases, PersistCompiles, PersistFallbacks int
+	PersistWhy                                                                      string
 	// RagHeadOne counts ragged steps whose head ran decode's own projection on
 	// the one row that wanted logits, rather than a batched twin over every
 	// row (a prompt chunk's last row, alone in wanting the head).
@@ -1106,6 +1123,14 @@ func (s *Stats) add(o Stats) {
 	s.RagGroupMV += o.RagGroupMV
 	s.RagQKVFused += o.RagQKVFused
 	s.RagResFused += o.RagResFused
+	s.PersistLaunches += o.PersistLaunches
+	s.PersistParts += o.PersistParts
+	s.PersistPhases += o.PersistPhases
+	s.PersistCompiles += o.PersistCompiles
+	s.PersistFallbacks += o.PersistFallbacks
+	if o.PersistWhy != "" {
+		s.PersistWhy = o.PersistWhy
+	}
 	s.RagGateFused += o.RagGateFused
 	s.RagHeadOne += o.RagHeadOne
 	s.SampleReads += o.SampleReads
@@ -1644,6 +1669,7 @@ type devShared struct {
 	moeVolta   map[moeVoltaKey]moeVoltaMV    // their tensor-core twins; see voltaGroupedMV
 	ragK       map[ragKey]backend.Kernel     // a ragged step's matvecs; see ragMV
 	kshared    map[string]backend.Kernel     // scratch kernels by content; see compileShared
+	pcache     *persistCache                 // composed persistent kernels; see persist.go
 	// convK, conv and convN are the convolutional blocks' kernels, their
 	// shared scratch and how many hold it (conv.go).
 	convK   map[convKey]backend.Kernel
@@ -1931,6 +1957,9 @@ func New(slots []Slot, options ...Option) (*GPU, error) {
 		// default) Pack declines immediately.
 		arena: kernels.NewArena(o.kb.arena),
 	}
+	// A jitllmtest build can make the persistent path every tier's default
+	// (PersistByDefaultForTest), so the regression gates run through it.
+	cfg.Persist = persistDefault
 	for _, f := range o.cfg {
 		f(cfg)
 	}
@@ -2416,6 +2445,7 @@ func (g *devTier) Close() {
 	// the staging, refunded as they go.
 	g.dropAllScratch()
 	g.closeShared()
+	g.closePersistCache()
 	if g.rawBuf != nil {
 		g.rawBuf.Free()
 	}

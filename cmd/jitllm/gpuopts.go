@@ -190,6 +190,11 @@ func gpuOptions() []tier.Option {
 	if w := int(num("JITLLM_GPU_PREFILL_PASS")); w > 0 {
 		o = append(o, tier.WithConfig(func(c *tier.Config) { c.PrefillPass = w }))
 	}
+	// JITLLM_GPU_PERSIST composes each decode block into persistent kernels
+	// (tier.WithPersist), JITLLM_GPU_PERSIST_GRID capping their grid.
+	if set("JITLLM_GPU_PERSIST") {
+		o = append(o, tier.WithPersist(true, int(num("JITLLM_GPU_PERSIST_GRID"))))
+	}
 	if page := int(num("JITLLM_GPU_KV_PAGE")); page > 0 {
 		o = append(o, tier.WithConfig(func(c *tier.Config) { c.KVPage = page }))
 	}
