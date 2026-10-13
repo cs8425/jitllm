@@ -519,6 +519,19 @@ func packedChunk(f *JIT, groups int, t quant.Type, k, rowsPerGroup int) int {
 // time (sched.Pool is not reentrant), so one set of fields serves every call;
 // each is cleared of its slices afterwards.
 type hotRegions struct {
+	// group is MatVecPackedGroup's (packedgroup.go).
+	group struct {
+		m                         [MaxGroup]groupMat
+		n, nch, nslot, k, maxRows int
+		slotT                     [MaxGroup]quant.Type
+		slotQK                    [MaxGroup]cpu.QuantActKernels
+		x, actUp                  []float32
+		act                       ActKind
+		resid                     []float32
+		alpha                     float32
+		gen                       uint64
+		fn                        func(worker, lo, hi int)
+	}
 	fused struct {
 		fc                   fusedCall
 		p                    *Packed

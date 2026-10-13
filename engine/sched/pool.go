@@ -193,6 +193,8 @@ type Pool struct {
 	wake  chan struct{}
 	key   string
 	views int
+	// fz is an open fused region's state (fuse.go), on the crew.
+	fz fused
 }
 
 // w is the pool whose workers run p's regions.
@@ -340,6 +342,13 @@ func (p *Pool) join(s uint64) bool {
 // attached to the goroutine rather than derived from the PC, so
 // `pprof -tagfocus` can separate kernels that the call graph cannot.
 func (p *Pool) run(id int) {
+	// A worker that joined a fused region (fuse.go) runs its phases. Asked of
+	// the region rather than of p.j: a late joiner finds p.j already holding
+	// the first phase's job.
+	if p.fz.owner.Load() != nil {
+		p.phaseLoop(id)
+		return
+	}
 	if id >= p.j.limit {
 		return // above the tuned participant count for this region
 	}
@@ -627,6 +636,11 @@ func (p *Pool) dispatch(j job) {
 		return
 	}
 	part := int(p.part.Load())
+	// Inside a fused region the caller's region is a phase of it (fuse.go).
+	if c := p.w(); c.fz.owner.Load() == p {
+		c.phase(j, part)
+		return
+	}
 	if p.crew != nil {
 		// A view runs on its crew, one view's region at a time: the workers
 		// and the published job are the crew's. The participant count is the

@@ -26,6 +26,7 @@ import (
 // relocation hands a block home because the batch's history does not fit, and
 // reclaims it with every row's history once the room comes back.
 func TestBatchSeamMovesCarryEveryRow(t *testing.T) {
+	defer fusedRunsCheck(t, false)()
 	batchSeamMoves(t, testmodels.Path("Llama-3.2-1B-Instruct-Q4_K_M.gguf"), 1e-1, true)
 }
 
@@ -56,6 +57,7 @@ func TestBatchSeamMovesCarryEveryRowQ8(t *testing.T) {
 // batch (growSeat), so a budget short of the KV refuses that growth instead of
 // relocating. The moves themselves are the other arms'.
 func TestBatchSeamMovesCarryEveryRowHybrid(t *testing.T) {
+	defer fusedRunsCheck(t, false)()
 	batchSeamMoves(t, testmodels.Path("qwen35/Qwen3.5-0.8B-Q4_K_M.gguf"), 3e-2, false)
 }
 
@@ -476,6 +478,7 @@ func kvLegalCut(c *Config, n int) bool {
 // them, each row's convolution window and state carried across by MigrateRec.
 // They are F32, so the device's own arithmetic is far under the bound.
 func TestBatchSeamMovesCarryEveryRowSSM(t *testing.T) {
+	defer fusedRunsCheck(t, false)()
 	for _, fx := range ssmFixtures {
 		t.Run(fx.name, func(t *testing.T) {
 			p, ok := existingModel(testmodels.Path(fx.name + ".gguf"))

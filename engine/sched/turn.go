@@ -24,6 +24,8 @@ type turn struct {
 	state atomic.Int32
 	mu    sync.Mutex // guards q and every move into or out of turnQueued
 	q     []chan struct{}
+	// crews is how many crews take turns on this lock, under crews.mu.
+	crews int
 }
 
 // onTurnQueue, set only by a test, is told under t.mu each time a caller

@@ -187,6 +187,15 @@ type JIT struct {
 	// (WidenKVRows), emitted on first ask.
 	kvWiden map[int]*cpu.Code
 
+	// grq, grpairs, grhalfs and grseen are each worker's private quantized
+	// activation for MatVecPackedGroup, one per format slot, and the group
+	// call each was made for (groupGen).
+	grq      [][]int8
+	grpairs  [][]float32
+	grhalfs  [][]float32
+	grseen   []uint64
+	gract    [][]float32 // each worker's act(x)*up for a gated group
+	groupGen uint64
 	q        []int8
 	pairs    []float32
 	kpart    []float32           // MatVecPacked's k-slice partial outputs (fusedSliced)
@@ -1054,6 +1063,24 @@ func (f *JIT) KSliced() int64 {
 		return 0
 	}
 	return f.ksliced
+}
+
+// Fuse opens a fused region on the pool (sched.Pool.Fuse): until Unfuse, every
+// region this JIT dispatches is a phase of one region. It reports whether it
+// opened one; a pool another user shares, a NUMA pool and a one-core pool do
+// not fuse, and their regions run as they always do.
+func (f *JIT) Fuse() bool { return f != nil && f.pool.Fuse() }
+
+// Unfuse closes the region a true Fuse opened.
+func (f *JIT) Unfuse() { f.pool.Unfuse() }
+
+// Phases is how many phases fused regions have run on this JIT's workers: the
+// regions fusion folded into one, which Regions does not count.
+func (f *JIT) Phases() int64 {
+	if f == nil {
+		return 0
+	}
+	return f.pool.Phases()
 }
 
 func (f *JIT) ResetRegions() {

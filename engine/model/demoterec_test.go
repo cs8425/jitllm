@@ -15,6 +15,7 @@ import (
 // does, through migrateKV/migrateRec, without a fault injector. The seam moves
 // mid-run; the tail is compared against a pure-host run.
 func TestShrinkingTheSeamBringsTheSummaryHome(t *testing.T) {
+	defer fusedRunsCheck(t, true)()
 	m := hybridModelOpt(t, hyOpt{moe: true, layers: 8})
 	defer m.Close()
 	if m.Cfg.NLayer < 4 {
