@@ -167,7 +167,7 @@ func (s *State) qsaMask(o *State, li, slot, n int, q, bias []float32, l *layer) 
 		}
 		s.rmsnorm(p, p, l.idxKNorm, c.RMSEps)
 		if c.NRot > 0 {
-			s.jit.RopeTable(s.m.rope, g.cs, s.ropeOf(0, b*R))
+			s.jit.RopeTable(s.m.rope, g.cs, o.ropeOf(slot, b*R))
 			nn.RoPE32JIT(p, d, g.cs, s.m.rope.Neox)
 		}
 	}
