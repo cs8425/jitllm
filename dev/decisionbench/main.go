@@ -80,13 +80,14 @@ type config struct {
 	positive   string  // the choice key that counts as a pick
 	threshold  float64 // P(yes) at or above which a noul answers yes
 	window     time.Duration
+	cycle      bool // keep asking the file again until the window ends
 }
 
 // result is a run's table row.
 type result struct {
-	Answered, InWindow, Positives, Correct, Caught, WrongPicks int
-	P50                                                        time.Duration
-	Exhausted                                                  bool // the file ended inside the window
+	Answered, Scored, InWindow, Positives, Correct, Caught, WrongPicks int
+	P50                                                                time.Duration
+	Exhausted                                                          bool // the file ended inside the window
 }
 
 // run asks every word in turn, stopping at the end of the window.
@@ -94,10 +95,12 @@ func run(c config, items []item, client *http.Client) (result, error) {
 	var r result
 	var lat []time.Duration
 	start := time.Now()
-	for _, it := range items {
-		if time.Since(start) >= c.window {
+	for i := 0; ; i++ {
+		if time.Since(start) >= c.window || (i >= len(items) && !c.cycle) {
 			break
 		}
+		it := items[i%len(items)]
+		first := i < len(items) // accuracy, caught and wrong picks count the file once
 		body, err := json.Marshal(map[string]any{
 			"model":     c.model,
 			"state":     it.word,
@@ -147,15 +150,19 @@ func run(c config, items []item, client *http.Client) (result, error) {
 				return r, err
 			}
 			got = *a.Noul >= c.threshold
-			if want == got {
+			if want == got && first {
 				r.Correct++
 			}
 		} else {
 			want, got = it.label == c.positive, a.Choice == c.positive
-			if a.Choice == it.label {
+			if a.Choice == it.label && first {
 				r.Correct++
 			}
 		}
+		if !first {
+			continue
+		}
+		r.Scored++
 		switch {
 		case want:
 			r.Positives++
@@ -166,7 +173,7 @@ func run(c config, items []item, client *http.Client) (result, error) {
 			r.WrongPicks++
 		}
 	}
-	r.Exhausted = r.Answered == len(items) && time.Since(start) < c.window
+	r.Exhausted = !c.cycle && r.Answered == len(items) && time.Since(start) < c.window
 	if len(lat) > 0 {
 		sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
 		r.P50 = lat[(len(lat)-1)/2]
@@ -182,19 +189,21 @@ func main() {
 		"the TypeSafe question asked of every word, as JSON")
 	pos := flag.String("positive", "", "for a choice question, the key that counts as a pick")
 	threshold := flag.Float64("threshold", 0.5, "for a noul, the P(yes) that answers yes")
+	cycle := flag.Bool("cycle", false, "ask the file again until the window ends, so a short file still fills it; accuracy counts the first pass")
+	raw := flag.Bool("raw", false, "print p50 in microseconds, words in the window, scored, correct, caught, positives and wrong picks, tab separated")
 	window := flag.Duration("window", 32*time.Second, "the window words are counted in")
 	flag.Parse()
 	if *file == "" {
 		fmt.Fprintln(os.Stderr, "usage: decisionbench -file words.tsv [-url URL] [-model NAME] [-question JSON] [-positive KEY]")
 		os.Exit(2)
 	}
-	if err := mainErr(*url, *model, *file, *question, *pos, *threshold, *window); err != nil {
+	if err := mainErr(*url, *model, *file, *question, *pos, *threshold, *window, *cycle, *raw); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func mainErr(url, model, file, question, pos string, threshold float64, window time.Duration) error {
+func mainErr(url, model, file, question, pos string, threshold float64, window time.Duration, cycle, raw bool) error {
 	f, err := os.Open(file)
 	if err != nil {
 		return err
@@ -208,9 +217,14 @@ func mainErr(url, model, file, question, pos string, threshold float64, window t
 	if err != nil {
 		return err
 	}
+	c.cycle = cycle
 	r, err := run(c, items, &http.Client{Timeout: 5 * time.Minute})
 	if err != nil {
 		return err
+	}
+	if raw {
+		fmt.Printf("%d\t%d\t%d\t%d\t%d\t%d\t%d\n", r.P50.Microseconds(), r.InWindow, r.Scored, r.Correct, r.Caught, r.Positives, r.WrongPicks)
+		return nil
 	}
 	fmt.Println(format(r, window))
 	return nil
@@ -242,11 +256,11 @@ func newConfig(url, model, question, pos string, threshold float64, window time.
 // format is the table row.
 func format(r result, window time.Duration) string {
 	acc := 0.0
-	if r.Answered > 0 {
-		acc = float64(r.Correct) / float64(r.Answered)
+	if r.Scored > 0 {
+		acc = float64(r.Correct) / float64(r.Scored)
 	}
 	s := fmt.Sprintf("per-word p50 %v | words in %v: %d | accuracy %.3f (%d/%d) | caught %d/%d | wrong picks %d",
-		r.P50.Round(time.Microsecond), window, r.InWindow, acc, r.Correct, r.Answered, r.Caught, r.Positives, r.WrongPicks)
+		r.P50.Round(time.Microsecond), window, r.InWindow, acc, r.Correct, r.Scored, r.Caught, r.Positives, r.WrongPicks)
 	if r.Exhausted {
 		s += " | the file ended inside the window: the words count is the file, not the rate"
 	}
