@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ func TestKeysAreSavedPrivatelyAndTheDefaultAddressIsNot(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if fi, err := os.Stat(cfg.Path()); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(cfg.Path()); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Errorf("settings file mode %v, %v", fi.Mode(), err)
 	}
 

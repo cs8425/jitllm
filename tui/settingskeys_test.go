@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -45,6 +46,7 @@ func TestSettingsSaveTheKeysPrivately(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
+	t.Setenv("AppData", dir)
 	r := newTestRoot(t)
 	dirs := r.env.cfg.ModelDirs
 	r.env.cfg = config.LoadConfig()
@@ -66,7 +68,7 @@ func TestSettingsSaveTheKeysPrivately(t *testing.T) {
 	if err != nil || !strings.Contains(string(b), "svc-key") || strings.Contains(string(b), api.DefaultAddr) {
 		t.Fatalf("settings file: %v\n%s", err, b)
 	}
-	if fi, _ := os.Stat(cfg.Path()); fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(cfg.Path()); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Errorf("settings file mode %v", fi.Mode())
 	}
 	// Blank is no key.

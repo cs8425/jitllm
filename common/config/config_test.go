@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -35,6 +36,7 @@ func TestASavedLegacyAPIAddressFollowsTheDefault(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
+	t.Setenv("AppData", dir)
 	p := ConfigPath()
 	if p == "" {
 		t.Fatal("this system has no config folder, so LoadConfig reads nothing and the gate proves nothing")
@@ -62,6 +64,7 @@ func TestTheDefaultAddressIsNotSaved(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
+	t.Setenv("AppData", dir)
 	c := LoadConfig()
 	if c.APIAddr != "" || c.ServiceAddr != "" {
 		t.Fatalf("a first run holds %q and %q, want both empty", c.APIAddr, c.ServiceAddr)
@@ -78,7 +81,7 @@ func TestTheDefaultAddressIsNotSaved(t *testing.T) {
 		t.Errorf("an address the person never typed was written:\n%s", b)
 	}
 	fi, err := os.Stat(c.Path())
-	if err != nil || fi.Mode().Perm() != 0o600 {
+	if err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Errorf("settings file mode %v, %v", fi.Mode(), err)
 	}
 	// An older, world-readable file is tightened by the next save.
@@ -88,7 +91,7 @@ func TestTheDefaultAddressIsNotSaved(t *testing.T) {
 	if err := c.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if fi, _ = os.Stat(c.Path()); fi.Mode().Perm() != 0o600 {
+	if fi, _ = os.Stat(c.Path()); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Errorf("an old file stayed %v", fi.Mode())
 	}
 	c = LoadConfig()
