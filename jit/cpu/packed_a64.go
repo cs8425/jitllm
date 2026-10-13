@@ -203,18 +203,7 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 	}
 	// bcast takes element e of the activation into r for the row-group loop.
 	bcast := func(r VReg, e int) { a.DUPs4lane(r, vAct(e/4), uint8(e%4)) }
-	if bits == 4 {
-		a.MOVI16b(vMask, 0x0F)
-	}
-	if codes {
-		a.LDRx(X5, X0, 56) // Scr
-		a.LDRq(vLut, X5, codesSlot)
-	}
-	if hi != 0 {
-		// The secondary plane's mask is PRE-SHIFTED by the primary width, so
-		// the two planes reach one accumulator: 3<<4 is 48, and SDOT takes it.
-		a.MOVI16b(vHi, byte(((1<<hi)-1)<<bits))
-	}
+	a64PackedConsts(&a, &f, vMask, vHi, vLut)
 	// The correction's constant factor, which amd64 folds into bscale. A
 	// signed payload needs none: SDOT is signed by signed, so there is no
 	// amd64-style XOR to undo.
@@ -238,25 +227,7 @@ func emitA64Packed(t quant.Type, rows int, fused bool, ahead int, intFold bool, 
 	if !fused {
 		a.Bind(outer)
 	}
-	a.LDRx(X9, X0, 32) // Rows, in tiles
-	a.MOVimm(X10, 0)   // this tile's byte offset
-	if narrow {
-		a.MOVimm(X26, 0) // ... and the d plane's, which is a half or a quarter of it
-	}
-	tile := a.Label()
-	a.Bind(tile)
-	// The cursors walk across sub-blocks and reset per tile, the opposite nesting
-	// to amd64's: the tile loop is outside, so X12 and X17 start from the
-	// super-block base plus this tile's row offset and walk forward, and the bases
-	// themselves move once per super-block, after the tile loop.
-	a.ADDreg(X12, X2, X10)  // payload
-	a.ADDreg(X17, X15, X10) // scale words
-	dOff := X10
-	if narrow {
-		dOff = X26
-	}
-	a.ADDreg(X13, X8, dOff) // d words
-	a.ADDreg(X14, X1, X10)  // outputs
+	tile := a64TileStart(&a, narrow)
 	sb := a.Label()
 	if fused {
 		a.MOVreg(rA, X3)
@@ -731,6 +702,50 @@ func a64PackedArgs(a *A64) {
 	a.LDRx(X15, X0, 152) // PSC
 }
 
+// a64PackedConsts builds the constants an arm64 packed kernel holds for the
+// whole walk: the nibble mask, the code table, and the secondary plane's mask
+// PRE-SHIFTED by the primary width, so the two planes reach one accumulator
+// (3<<4 is 48, and SDOT takes it).
+func a64PackedConsts(a *A64, f *packedFormat, vMask, vHi, vLut VReg) {
+	if f.bits == 4 {
+		a.MOVI16b(vMask, 0x0F)
+	}
+	if f.codes {
+		a.LDRx(X5, X0, 56) // Scr
+		a.LDRq(vLut, X5, codesSlot)
+	}
+	if f.hi != 0 {
+		a.MOVI16b(vHi, byte(((1<<f.hi)-1)<<f.bits))
+	}
+}
+
+// a64TileStart opens the row-tile loop of the arm64 packed matvec and its
+// token tile, and returns its label. X10 is the tile's byte offset and X26 a
+// narrow format's d plane offset, a half or a quarter of it. The cursors walk
+// across sub-blocks and reset per tile, the opposite nesting to amd64's: the
+// tile loop is outside, so X12 (payload) and X17 (scale words) start from the
+// super-block base plus this tile's row offset and walk forward, with X13 the
+// d words and X14 the outputs; the bases themselves move once per
+// super-block, after the tile loop.
+func a64TileStart(a *A64, narrow bool) int {
+	a.LDRx(X9, X0, 32) // Rows, in tiles
+	a.MOVimm(X10, 0)
+	if narrow {
+		a.MOVimm(X26, 0)
+	}
+	tile := a.Label()
+	a.Bind(tile)
+	a.ADDreg(X12, X2, X10)
+	a.ADDreg(X17, X15, X10)
+	dOff := X10
+	if narrow {
+		dOff = X26
+	}
+	a.ADDreg(X13, X8, dOff)
+	a.ADDreg(X14, X1, X10)
+	return tile
+}
+
 // a64SCByte extracts the sub-block scale byte at bit sh of each packed SC
 // word lane into dst as an int32; amd64's scByte.
 func a64SCByte(a *A64, dst, word VReg, sh byte) {
@@ -804,12 +819,14 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 	if tok < 1 || tok > maxTok {
 		return nil, fmt.Errorf("jit: EmitA64PackedMatMulTiled: %s tok=%d out of 1..%d", t, tok, maxTok)
 	}
-	sub, bits, biasK, biasArray := kernels.Layout(q)
-	perSuper, scOff := kernels.ScaleLayout(q)
-	signed := kernels.SignedPayload(q)
-	minD := kernels.MinInD(q) // Q5_1: dmin alone, no sc word to read m from
-	hi := kernels.HiPlane(q)
-	pw, hw := sub*bits/32, sub*hi/32
+	f, err := packedFormatK(q, t)
+	if err != nil {
+		return nil, err
+	}
+	sub, bits, biasArray := f.sub, f.bits, f.biasArray
+	perSuper, scOff := f.perSuper, f.scOff
+	minD, hi, codes := f.minD, f.hi, f.codes
+	pw, hw := f.pw, f.hw
 	grp := packedFusedGroupK(q) / 4
 	group := packedFusedGroupK(q)
 	if k <= 0 || k%(sub*perSuper) != 0 || nrows <= 0 || nrows%group != 0 {
@@ -845,10 +862,6 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 	}
 	vK = take()
 	t0, t1, t2, t3 := take(), take(), take(), take()
-	codes, err := hasCodes(q)
-	if err != nil {
-		return nil, err
-	}
 	vLut := VReg(0)
 	if codes {
 		vLut = take()
@@ -870,25 +883,17 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 	// Container v27's SC stream (scstream.go): X25 -- a narrow format's DStr,
 	// and a stream format is never narrow -- addresses a straddling field's
 	// next word, one plane stride on.
-	stream := kernels.ScStream(q)
+	stream := f.stream
 	nextSC := func(g int) func(VReg) {
 		return func(r VReg) {
 			a.ADDreg(X25, X17, X7)
 			a.LDRq(r, X25, int32(g*16))
 		}
 	}
-	a.LDRx(X1, X0, 0)
-	a.LDRx(X2, X0, 8)
-	a.LDRx(X3, X0, 16)
-	a.LDRx(X4, X0, 24)
-	a.LDRx(X6, X0, 40)
-	a.LDRx(X7, X0, 48)
-	a.LDRx(X8, X0, 144)
-	a.LDRx(X15, X0, 152)
-	a.LDRx(X16, X0, 64)
+	a64PackedArgs(&a)
+	a.LDRx(X16, X0, 64) // AHalf
 	// The narrow d plane's own stride; see EmitA64PackedMatVec.
-	narrow := NarrowD(t)
-	e8 := E8M0D(t)
+	narrow, e8 := f.narrow, f.e8
 	if narrow {
 		a.LDRx(X25, X0, 160) // DStr
 	}
@@ -908,57 +913,23 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 	a.MOVimm(X20, int64(asTok))
 	a.MOVimm(X21, int64(oTok))
 	a.MOVimm(X22, int64(ahTok))
-	if bits == 4 {
-		a.MOVI16b(vMask, 0x0F)
-	}
-	if codes {
-		a.LDRx(X5, X0, 56) // Scr
-		a.LDRq(vLut, X5, codesSlot)
-	}
-	if hi != 0 {
-		a.MOVI16b(vHi, byte(((1<<hi)-1)<<bits))
-	}
-	corrK := 0
-	switch {
-	case signed:
-		corrK = 0 // SDOT is signed by signed: nothing to undo
-	case biasArray:
-		corrK = 8
-	case sub == Q8Block/2:
-		corrK = 4
-	case biasK != 0:
-		corrK = 8
-	}
+	a64PackedConsts(&a, &f, vMask, vHi, vLut)
+	corrK := f.corrK() // SDOT is signed by signed: nothing to undo
 	if corrK != 0 {
-		a.MOVI4s(vK, byte(corrK))
-		a.SCVTF4s(vK, vK)
+		a64CorrConst(&a, vK, corrK)
 	}
 
 	outer := a.Label()
 	a.Bind(outer)
-	a.LDRx(X9, X0, 32)
-	a.MOVimm(X10, 0)
-	if narrow {
-		a.MOVimm(X26, 0)
-	}
-	tile := a.Label()
-	a.Bind(tile)
-	a.ADDreg(X12, X2, X10)
-	a.ADDreg(X17, X15, X10)
-	dOff := X10
-	if narrow {
-		dOff = X26
-	}
-	a.ADDreg(X13, X8, dOff)
-	a.ADDreg(X14, X1, X10)
+	tile := a64TileStart(&a, narrow)
 
 	// No PRFM here, unlike EmitA64PackedMatVec: a tile does tok times the
 	// arithmetic per byte, so the hint measured slightly slower in prefill. See
 	// docs/engineering-history/cpu-kernels.md, "The container layout's plane
 	// stride".
 	for sn := 0; sn < perSuper; sn++ {
-		pairOff := int32(sub * sn / Q8Block * 8)
-		sh := byte((sn % perWordOf(biasArray)) * strideOf(biasArray))
+		pairOff := f.pairOff(sn)
+		sh := f.scShift(sn)
 		for g := 0; g < grp; g++ {
 			for i := 0; i < tok; i++ {
 				a.MOVIzero(acc[g][i])
@@ -1067,8 +1038,7 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 			}
 		}
 		if a.dotEmu && corrK != 0 {
-			a.MOVI4s(vK, byte(corrK))
-			a.SCVTF4s(vK, vK)
+			a64CorrConst(&a, vK, corrK)
 		}
 		// --- epilogue: d_row and the sub-block scale are shared by every
 		// token, so they are computed once per row group and reused.
@@ -1228,7 +1198,7 @@ func EmitA64PackedMatMulTiled(t quant.Type, k, nrows, tok int) ([]byte, error) {
 				a.ADDreg(X24, X24, X22)
 			}
 		}
-		if stream && scStep(sn) || !stream && perSuper > 1 && sn%perWordOf(biasArray) == perWordOf(biasArray)-1 {
+		if f.scWordDone(sn) {
 			a.ADDreg(X17, X17, X7)
 		}
 	}
