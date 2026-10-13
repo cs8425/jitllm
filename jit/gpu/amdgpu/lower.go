@@ -323,6 +323,8 @@ func (l *lowerer) op(i int, o ir.Op, v ir.Value) error {
 		l.emit("fence syncscope(\"workgroup\") release")
 		l.emit("call void @llvm.amdgcn.s.barrier()")
 		l.emit("fence syncscope(\"workgroup\") acquire")
+	case ir.OpGridBarrier:
+		l.gridBarrier(i+1, val(a0))
 	case ir.OpConst:
 		switch o.Type {
 		case ir.F32:

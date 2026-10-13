@@ -194,6 +194,9 @@ const (
 	// a kernel start its weight stream before a prologue whose barriers would
 	// otherwise hold it back (kernels.ActIn).
 	OpPrefetch
+	// OpGridBarrier synchronises every workgroup of the launch through the
+	// sync buffer Args[0]; see gridsync.go.
+	OpGridBarrier
 	nKind
 )
 
@@ -208,6 +211,7 @@ var kindName = [nKind]string{
 	"tile.load", "tile.splat", "tile.mma", "tile.store", "sub.f16x2", "fma.f16x2",
 	"loadv", "loadv.get", "storev", "funnel",
 	"subgroup.reduce", "subgroup.broadcast", "shuffle", "laneid", "subgroup.size", "prefetch",
+	"grid.barrier",
 }
 
 func (k Kind) String() string { return kindName[k] }
@@ -515,6 +519,9 @@ func (k *Kernel) Validate() error {
 	if err := k.validateTiles(); err != nil {
 		return err
 	}
+	if err := k.validateGrid(); err != nil {
+		return err
+	}
 	depth := 0
 	var loops []int // indices of the OpLoop ops currently open
 	for i, o := range k.Ops {
@@ -650,9 +657,19 @@ func (k *Kernel) Validate() error {
 				k.Name, i+1, k.Params[p].Elem, k.Params[p].Name, t)
 		}
 	}
+	// Per phase: a grid barrier orders a write before every later read, so
+	// the sets start again after one (gridsync.go).
 	var loaded, stored [maxParams]bool
 	for _, o := range k.Ops {
 		switch o.Kind {
+		case OpGridBarrier:
+			for i := range loaded {
+				if loaded[i] && stored[i] {
+					return fmt.Errorf("ir: param %d is both read and written; surplus threads clamp to "+
+						"the last item and would apply the update twice -- make the kernel out of place", i)
+				}
+			}
+			loaded, stored = [maxParams]bool{}, [maxParams]bool{}
 		case OpLoad, OpLoadV:
 			if p := k.paramOf(o.Args[0]); p >= 0 {
 				loaded[p] = true
@@ -700,8 +717,9 @@ func (k *Kernel) Validate() error {
 }
 
 // maxParams bounds the alias check's bookkeeping. Kernels here take a handful
-// of buffers; the largest is the k-quant matvec at six.
-const maxParams = 16
+// of buffers; a persistent kernel composed of a decode block's launches
+// (Persist) takes every buffer they bind.
+const maxParams = 64
 
 // paramOf resolves a value to the parameter index it names, or -1.
 func (k *Kernel) paramOf(v Value) int {

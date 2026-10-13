@@ -6204,3 +6204,71 @@ The verdict on a marginal site moves between processes: the tuned model gate
 kept 3 of 5 on the same T4 where `verify` kept 1. Each process is held to
 what it chose (`TestActInKeepsThePrinciples/tuned`), and the rows read the
 shipping configuration either way.
+
+## The grid barrier: an IR op, lowered on every target
+
+`ir.OpGridBarrier` (`ir/gridsync.go`) orders a whole launch: no workgroup
+passes it until every workgroup has reached it, and every global write before
+it is visible to every read after it. It was missing, not impossible (RULE
+11e): the mechanism is an atomic arrive-and-wait counter in a sync buffer the
+op owns, plus a grid no larger than the device holds resident at once.
+
+- **PTX** (`ptx/grid.go`): `bar.sync`, thread 0 arrives with an `acq_rel` add on
+  one 64-bit word (count in the low half, generation in the high), the last
+  arriver empties the count and moves the generation in one `red.release`
+  add, the others spin on an `ld.acquire` of the generation, `bar.sync`. Launched
+  with `cuLaunchCooperativeKernel` on a grid of at most the occupancy
+  calculator's blocks per SM times the SM count (`cuda/coop.go`): the CUDA
+  Programming Guide's grid synchronisation section requires that co-residency
+  and the cooperative launch guarantees it or refuses the grid.
+- **SPIR-V** (`spirv/grid.go`): the same counter as a count word and a
+  generation word, Device-scope atomics in structured control flow, every
+  storage buffer `Coherent`. The limit is one workgroup per compute unit as
+  `VK_NV_shader_sm_builtins` or `VK_AMD_shader_core_properties` states the
+  count; core Vulkan states neither the count nor any forward progress between
+  workgroups.
+- **MSL** (the `gridPreamble` in `msl/msl.go`): relaxed atomics ordered by
+  `atomic_thread_fence` at device scope and `coherent(device)` buffers, MSL 3.2.
+  The limit is one threadgroup per GPU core as the IORegistry's
+  `gpu-core-count` states it (`metal/cores_darwin.go`).
+- **AMDGPU** (`amdgpu/grid.go`): agent-scope `atomicrmw` and fences, the
+  workgroup count from the dispatch packet. Lowered and assembled only: no AMD
+  card here ran it, and the HIP backend states no limit yet, so it refuses the
+  launch.
+
+`backend.GridLimit` is the limit and every backend's launch refuses a wider
+grid (RULE 13). The sync buffer is zero when allocated and every barrier leaves
+it valid for the next launch, of any grid.
+
+The gate, `TestGridBarrierHoldsEveryWorkgroup`: `kernels.GridProbe` runs eight
+phases, each reading a word another workgroup wrote in the phase before into a
+poisoned output, behind a skew that differs by workgroup and phase; at two
+workgroups, half the limit and the limit, five launches on one sync buffer, two
+grids taking turns on one buffer, and inside a recorded CUDA graph (a
+cooperative launch captures). Its violation,
+`TestGridBarrierProbeSeesAnEarlyCrossing` (a `jitllmtest` build:
+`BreakGridBarrierForTest` lets every waiter through), finds hundreds to
+hundreds of thousands of poisoned words on every arm. Green on the RTX 3050 Ti
+(sm_86; CUDA 240 workgroups of 128 resident, Vulkan 20), the V100 (sm_70;
+CUDA 1280 of 128, Vulkan 80), a T4 (sm_75; CUDA 320 of 128) and the M4
+(Metal, macOS 26.5; 10 of 128 or of 256, one per core).
+
+The two-grid case is there because the first PTX form -- one count that only
+grew, each barrier waiting for the next multiple of the grid -- deadlocked the
+first decode that ran two persistent kernels of different grids on one buffer.
+
+What a barrier costs (`TestGridBarrierCost`, 256 barriers against none, median
+of 50 launches, 128-wide workgroups):
+
+    V100 CUDA     2-160 workgroups 0.83 us   640 1.89 us   1280 4.27 us
+    V100 Vulkan   2-80 workgroups  1.64-1.85 us
+    3050 Ti CUDA  2-120 workgroups 0.79-0.86 us   240 1.07 us
+    3050 Ti Vulkan 2-20 workgroups 1.42-1.91 us
+    T4 CUDA       2-160 workgroups 1.52-1.76 us   320 2.49 us
+    M4 Metal      2-10 workgroups  1.37-1.44 us
+
+The count-and-generation form with a separate generation read cost 1.46 us at
+80 workgroups on the V100; the one-word form removed a round trip to L2. A
+launch boundary inside a CUDA graph is ~0.6 us (the section above), so a grid
+barrier is not cheaper than the launch it replaces; what it can remove is the
+drain, and the round trip of an intermediate through memory, not the launch.

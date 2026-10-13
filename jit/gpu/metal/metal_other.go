@@ -89,3 +89,6 @@ func PhaseStats() (newNs, commitNs uint64) { return 0, 0 }
 // callers compile everywhere.
 func (c *Ctx) CounterSampling() (stage, dispatch bool) { return false, false }
 func (c *Ctx) CounterSets() []string                   { return nil }
+
+// GPUCores is 0 off darwin.
+func GPUCores() int { return 0 }

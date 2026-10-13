@@ -137,8 +137,30 @@ func (m *mtlDev) Compile(k *ir.Kernel) (Kernel, error) {
 			k.Name, k.Lanes, m.c.Name(), simd)
 	}
 	kern.SetWrites(k.WrittenParams())
-	return &mtlKern{k: kern, group: k.Group, name: k.Name}, nil
+	mk := &mtlKern{k: kern, group: k.Group, name: k.Name, src: k, grid: k.GridSync()}
+	if k.GridSync() {
+		mk.resident, mk.residentErr = mtlGridLimit(k)
+	}
+	return mk, nil
 }
+
+// GridLimit is one threadgroup per GPU core, as the IORegistry states the
+// count (metal.GPUCores); a device it does not state cannot run a grid
+// barrier.
+func (d *mtlDev) GridLimit(k Kernel) (int, error) { return mtlGridLimit(k.(*mtlKern).src) }
+
+func mtlGridLimit(k *ir.Kernel) (int, error) {
+	if !k.GridSync() {
+		return 0, fmt.Errorf("backend: msl: %s has no grid barrier", k.Name)
+	}
+	n := metal.GPUCores()
+	if n == 0 {
+		return 0, fmt.Errorf("backend: msl: the IORegistry states no gpu-core-count, and Metal no co-residency")
+	}
+	return n, nil
+}
+
+func (k *mtlKern) IR() *ir.Kernel { return k.src }
 
 // ImportAlign and Import are newBufferWithBytesNoCopy:, which on Apple Silicon
 // is the whole of what a page-in has to do: the GPU and the CPU share one pool,
@@ -224,6 +246,12 @@ type mtlKern struct {
 	// group is the workgroup the kernel was lowered for; see checkWidth.
 	group [3]int
 	name  string
+	// src is the kernel's IR (IRSource); resident and residentErr its
+	// co-residency limit when it has a grid barrier.
+	src         *ir.Kernel
+	resident    int
+	grid        bool // src has a grid barrier: decided once at compile, read by every launch
+	residentErr error
 }
 
 // checkWidth is the package's checkWidth for this kernel. On Metal a wrong
@@ -234,6 +262,9 @@ func (k *mtlKern) checkWidth(width int) error { return checkWidth("metal", k.nam
 
 func (k *mtlKern) Launch(groups, width int, bufs ...Buf) error {
 	if err := k.checkWidth(width); err != nil {
+		return err
+	}
+	if err := checkGrid("msl", k.name, k.grid, groups, k.resident, k.residentErr); err != nil {
 		return err
 	}
 	mb := make([]*metal.Buf, len(bufs))
@@ -328,7 +359,11 @@ func (s *mtlSession) Read(b Buf, p []byte) error {
 }
 
 func (s *mtlSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
-	if err := k.(*mtlKern).checkWidth(width); err != nil {
+	mk := k.(*mtlKern)
+	if err := mk.checkWidth(width); err != nil {
+		return err
+	}
+	if err := checkGrid("msl", mk.name, mk.grid, groups, mk.resident, mk.residentErr); err != nil {
 		return err
 	}
 	if s.batch == nil {
