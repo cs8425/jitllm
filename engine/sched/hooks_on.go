@@ -15,3 +15,14 @@ func workerWake(p *Pool, id int) {
 		(*f)(p, id)
 	}
 }
+
+// OnPhase, set by a test (-tags jitllmtest), is told each fused phase's total
+// and chunk on the caller's goroutine, so a test can name where its phases
+// come from (runtime.Callers).
+var OnPhase func(total, chunk int)
+
+func phaseHook(total, chunk int) {
+	if f := OnPhase; f != nil {
+		f(total, chunk)
+	}
+}

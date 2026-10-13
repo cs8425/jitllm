@@ -35,6 +35,7 @@ import (
 
 	"github.com/jitllm/jitllm/engine/model"
 	"github.com/jitllm/jitllm/internal/cmd/goheap"
+	"github.com/jitllm/jitllm/internal/localserver"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 	"github.com/jitllm/jitllm/server"
 )
@@ -55,6 +56,7 @@ func verbs() []verb {
 		{"sessions", cmdSessions, "create, list, describe, reset and close sessions"},
 		{"place", cmdPlace, "read and move the CPU/device block seam, and the pager budget"},
 		{"stats", cmdStats, "engine counters, once or streamed"},
+		{"service", cmdService, "install, uninstall, start, stop or check jitllmd as this person's background service"},
 	}
 }
 
@@ -129,13 +131,11 @@ one at /v1/messages. The client verbs above use the first of the three.
 `)
 }
 
-// defaultModels is -models' default: JITLLM_MODELS, the variable `jitllm
-// fetch` and `jitllm convert` read, or ./models.
+// defaultModels is -models' default: the models folder `jitllm convert`
+// writes into and every front end reads (JITLLM_MODELS, or this system's
+// data folder; see localserver.ModelsDir).
 func defaultModels() string {
-	if d := os.Getenv("JITLLM_MODELS"); d != "" {
-		return d
-	}
-	return "models"
+	return localserver.ModelsDir(strings.TrimSpace(os.Getenv("JITLLM_MODELS")), os.Getenv("XDG_DATA_HOME"))
 }
 
 func serve(args []string) {
@@ -146,6 +146,9 @@ func serve(args []string) {
 	load := fs.String("load", "",
 		"a .jlm container to load at startup, absolute or relative to -models")
 	modelID := fs.String("id", "", "model id for -load (default: derived)")
+	onDemand := fs.Bool("on-demand", true,
+		"load a model of -models a request names (by file name or alias) that is not loaded, unless it is disabled; "+
+			"it takes -devices (default auto), -gpu-layers and -sessions")
 	devices := fs.String("devices", "",
 		"devices for -load: auto|all|cpu|gpu[:N]|(cuda|vulkan|metal)[:DEVICE][=BYTES], comma-separated; "+
 			"a bare gpu, cuda or vulkan is every such device, a :DEVICE selector pins one")
@@ -294,7 +297,13 @@ func serve(args []string) {
 		}
 		store = fsStore
 	}
+	demand := server.LoadOptions{MaxDeviceBlocks: *gpuLayers, Sessions: *sessions, DeviceIDs: []string{"auto"}}
+	if *devices != "" {
+		demand.DeviceIDs = strings.Split(*devices, ",")
+	}
 	e := server.New(server.Config{
+		OnDemand:         demand,
+		NoOnDemand:       !*onDemand,
 		KVF16:            kvWidth,
 		OffHeap:          goheap.OffHeap,
 		PromptStore:      store,

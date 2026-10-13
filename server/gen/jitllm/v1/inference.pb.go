@@ -21,6 +21,120 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type ToolChoiceMode int32
+
+const (
+	ToolChoiceMode_TOOL_CHOICE_MODE_UNSPECIFIED ToolChoiceMode = 0
+	// No calls; the tools are withheld from the template.
+	ToolChoiceMode_TOOL_CHOICE_MODE_NONE ToolChoiceMode = 1
+	ToolChoiceMode_TOOL_CHOICE_MODE_AUTO ToolChoiceMode = 2
+	// At least one call to a declared tool, held to the model's own tool-call
+	// syntax by a grammar.
+	ToolChoiceMode_TOOL_CHOICE_MODE_REQUIRED ToolChoiceMode = 3
+	// A call to the tool `name`.
+	ToolChoiceMode_TOOL_CHOICE_MODE_FUNCTION ToolChoiceMode = 4
+)
+
+// Enum value maps for ToolChoiceMode.
+var (
+	ToolChoiceMode_name = map[int32]string{
+		0: "TOOL_CHOICE_MODE_UNSPECIFIED",
+		1: "TOOL_CHOICE_MODE_NONE",
+		2: "TOOL_CHOICE_MODE_AUTO",
+		3: "TOOL_CHOICE_MODE_REQUIRED",
+		4: "TOOL_CHOICE_MODE_FUNCTION",
+	}
+	ToolChoiceMode_value = map[string]int32{
+		"TOOL_CHOICE_MODE_UNSPECIFIED": 0,
+		"TOOL_CHOICE_MODE_NONE":        1,
+		"TOOL_CHOICE_MODE_AUTO":        2,
+		"TOOL_CHOICE_MODE_REQUIRED":    3,
+		"TOOL_CHOICE_MODE_FUNCTION":    4,
+	}
+)
+
+func (x ToolChoiceMode) Enum() *ToolChoiceMode {
+	p := new(ToolChoiceMode)
+	*p = x
+	return p
+}
+
+func (x ToolChoiceMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ToolChoiceMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_jitllm_v1_inference_proto_enumTypes[0].Descriptor()
+}
+
+func (ToolChoiceMode) Type() protoreflect.EnumType {
+	return &file_jitllm_v1_inference_proto_enumTypes[0]
+}
+
+func (x ToolChoiceMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ToolChoiceMode.Descriptor instead.
+func (ToolChoiceMode) EnumDescriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{0}
+}
+
+type ResponseFormat_Type int32
+
+const (
+	ResponseFormat_TYPE_UNSPECIFIED ResponseFormat_Type = 0
+	// No constraint.
+	ResponseFormat_TYPE_TEXT ResponseFormat_Type = 1
+	// Any JSON object.
+	ResponseFormat_TYPE_JSON_OBJECT ResponseFormat_Type = 2
+	// A sentence of `json_schema`.
+	ResponseFormat_TYPE_JSON_SCHEMA ResponseFormat_Type = 3
+)
+
+// Enum value maps for ResponseFormat_Type.
+var (
+	ResponseFormat_Type_name = map[int32]string{
+		0: "TYPE_UNSPECIFIED",
+		1: "TYPE_TEXT",
+		2: "TYPE_JSON_OBJECT",
+		3: "TYPE_JSON_SCHEMA",
+	}
+	ResponseFormat_Type_value = map[string]int32{
+		"TYPE_UNSPECIFIED": 0,
+		"TYPE_TEXT":        1,
+		"TYPE_JSON_OBJECT": 2,
+		"TYPE_JSON_SCHEMA": 3,
+	}
+)
+
+func (x ResponseFormat_Type) Enum() *ResponseFormat_Type {
+	p := new(ResponseFormat_Type)
+	*p = x
+	return p
+}
+
+func (x ResponseFormat_Type) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ResponseFormat_Type) Descriptor() protoreflect.EnumDescriptor {
+	return file_jitllm_v1_inference_proto_enumTypes[1].Descriptor()
+}
+
+func (ResponseFormat_Type) Type() protoreflect.EnumType {
+	return &file_jitllm_v1_inference_proto_enumTypes[1]
+}
+
+func (x ResponseFormat_Type) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ResponseFormat_Type.Descriptor instead.
+func (ResponseFormat_Type) EnumDescriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{5, 0}
+}
+
 // PromptInput is the one prompt representation. Text and token ids are the two
 // honest forms; chat is a third because rendering the template is the engine's
 // job and a caller that renders it itself will get the special tokens wrong.
@@ -175,8 +289,12 @@ type ChatPrompt struct {
 	System              *string `protobuf:"bytes,2,opt,name=system,proto3,oneof" json:"system,omitempty"`
 	AddGenerationPrompt bool    `protobuf:"varint,3,opt,name=add_generation_prompt,json=addGenerationPrompt,proto3" json:"add_generation_prompt,omitempty"`
 	TemplateName        string  `protobuf:"bytes,4,opt,name=template_name,json=templateName,proto3" json:"template_name,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Functions the model may call, handed to its chat template as the OpenAI
+	// API's `tools`. Withheld when `tool_choice` is NONE.
+	Tools         []*Tool     `protobuf:"bytes,5,rep,name=tools,proto3" json:"tools,omitempty"`
+	ToolChoice    *ToolChoice `protobuf:"bytes,6,opt,name=tool_choice,json=toolChoice,proto3" json:"tool_choice,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ChatPrompt) Reset() {
@@ -237,6 +355,229 @@ func (x *ChatPrompt) GetTemplateName() string {
 	return ""
 }
 
+func (x *ChatPrompt) GetTools() []*Tool {
+	if x != nil {
+		return x.Tools
+	}
+	return nil
+}
+
+func (x *ChatPrompt) GetToolChoice() *ToolChoice {
+	if x != nil {
+		return x.ToolChoice
+	}
+	return nil
+}
+
+// Tool is one function the model may call: the OpenAI API's
+// {"type": "function", "function": {name, description, parameters, strict}}.
+type Tool struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Description string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	// The parameters as a JSON Schema document, text, its key order kept.
+	ParametersJson string `protobuf:"bytes,3,opt,name=parameters_json,json=parametersJson,proto3" json:"parameters_json,omitempty"`
+	// Passed to the template as the API's `strict`.
+	Strict        *bool `protobuf:"varint,4,opt,name=strict,proto3,oneof" json:"strict,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Tool) Reset() {
+	*x = Tool{}
+	mi := &file_jitllm_v1_inference_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Tool) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Tool) ProtoMessage() {}
+
+func (x *Tool) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_inference_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Tool.ProtoReflect.Descriptor instead.
+func (*Tool) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *Tool) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Tool) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *Tool) GetParametersJson() string {
+	if x != nil {
+		return x.ParametersJson
+	}
+	return ""
+}
+
+func (x *Tool) GetStrict() bool {
+	if x != nil && x.Strict != nil {
+		return *x.Strict
+	}
+	return false
+}
+
+type ToolChoice struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Mode  ToolChoiceMode         `protobuf:"varint,1,opt,name=mode,proto3,enum=jitllm.v1.ToolChoiceMode" json:"mode,omitempty"`
+	// The tool a FUNCTION choice names; it must be one of `tools`.
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// At most one call in the reply (the API's parallel_tool_calls false).
+	SingleCall    bool `protobuf:"varint,3,opt,name=single_call,json=singleCall,proto3" json:"single_call,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolChoice) Reset() {
+	*x = ToolChoice{}
+	mi := &file_jitllm_v1_inference_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolChoice) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolChoice) ProtoMessage() {}
+
+func (x *ToolChoice) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_inference_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolChoice.ProtoReflect.Descriptor instead.
+func (*ToolChoice) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ToolChoice) GetMode() ToolChoiceMode {
+	if x != nil {
+		return x.Mode
+	}
+	return ToolChoiceMode_TOOL_CHOICE_MODE_UNSPECIFIED
+}
+
+func (x *ToolChoice) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ToolChoice) GetSingleCall() bool {
+	if x != nil {
+		return x.SingleCall
+	}
+	return false
+}
+
+// ResponseFormat is the OpenAI API's response_format. It is turned into a
+// grammar by the code the HTTP surface runs, so a schema either surface
+// builds the other builds, and one it refuses the other refuses in the same
+// words.
+type ResponseFormat struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Type  ResponseFormat_Type    `protobuf:"varint,1,opt,name=type,proto3,enum=jitllm.v1.ResponseFormat_Type" json:"type,omitempty"`
+	// The schema document, for TYPE_JSON_SCHEMA.
+	JsonSchema string `protobuf:"bytes,2,opt,name=json_schema,json=jsonSchema,proto3" json:"json_schema,omitempty"`
+	Name       string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	// Accepted for compatibility: the grammar always holds the reply to the
+	// schema, so there is no non-strict mode to select.
+	Strict        *bool `protobuf:"varint,4,opt,name=strict,proto3,oneof" json:"strict,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResponseFormat) Reset() {
+	*x = ResponseFormat{}
+	mi := &file_jitllm_v1_inference_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResponseFormat) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResponseFormat) ProtoMessage() {}
+
+func (x *ResponseFormat) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_inference_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResponseFormat.ProtoReflect.Descriptor instead.
+func (*ResponseFormat) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ResponseFormat) GetType() ResponseFormat_Type {
+	if x != nil {
+		return x.Type
+	}
+	return ResponseFormat_TYPE_UNSPECIFIED
+}
+
+func (x *ResponseFormat) GetJsonSchema() string {
+	if x != nil {
+		return x.JsonSchema
+	}
+	return ""
+}
+
+func (x *ResponseFormat) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ResponseFormat) GetStrict() bool {
+	if x != nil && x.Strict != nil {
+		return *x.Strict
+	}
+	return false
+}
+
 type GenerateRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Generate against an existing session, keeping its KV cache and position.
@@ -279,14 +620,33 @@ type GenerateRequest struct {
 	// Structured output by JSON Schema, compiled to a grammar: the subset
 	// llama.cpp's json-schema-to-grammar builds, anything else refused by
 	// name. Not with `grammar`.
-	JsonSchema    string `protobuf:"bytes,32,opt,name=json_schema,json=jsonSchema,proto3" json:"json_schema,omitempty"`
+	JsonSchema string `protobuf:"bytes,32,opt,name=json_schema,json=jsonSchema,proto3" json:"json_schema,omitempty"`
+	// The OpenAI API's response_format. Not with `grammar` or `json_schema`, and
+	// not with a forced tool call: each is one constraint.
+	ResponseFormat *ResponseFormat `protobuf:"bytes,33,opt,name=response_format,json=responseFormat,proto3" json:"response_format,omitempty"`
+	// The number of continuations of one prompt (the API's `n`), 0 or 1 for one.
+	// The prompt is prefilled once; choice i samples with seed + i of
+	// `sampling.seed` (a random base when unset). Events carry their `choice`.
+	N int32 `protobuf:"varint,34,opt,name=n,proto3" json:"n,omitempty"`
+	// Per-token log-probabilities of the model's raw distribution, before
+	// temperature, penalties and top-k/top-p/min-p, with the `top_logprobs`
+	// (0 to 20) most likely alternatives at each step. top_logprobs needs
+	// logprobs; neither is accepted with `echo_prompt`.
+	Logprobs    bool   `protobuf:"varint,35,opt,name=logprobs,proto3" json:"logprobs,omitempty"`
+	TopLogprobs *int32 `protobuf:"varint,36,opt,name=top_logprobs,json=topLogprobs,proto3,oneof" json:"top_logprobs,omitempty"`
+	// Send a GenerateUsage event once every choice has finished: the API's
+	// stream_options.include_usage. Complete always reports usage.
+	IncludeUsage bool `protobuf:"varint,37,opt,name=include_usage,json=includeUsage,proto3" json:"include_usage,omitempty"`
+	// The request's claim on the host budget: "high" or "normal"; empty leaves
+	// it as it is (the OpenAI surface's jitllm_priority).
+	Priority      string `protobuf:"bytes,38,opt,name=priority,proto3" json:"priority,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GenerateRequest) Reset() {
 	*x = GenerateRequest{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[3]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -298,7 +658,7 @@ func (x *GenerateRequest) String() string {
 func (*GenerateRequest) ProtoMessage() {}
 
 func (x *GenerateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[3]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -311,7 +671,7 @@ func (x *GenerateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateRequest.ProtoReflect.Descriptor instead.
 func (*GenerateRequest) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{3}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GenerateRequest) GetSessionId() string {
@@ -405,6 +765,48 @@ func (x *GenerateRequest) GetJsonSchema() string {
 	return ""
 }
 
+func (x *GenerateRequest) GetResponseFormat() *ResponseFormat {
+	if x != nil {
+		return x.ResponseFormat
+	}
+	return nil
+}
+
+func (x *GenerateRequest) GetN() int32 {
+	if x != nil {
+		return x.N
+	}
+	return 0
+}
+
+func (x *GenerateRequest) GetLogprobs() bool {
+	if x != nil {
+		return x.Logprobs
+	}
+	return false
+}
+
+func (x *GenerateRequest) GetTopLogprobs() int32 {
+	if x != nil && x.TopLogprobs != nil {
+		return *x.TopLogprobs
+	}
+	return 0
+}
+
+func (x *GenerateRequest) GetIncludeUsage() bool {
+	if x != nil {
+		return x.IncludeUsage
+	}
+	return false
+}
+
+func (x *GenerateRequest) GetPriority() string {
+	if x != nil {
+		return x.Priority
+	}
+	return ""
+}
+
 // GenerateResponse is one event. The oneof is deliberate: a token stream that
 // cannot report "you waited 4 s for a device" hides the one property of this
 // engine a caller most needs to see.
@@ -415,14 +817,18 @@ type GenerateResponse struct {
 	//	*GenerateResponse_Started
 	//	*GenerateResponse_Token
 	//	*GenerateResponse_Finished
-	Event         isGenerateResponse_Event `protobuf_oneof:"event"`
+	//	*GenerateResponse_ToolCalls
+	//	*GenerateResponse_Usage
+	Event isGenerateResponse_Event `protobuf_oneof:"event"`
+	// The continuation an event belongs to, 0 unless the request set n above 1.
+	Choice        int32 `protobuf:"varint,6,opt,name=choice,proto3" json:"choice,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GenerateResponse) Reset() {
 	*x = GenerateResponse{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[4]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -434,7 +840,7 @@ func (x *GenerateResponse) String() string {
 func (*GenerateResponse) ProtoMessage() {}
 
 func (x *GenerateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[4]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -447,7 +853,7 @@ func (x *GenerateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateResponse.ProtoReflect.Descriptor instead.
 func (*GenerateResponse) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{4}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GenerateResponse) GetEvent() isGenerateResponse_Event {
@@ -484,6 +890,31 @@ func (x *GenerateResponse) GetFinished() *GenerateFinished {
 	return nil
 }
 
+func (x *GenerateResponse) GetToolCalls() *GenerateToolCalls {
+	if x != nil {
+		if x, ok := x.Event.(*GenerateResponse_ToolCalls); ok {
+			return x.ToolCalls
+		}
+	}
+	return nil
+}
+
+func (x *GenerateResponse) GetUsage() *GenerateUsage {
+	if x != nil {
+		if x, ok := x.Event.(*GenerateResponse_Usage); ok {
+			return x.Usage
+		}
+	}
+	return nil
+}
+
+func (x *GenerateResponse) GetChoice() int32 {
+	if x != nil {
+		return x.Choice
+	}
+	return 0
+}
+
 type isGenerateResponse_Event interface {
 	isGenerateResponse_Event()
 }
@@ -500,11 +931,324 @@ type GenerateResponse_Finished struct {
 	Finished *GenerateFinished `protobuf:"bytes,3,opt,name=finished,proto3,oneof"`
 }
 
+type GenerateResponse_ToolCalls struct {
+	// Tool calls the reply made, each sent as soon as its markup closes.
+	ToolCalls *GenerateToolCalls `protobuf:"bytes,4,opt,name=tool_calls,json=toolCalls,proto3,oneof"`
+}
+
+type GenerateResponse_Usage struct {
+	// Sent once, last, when the request set include_usage.
+	Usage *GenerateUsage `protobuf:"bytes,5,opt,name=usage,proto3,oneof"`
+}
+
 func (*GenerateResponse_Started) isGenerateResponse_Event() {}
 
 func (*GenerateResponse_Token) isGenerateResponse_Event() {}
 
 func (*GenerateResponse_Finished) isGenerateResponse_Event() {}
+
+func (*GenerateResponse_ToolCalls) isGenerateResponse_Event() {}
+
+func (*GenerateResponse_Usage) isGenerateResponse_Event() {}
+
+type GenerateToolCalls struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Calls []*ToolCall            `protobuf:"bytes,1,rep,name=calls,proto3" json:"calls,omitempty"`
+	// The position of the first of `calls` among the choice's calls.
+	FirstIndex    int32 `protobuf:"varint,2,opt,name=first_index,json=firstIndex,proto3" json:"first_index,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GenerateToolCalls) Reset() {
+	*x = GenerateToolCalls{}
+	mi := &file_jitllm_v1_inference_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GenerateToolCalls) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GenerateToolCalls) ProtoMessage() {}
+
+func (x *GenerateToolCalls) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_inference_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GenerateToolCalls.ProtoReflect.Descriptor instead.
+func (*GenerateToolCalls) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *GenerateToolCalls) GetCalls() []*ToolCall {
+	if x != nil {
+		return x.Calls
+	}
+	return nil
+}
+
+func (x *GenerateToolCalls) GetFirstIndex() int32 {
+	if x != nil {
+		return x.FirstIndex
+	}
+	return 0
+}
+
+// Usage is the OpenAI API's usage object. The prompt is counted once for the
+// request: every choice after the first restored it rather than ran it.
+type Usage struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	PromptTokens     int32                  `protobuf:"varint,1,opt,name=prompt_tokens,json=promptTokens,proto3" json:"prompt_tokens,omitempty"`
+	CompletionTokens int32                  `protobuf:"varint,2,opt,name=completion_tokens,json=completionTokens,proto3" json:"completion_tokens,omitempty"`
+	TotalTokens      int32                  `protobuf:"varint,3,opt,name=total_tokens,json=totalTokens,proto3" json:"total_tokens,omitempty"`
+	// Prompt tokens restored from the memory cache or a prompt store.
+	CachedTokens  int32 `protobuf:"varint,4,opt,name=cached_tokens,json=cachedTokens,proto3" json:"cached_tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Usage) Reset() {
+	*x = Usage{}
+	mi := &file_jitllm_v1_inference_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Usage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Usage) ProtoMessage() {}
+
+func (x *Usage) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_inference_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Usage.ProtoReflect.Descriptor instead.
+func (*Usage) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *Usage) GetPromptTokens() int32 {
+	if x != nil {
+		return x.PromptTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCompletionTokens() int32 {
+	if x != nil {
+		return x.CompletionTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetTotalTokens() int32 {
+	if x != nil {
+		return x.TotalTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCachedTokens() int32 {
+	if x != nil {
+		return x.CachedTokens
+	}
+	return 0
+}
+
+type GenerateUsage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Usage         *Usage                 `protobuf:"bytes,1,opt,name=usage,proto3" json:"usage,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GenerateUsage) Reset() {
+	*x = GenerateUsage{}
+	mi := &file_jitllm_v1_inference_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GenerateUsage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GenerateUsage) ProtoMessage() {}
+
+func (x *GenerateUsage) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_inference_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GenerateUsage.ProtoReflect.Descriptor instead.
+func (*GenerateUsage) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *GenerateUsage) GetUsage() *Usage {
+	if x != nil {
+		return x.Usage
+	}
+	return nil
+}
+
+// TokenLogprob is a sampled token's log-probability and the most likely
+// alternatives at its step, most likely first.
+type TokenLogprob struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	TokenId int32                  `protobuf:"varint,1,opt,name=token_id,json=tokenId,proto3" json:"token_id,omitempty"`
+	// The token alone, decoded on its own: its bytes, which may be part of a rune.
+	Token         string        `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
+	Logprob       float32       `protobuf:"fixed32,3,opt,name=logprob,proto3" json:"logprob,omitempty"`
+	Top           []*TopLogprob `protobuf:"bytes,4,rep,name=top,proto3" json:"top,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TokenLogprob) Reset() {
+	*x = TokenLogprob{}
+	mi := &file_jitllm_v1_inference_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TokenLogprob) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TokenLogprob) ProtoMessage() {}
+
+func (x *TokenLogprob) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_inference_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TokenLogprob.ProtoReflect.Descriptor instead.
+func (*TokenLogprob) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *TokenLogprob) GetTokenId() int32 {
+	if x != nil {
+		return x.TokenId
+	}
+	return 0
+}
+
+func (x *TokenLogprob) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *TokenLogprob) GetLogprob() float32 {
+	if x != nil {
+		return x.Logprob
+	}
+	return 0
+}
+
+func (x *TokenLogprob) GetTop() []*TopLogprob {
+	if x != nil {
+		return x.Top
+	}
+	return nil
+}
+
+type TopLogprob struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TokenId       int32                  `protobuf:"varint,1,opt,name=token_id,json=tokenId,proto3" json:"token_id,omitempty"`
+	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
+	Logprob       float32                `protobuf:"fixed32,3,opt,name=logprob,proto3" json:"logprob,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TopLogprob) Reset() {
+	*x = TopLogprob{}
+	mi := &file_jitllm_v1_inference_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TopLogprob) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TopLogprob) ProtoMessage() {}
+
+func (x *TopLogprob) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_inference_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TopLogprob.ProtoReflect.Descriptor instead.
+func (*TopLogprob) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *TopLogprob) GetTokenId() int32 {
+	if x != nil {
+		return x.TokenId
+	}
+	return 0
+}
+
+func (x *TopLogprob) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *TopLogprob) GetLogprob() float32 {
+	if x != nil {
+		return x.Logprob
+	}
+	return 0
+}
 
 type GenerateStarted struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
@@ -538,7 +1282,7 @@ type GenerateStarted struct {
 
 func (x *GenerateStarted) Reset() {
 	*x = GenerateStarted{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[5]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -550,7 +1294,7 @@ func (x *GenerateStarted) String() string {
 func (*GenerateStarted) ProtoMessage() {}
 
 func (x *GenerateStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[5]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -563,7 +1307,7 @@ func (x *GenerateStarted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateStarted.ProtoReflect.Descriptor instead.
 func (*GenerateStarted) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{5}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GenerateStarted) GetSessionId() string {
@@ -648,15 +1392,17 @@ type GenerateToken struct {
 	TokenId int32                  `protobuf:"varint,1,opt,name=token_id,json=tokenId,proto3" json:"token_id,omitempty"`
 	// The incremental text this token contributed. Empty when the token is a
 	// partial UTF-8 sequence whose bytes are held back until it completes.
-	Text          string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
-	Index         int32  `protobuf:"varint,3,opt,name=index,proto3" json:"index,omitempty"`
+	Text  string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	Index int32  `protobuf:"varint,3,opt,name=index,proto3" json:"index,omitempty"`
+	// Set when the request asked for logprobs.
+	Logprob       *TokenLogprob `protobuf:"bytes,4,opt,name=logprob,proto3" json:"logprob,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GenerateToken) Reset() {
 	*x = GenerateToken{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[6]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -668,7 +1414,7 @@ func (x *GenerateToken) String() string {
 func (*GenerateToken) ProtoMessage() {}
 
 func (x *GenerateToken) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[6]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -681,7 +1427,7 @@ func (x *GenerateToken) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateToken.ProtoReflect.Descriptor instead.
 func (*GenerateToken) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{6}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GenerateToken) GetTokenId() int32 {
@@ -705,6 +1451,13 @@ func (x *GenerateToken) GetIndex() int32 {
 	return 0
 }
 
+func (x *GenerateToken) GetLogprob() *TokenLogprob {
+	if x != nil {
+		return x.Logprob
+	}
+	return nil
+}
+
 type GenerateFinished struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Reason FinishReason           `protobuf:"varint,1,opt,name=reason,proto3,enum=jitllm.v1.FinishReason" json:"reason,omitempty"`
@@ -720,14 +1473,17 @@ type GenerateFinished struct {
 	BytesPerToken         uint64  `protobuf:"varint,8,opt,name=bytes_per_token,json=bytesPerToken,proto3" json:"bytes_per_token,omitempty"`
 	// The session's position after this generation, so a caller continuing a
 	// conversation knows where it is without a second call.
-	Position      int32 `protobuf:"varint,9,opt,name=position,proto3" json:"position,omitempty"`
+	Position int32 `protobuf:"varint,9,opt,name=position,proto3" json:"position,omitempty"`
+	// Prompt tokens restored from the memory cache or a prompt store rather
+	// than computed: the API's prompt_tokens_details.cached_tokens.
+	CachedTokens  int32 `protobuf:"varint,10,opt,name=cached_tokens,json=cachedTokens,proto3" json:"cached_tokens,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GenerateFinished) Reset() {
 	*x = GenerateFinished{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[7]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -739,7 +1495,7 @@ func (x *GenerateFinished) String() string {
 func (*GenerateFinished) ProtoMessage() {}
 
 func (x *GenerateFinished) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[7]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -752,7 +1508,7 @@ func (x *GenerateFinished) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateFinished.ProtoReflect.Descriptor instead.
 func (*GenerateFinished) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{7}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GenerateFinished) GetReason() FinishReason {
@@ -818,19 +1574,34 @@ func (x *GenerateFinished) GetPosition() int32 {
 	return 0
 }
 
+func (x *GenerateFinished) GetCachedTokens() int32 {
+	if x != nil {
+		return x.CachedTokens
+	}
+	return 0
+}
+
+// CompleteResponse is the accumulated generate. `started`, `text`,
+// `token_ids` and `finished` are the first choice's, as they were before
+// requests could ask for several; `choices` holds every choice, the first
+// again, and is where a reader of tool calls and logprobs looks.
 type CompleteResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Started       *GenerateStarted       `protobuf:"bytes,1,opt,name=started,proto3" json:"started,omitempty"`
-	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
-	TokenIds      []int32                `protobuf:"varint,3,rep,packed,name=token_ids,json=tokenIds,proto3" json:"token_ids,omitempty"`
-	Finished      *GenerateFinished      `protobuf:"bytes,4,opt,name=finished,proto3" json:"finished,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Started *GenerateStarted       `protobuf:"bytes,1,opt,name=started,proto3" json:"started,omitempty"`
+	// The reply's text. When the request declared tools and the reply made
+	// calls, the text without the calls' markup.
+	Text          string            `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	TokenIds      []int32           `protobuf:"varint,3,rep,packed,name=token_ids,json=tokenIds,proto3" json:"token_ids,omitempty"`
+	Finished      *GenerateFinished `protobuf:"bytes,4,opt,name=finished,proto3" json:"finished,omitempty"`
+	Choices       []*CompleteChoice `protobuf:"bytes,5,rep,name=choices,proto3" json:"choices,omitempty"`
+	Usage         *Usage            `protobuf:"bytes,6,opt,name=usage,proto3" json:"usage,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CompleteResponse) Reset() {
 	*x = CompleteResponse{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[8]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -842,7 +1613,7 @@ func (x *CompleteResponse) String() string {
 func (*CompleteResponse) ProtoMessage() {}
 
 func (x *CompleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[8]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -855,7 +1626,7 @@ func (x *CompleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompleteResponse.ProtoReflect.Descriptor instead.
 func (*CompleteResponse) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{8}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *CompleteResponse) GetStarted() *GenerateStarted {
@@ -886,6 +1657,114 @@ func (x *CompleteResponse) GetFinished() *GenerateFinished {
 	return nil
 }
 
+func (x *CompleteResponse) GetChoices() []*CompleteChoice {
+	if x != nil {
+		return x.Choices
+	}
+	return nil
+}
+
+func (x *CompleteResponse) GetUsage() *Usage {
+	if x != nil {
+		return x.Usage
+	}
+	return nil
+}
+
+type CompleteChoice struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Index     int32                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	Started   *GenerateStarted       `protobuf:"bytes,2,opt,name=started,proto3" json:"started,omitempty"`
+	Text      string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	TokenIds  []int32                `protobuf:"varint,4,rep,packed,name=token_ids,json=tokenIds,proto3" json:"token_ids,omitempty"`
+	ToolCalls []*ToolCall            `protobuf:"bytes,5,rep,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
+	// One per generated token, when the request asked for logprobs.
+	Logprobs []*TokenLogprob `protobuf:"bytes,6,rep,name=logprobs,proto3" json:"logprobs,omitempty"`
+	// Its reason is TOOL_CALLS when the reply made calls.
+	Finished      *GenerateFinished `protobuf:"bytes,7,opt,name=finished,proto3" json:"finished,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CompleteChoice) Reset() {
+	*x = CompleteChoice{}
+	mi := &file_jitllm_v1_inference_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompleteChoice) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompleteChoice) ProtoMessage() {}
+
+func (x *CompleteChoice) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_inference_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompleteChoice.ProtoReflect.Descriptor instead.
+func (*CompleteChoice) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *CompleteChoice) GetIndex() int32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *CompleteChoice) GetStarted() *GenerateStarted {
+	if x != nil {
+		return x.Started
+	}
+	return nil
+}
+
+func (x *CompleteChoice) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *CompleteChoice) GetTokenIds() []int32 {
+	if x != nil {
+		return x.TokenIds
+	}
+	return nil
+}
+
+func (x *CompleteChoice) GetToolCalls() []*ToolCall {
+	if x != nil {
+		return x.ToolCalls
+	}
+	return nil
+}
+
+func (x *CompleteChoice) GetLogprobs() []*TokenLogprob {
+	if x != nil {
+		return x.Logprobs
+	}
+	return nil
+}
+
+func (x *CompleteChoice) GetFinished() *GenerateFinished {
+	if x != nil {
+		return x.Finished
+	}
+	return nil
+}
+
 type CancelRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
@@ -895,7 +1774,7 @@ type CancelRequest struct {
 
 func (x *CancelRequest) Reset() {
 	*x = CancelRequest{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[9]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -907,7 +1786,7 @@ func (x *CancelRequest) String() string {
 func (*CancelRequest) ProtoMessage() {}
 
 func (x *CancelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[9]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -920,7 +1799,7 @@ func (x *CancelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelRequest.ProtoReflect.Descriptor instead.
 func (*CancelRequest) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{9}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CancelRequest) GetSessionId() string {
@@ -939,7 +1818,7 @@ type CancelResponse struct {
 
 func (x *CancelResponse) Reset() {
 	*x = CancelResponse{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[10]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -951,7 +1830,7 @@ func (x *CancelResponse) String() string {
 func (*CancelResponse) ProtoMessage() {}
 
 func (x *CancelResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[10]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -964,7 +1843,7 @@ func (x *CancelResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelResponse.ProtoReflect.Descriptor instead.
 func (*CancelResponse) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{10}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *CancelResponse) GetWasGenerating() bool {
@@ -991,7 +1870,7 @@ type EmbedInput struct {
 
 func (x *EmbedInput) Reset() {
 	*x = EmbedInput{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[11]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1003,7 +1882,7 @@ func (x *EmbedInput) String() string {
 func (*EmbedInput) ProtoMessage() {}
 
 func (x *EmbedInput) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[11]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1016,7 +1895,7 @@ func (x *EmbedInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EmbedInput.ProtoReflect.Descriptor instead.
 func (*EmbedInput) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{11}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *EmbedInput) GetInput() isEmbedInput_Input {
@@ -1085,7 +1964,7 @@ type EmbedRequest struct {
 
 func (x *EmbedRequest) Reset() {
 	*x = EmbedRequest{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[12]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1097,7 +1976,7 @@ func (x *EmbedRequest) String() string {
 func (*EmbedRequest) ProtoMessage() {}
 
 func (x *EmbedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[12]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1110,7 +1989,7 @@ func (x *EmbedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EmbedRequest.ProtoReflect.Descriptor instead.
 func (*EmbedRequest) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{12}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *EmbedRequest) GetModelId() string {
@@ -1153,7 +2032,7 @@ type Embedding struct {
 
 func (x *Embedding) Reset() {
 	*x = Embedding{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[13]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1165,7 +2044,7 @@ func (x *Embedding) String() string {
 func (*Embedding) ProtoMessage() {}
 
 func (x *Embedding) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[13]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1178,7 +2057,7 @@ func (x *Embedding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Embedding.ProtoReflect.Descriptor instead.
 func (*Embedding) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{13}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Embedding) GetVector() []float32 {
@@ -1215,7 +2094,7 @@ type EmbedResponse struct {
 
 func (x *EmbedResponse) Reset() {
 	*x = EmbedResponse{}
-	mi := &file_jitllm_v1_inference_proto_msgTypes[14]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1227,7 +2106,7 @@ func (x *EmbedResponse) String() string {
 func (*EmbedResponse) ProtoMessage() {}
 
 func (x *EmbedResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_inference_proto_msgTypes[14]
+	mi := &file_jitllm_v1_inference_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1240,7 +2119,7 @@ func (x *EmbedResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EmbedResponse.ProtoReflect.Descriptor instead.
 func (*EmbedResponse) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{14}
+	return file_jitllm_v1_inference_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *EmbedResponse) GetModelId() string {
@@ -1310,14 +2189,41 @@ const file_jitllm_v1_inference_proto_rawDesc = "" +
 	"\x04chat\x18\x03 \x01(\v2\x15.jitllm.v1.ChatPromptH\x00R\x04chatB\a\n" +
 	"\x05input\"\x1c\n" +
 	"\bTokenIDs\x12\x10\n" +
-	"\x03ids\x18\x01 \x03(\x05R\x03ids\"\xc1\x01\n" +
+	"\x03ids\x18\x01 \x03(\x05R\x03ids\"\xa0\x02\n" +
 	"\n" +
 	"ChatPrompt\x122\n" +
 	"\bmessages\x18\x01 \x03(\v2\x16.jitllm.v1.ChatMessageR\bmessages\x12\x1b\n" +
 	"\x06system\x18\x02 \x01(\tH\x00R\x06system\x88\x01\x01\x122\n" +
 	"\x15add_generation_prompt\x18\x03 \x01(\bR\x13addGenerationPrompt\x12#\n" +
-	"\rtemplate_name\x18\x04 \x01(\tR\ftemplateNameB\t\n" +
-	"\a_system\"\xfd\x03\n" +
+	"\rtemplate_name\x18\x04 \x01(\tR\ftemplateName\x12%\n" +
+	"\x05tools\x18\x05 \x03(\v2\x0f.jitllm.v1.ToolR\x05tools\x126\n" +
+	"\vtool_choice\x18\x06 \x01(\v2\x15.jitllm.v1.ToolChoiceR\n" +
+	"toolChoiceB\t\n" +
+	"\a_system\"\x8d\x01\n" +
+	"\x04Tool\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12'\n" +
+	"\x0fparameters_json\x18\x03 \x01(\tR\x0eparametersJson\x12\x1b\n" +
+	"\x06strict\x18\x04 \x01(\bH\x00R\x06strict\x88\x01\x01B\t\n" +
+	"\a_strict\"p\n" +
+	"\n" +
+	"ToolChoice\x12-\n" +
+	"\x04mode\x18\x01 \x01(\x0e2\x19.jitllm.v1.ToolChoiceModeR\x04mode\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1f\n" +
+	"\vsingle_call\x18\x03 \x01(\bR\n" +
+	"singleCall\"\xfa\x01\n" +
+	"\x0eResponseFormat\x122\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x1e.jitllm.v1.ResponseFormat.TypeR\x04type\x12\x1f\n" +
+	"\vjson_schema\x18\x02 \x01(\tR\n" +
+	"jsonSchema\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12\x1b\n" +
+	"\x06strict\x18\x04 \x01(\bH\x00R\x06strict\x88\x01\x01\"W\n" +
+	"\x04Type\x12\x14\n" +
+	"\x10TYPE_UNSPECIFIED\x10\x00\x12\r\n" +
+	"\tTYPE_TEXT\x10\x01\x12\x14\n" +
+	"\x10TYPE_JSON_OBJECT\x10\x02\x12\x14\n" +
+	"\x10TYPE_JSON_SCHEMA\x10\x03B\t\n" +
+	"\a_strict\"\xe5\x05\n" +
 	"\x0fGenerateRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
@@ -1337,12 +2243,44 @@ const file_jitllm_v1_inference_proto_rawDesc = "" +
 	"\vspeculation\x18\x1e \x01(\v2\x1c.jitllm.v1.SpeculationParamsR\vspeculation\x12\x18\n" +
 	"\agrammar\x18\x1f \x01(\tR\agrammar\x12\x1f\n" +
 	"\vjson_schema\x18  \x01(\tR\n" +
-	"jsonSchema\"\xc0\x01\n" +
+	"jsonSchema\x12B\n" +
+	"\x0fresponse_format\x18! \x01(\v2\x19.jitllm.v1.ResponseFormatR\x0eresponseFormat\x12\f\n" +
+	"\x01n\x18\" \x01(\x05R\x01n\x12\x1a\n" +
+	"\blogprobs\x18# \x01(\bR\blogprobs\x12&\n" +
+	"\ftop_logprobs\x18$ \x01(\x05H\x00R\vtopLogprobs\x88\x01\x01\x12#\n" +
+	"\rinclude_usage\x18% \x01(\bR\fincludeUsage\x12\x1a\n" +
+	"\bpriority\x18& \x01(\tR\bpriorityB\x0f\n" +
+	"\r_top_logprobs\"\xc9\x02\n" +
 	"\x10GenerateResponse\x126\n" +
 	"\astarted\x18\x01 \x01(\v2\x1a.jitllm.v1.GenerateStartedH\x00R\astarted\x120\n" +
 	"\x05token\x18\x02 \x01(\v2\x18.jitllm.v1.GenerateTokenH\x00R\x05token\x129\n" +
-	"\bfinished\x18\x03 \x01(\v2\x1b.jitllm.v1.GenerateFinishedH\x00R\bfinishedB\a\n" +
-	"\x05event\"\x99\x03\n" +
+	"\bfinished\x18\x03 \x01(\v2\x1b.jitllm.v1.GenerateFinishedH\x00R\bfinished\x12=\n" +
+	"\n" +
+	"tool_calls\x18\x04 \x01(\v2\x1c.jitllm.v1.GenerateToolCallsH\x00R\ttoolCalls\x120\n" +
+	"\x05usage\x18\x05 \x01(\v2\x18.jitllm.v1.GenerateUsageH\x00R\x05usage\x12\x16\n" +
+	"\x06choice\x18\x06 \x01(\x05R\x06choiceB\a\n" +
+	"\x05event\"_\n" +
+	"\x11GenerateToolCalls\x12)\n" +
+	"\x05calls\x18\x01 \x03(\v2\x13.jitllm.v1.ToolCallR\x05calls\x12\x1f\n" +
+	"\vfirst_index\x18\x02 \x01(\x05R\n" +
+	"firstIndex\"\xa1\x01\n" +
+	"\x05Usage\x12#\n" +
+	"\rprompt_tokens\x18\x01 \x01(\x05R\fpromptTokens\x12+\n" +
+	"\x11completion_tokens\x18\x02 \x01(\x05R\x10completionTokens\x12!\n" +
+	"\ftotal_tokens\x18\x03 \x01(\x05R\vtotalTokens\x12#\n" +
+	"\rcached_tokens\x18\x04 \x01(\x05R\fcachedTokens\"7\n" +
+	"\rGenerateUsage\x12&\n" +
+	"\x05usage\x18\x01 \x01(\v2\x10.jitllm.v1.UsageR\x05usage\"\x82\x01\n" +
+	"\fTokenLogprob\x12\x19\n" +
+	"\btoken_id\x18\x01 \x01(\x05R\atokenId\x12\x14\n" +
+	"\x05token\x18\x02 \x01(\tR\x05token\x12\x18\n" +
+	"\alogprob\x18\x03 \x01(\x02R\alogprob\x12'\n" +
+	"\x03top\x18\x04 \x03(\v2\x15.jitllm.v1.TopLogprobR\x03top\"W\n" +
+	"\n" +
+	"TopLogprob\x12\x19\n" +
+	"\btoken_id\x18\x01 \x01(\x05R\atokenId\x12\x14\n" +
+	"\x05token\x18\x02 \x01(\tR\x05token\x12\x18\n" +
+	"\alogprob\x18\x03 \x01(\x02R\alogprob\"\x99\x03\n" +
 	"\x0fGenerateStarted\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x19\n" +
@@ -1358,11 +2296,12 @@ const file_jitllm_v1_inference_proto_rawDesc = "" +
 	"device_ids\x18\t \x03(\tR\tdeviceIds\x12%\n" +
 	"\x0eprefill_millis\x18\n" +
 	" \x01(\x03R\rprefillMillis\x12\x18\n" +
-	"\abatched\x18\v \x01(\bR\abatched\"T\n" +
+	"\abatched\x18\v \x01(\bR\abatched\"\x87\x01\n" +
 	"\rGenerateToken\x12\x19\n" +
 	"\btoken_id\x18\x01 \x01(\x05R\atokenId\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\x12\x14\n" +
-	"\x05index\x18\x03 \x01(\x05R\x05index\"\x81\x03\n" +
+	"\x05index\x18\x03 \x01(\x05R\x05index\x121\n" +
+	"\alogprob\x18\x04 \x01(\v2\x17.jitllm.v1.TokenLogprobR\alogprob\"\xa6\x03\n" +
 	"\x10GenerateFinished\x12/\n" +
 	"\x06reason\x18\x01 \x01(\x0e2\x17.jitllm.v1.FinishReasonR\x06reason\x12!\n" +
 	"\fstop_matched\x18\x02 \x01(\tR\vstopMatched\x12#\n" +
@@ -1372,12 +2311,25 @@ const file_jitllm_v1_inference_proto_rawDesc = "" +
 	"\rdecode_millis\x18\x06 \x01(\x03R\fdecodeMillis\x127\n" +
 	"\x18decode_tokens_per_second\x18\a \x01(\x01R\x15decodeTokensPerSecond\x12&\n" +
 	"\x0fbytes_per_token\x18\b \x01(\x04R\rbytesPerToken\x12\x1a\n" +
-	"\bposition\x18\t \x01(\x05R\bposition\"\xb2\x01\n" +
+	"\bposition\x18\t \x01(\x05R\bposition\x12#\n" +
+	"\rcached_tokens\x18\n" +
+	" \x01(\x05R\fcachedTokens\"\x8f\x02\n" +
 	"\x10CompleteResponse\x124\n" +
 	"\astarted\x18\x01 \x01(\v2\x1a.jitllm.v1.GenerateStartedR\astarted\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\x12\x1b\n" +
 	"\ttoken_ids\x18\x03 \x03(\x05R\btokenIds\x127\n" +
-	"\bfinished\x18\x04 \x01(\v2\x1b.jitllm.v1.GenerateFinishedR\bfinished\".\n" +
+	"\bfinished\x18\x04 \x01(\v2\x1b.jitllm.v1.GenerateFinishedR\bfinished\x123\n" +
+	"\achoices\x18\x05 \x03(\v2\x19.jitllm.v1.CompleteChoiceR\achoices\x12&\n" +
+	"\x05usage\x18\x06 \x01(\v2\x10.jitllm.v1.UsageR\x05usage\"\xaf\x02\n" +
+	"\x0eCompleteChoice\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x05R\x05index\x124\n" +
+	"\astarted\x18\x02 \x01(\v2\x1a.jitllm.v1.GenerateStartedR\astarted\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\x12\x1b\n" +
+	"\ttoken_ids\x18\x04 \x03(\x05R\btokenIds\x122\n" +
+	"\n" +
+	"tool_calls\x18\x05 \x03(\v2\x13.jitllm.v1.ToolCallR\ttoolCalls\x123\n" +
+	"\blogprobs\x18\x06 \x03(\v2\x17.jitllm.v1.TokenLogprobR\blogprobs\x127\n" +
+	"\bfinished\x18\a \x01(\v2\x1b.jitllm.v1.GenerateFinishedR\bfinished\".\n" +
 	"\rCancelRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\"7\n" +
@@ -1410,7 +2362,13 @@ const file_jitllm_v1_inference_proto_rawDesc = "" +
 	"\ftotal_tokens\x18\x05 \x01(\x05R\vtotalTokens\x12#\n" +
 	"\rqueued_millis\x18\x06 \x01(\x03R\fqueuedMillis\x12/\n" +
 	"\x14queue_depth_on_entry\x18\a \x01(\x05R\x11queueDepthOnEntry\x12!\n" +
-	"\fembed_millis\x18\b \x01(\x03R\vembedMillis2\xa1\x02\n" +
+	"\fembed_millis\x18\b \x01(\x03R\vembedMillis*\xa6\x01\n" +
+	"\x0eToolChoiceMode\x12 \n" +
+	"\x1cTOOL_CHOICE_MODE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15TOOL_CHOICE_MODE_NONE\x10\x01\x12\x19\n" +
+	"\x15TOOL_CHOICE_MODE_AUTO\x10\x02\x12\x1d\n" +
+	"\x19TOOL_CHOICE_MODE_REQUIRED\x10\x03\x12\x1d\n" +
+	"\x19TOOL_CHOICE_MODE_FUNCTION\x10\x042\xa1\x02\n" +
 	"\x10InferenceService\x12G\n" +
 	"\bGenerate\x12\x1a.jitllm.v1.GenerateRequest\x1a\x1b.jitllm.v1.GenerateResponse\"\x000\x01\x12E\n" +
 	"\bComplete\x12\x1a.jitllm.v1.GenerateRequest\x1a\x1b.jitllm.v1.CompleteResponse\"\x00\x12?\n" +
@@ -1431,57 +2389,87 @@ func file_jitllm_v1_inference_proto_rawDescGZIP() []byte {
 	return file_jitllm_v1_inference_proto_rawDescData
 }
 
-var file_jitllm_v1_inference_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_jitllm_v1_inference_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_jitllm_v1_inference_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_jitllm_v1_inference_proto_goTypes = []any{
-	(*PromptInput)(nil),       // 0: jitllm.v1.PromptInput
-	(*TokenIDs)(nil),          // 1: jitllm.v1.TokenIDs
-	(*ChatPrompt)(nil),        // 2: jitllm.v1.ChatPrompt
-	(*GenerateRequest)(nil),   // 3: jitllm.v1.GenerateRequest
-	(*GenerateResponse)(nil),  // 4: jitllm.v1.GenerateResponse
-	(*GenerateStarted)(nil),   // 5: jitllm.v1.GenerateStarted
-	(*GenerateToken)(nil),     // 6: jitllm.v1.GenerateToken
-	(*GenerateFinished)(nil),  // 7: jitllm.v1.GenerateFinished
-	(*CompleteResponse)(nil),  // 8: jitllm.v1.CompleteResponse
-	(*CancelRequest)(nil),     // 9: jitllm.v1.CancelRequest
-	(*CancelResponse)(nil),    // 10: jitllm.v1.CancelResponse
-	(*EmbedInput)(nil),        // 11: jitllm.v1.EmbedInput
-	(*EmbedRequest)(nil),      // 12: jitllm.v1.EmbedRequest
-	(*Embedding)(nil),         // 13: jitllm.v1.Embedding
-	(*EmbedResponse)(nil),     // 14: jitllm.v1.EmbedResponse
-	(*ChatMessage)(nil),       // 15: jitllm.v1.ChatMessage
-	(*SamplingParams)(nil),    // 16: jitllm.v1.SamplingParams
-	(*SpeculationParams)(nil), // 17: jitllm.v1.SpeculationParams
-	(FinishReason)(0),         // 18: jitllm.v1.FinishReason
+	(ToolChoiceMode)(0),       // 0: jitllm.v1.ToolChoiceMode
+	(ResponseFormat_Type)(0),  // 1: jitllm.v1.ResponseFormat.Type
+	(*PromptInput)(nil),       // 2: jitllm.v1.PromptInput
+	(*TokenIDs)(nil),          // 3: jitllm.v1.TokenIDs
+	(*ChatPrompt)(nil),        // 4: jitllm.v1.ChatPrompt
+	(*Tool)(nil),              // 5: jitllm.v1.Tool
+	(*ToolChoice)(nil),        // 6: jitllm.v1.ToolChoice
+	(*ResponseFormat)(nil),    // 7: jitllm.v1.ResponseFormat
+	(*GenerateRequest)(nil),   // 8: jitllm.v1.GenerateRequest
+	(*GenerateResponse)(nil),  // 9: jitllm.v1.GenerateResponse
+	(*GenerateToolCalls)(nil), // 10: jitllm.v1.GenerateToolCalls
+	(*Usage)(nil),             // 11: jitllm.v1.Usage
+	(*GenerateUsage)(nil),     // 12: jitllm.v1.GenerateUsage
+	(*TokenLogprob)(nil),      // 13: jitllm.v1.TokenLogprob
+	(*TopLogprob)(nil),        // 14: jitllm.v1.TopLogprob
+	(*GenerateStarted)(nil),   // 15: jitllm.v1.GenerateStarted
+	(*GenerateToken)(nil),     // 16: jitllm.v1.GenerateToken
+	(*GenerateFinished)(nil),  // 17: jitllm.v1.GenerateFinished
+	(*CompleteResponse)(nil),  // 18: jitllm.v1.CompleteResponse
+	(*CompleteChoice)(nil),    // 19: jitllm.v1.CompleteChoice
+	(*CancelRequest)(nil),     // 20: jitllm.v1.CancelRequest
+	(*CancelResponse)(nil),    // 21: jitllm.v1.CancelResponse
+	(*EmbedInput)(nil),        // 22: jitllm.v1.EmbedInput
+	(*EmbedRequest)(nil),      // 23: jitllm.v1.EmbedRequest
+	(*Embedding)(nil),         // 24: jitllm.v1.Embedding
+	(*EmbedResponse)(nil),     // 25: jitllm.v1.EmbedResponse
+	(*ChatMessage)(nil),       // 26: jitllm.v1.ChatMessage
+	(*SamplingParams)(nil),    // 27: jitllm.v1.SamplingParams
+	(*SpeculationParams)(nil), // 28: jitllm.v1.SpeculationParams
+	(*ToolCall)(nil),          // 29: jitllm.v1.ToolCall
+	(FinishReason)(0),         // 30: jitllm.v1.FinishReason
 }
 var file_jitllm_v1_inference_proto_depIdxs = []int32{
-	1,  // 0: jitllm.v1.PromptInput.token_ids:type_name -> jitllm.v1.TokenIDs
-	2,  // 1: jitllm.v1.PromptInput.chat:type_name -> jitllm.v1.ChatPrompt
-	15, // 2: jitllm.v1.ChatPrompt.messages:type_name -> jitllm.v1.ChatMessage
-	0,  // 3: jitllm.v1.GenerateRequest.prompt:type_name -> jitllm.v1.PromptInput
-	16, // 4: jitllm.v1.GenerateRequest.sampling:type_name -> jitllm.v1.SamplingParams
-	17, // 5: jitllm.v1.GenerateRequest.speculation:type_name -> jitllm.v1.SpeculationParams
-	5,  // 6: jitllm.v1.GenerateResponse.started:type_name -> jitllm.v1.GenerateStarted
-	6,  // 7: jitllm.v1.GenerateResponse.token:type_name -> jitllm.v1.GenerateToken
-	7,  // 8: jitllm.v1.GenerateResponse.finished:type_name -> jitllm.v1.GenerateFinished
-	18, // 9: jitllm.v1.GenerateFinished.reason:type_name -> jitllm.v1.FinishReason
-	5,  // 10: jitllm.v1.CompleteResponse.started:type_name -> jitllm.v1.GenerateStarted
-	7,  // 11: jitllm.v1.CompleteResponse.finished:type_name -> jitllm.v1.GenerateFinished
-	1,  // 12: jitllm.v1.EmbedInput.token_ids:type_name -> jitllm.v1.TokenIDs
-	11, // 13: jitllm.v1.EmbedRequest.inputs:type_name -> jitllm.v1.EmbedInput
-	13, // 14: jitllm.v1.EmbedResponse.embeddings:type_name -> jitllm.v1.Embedding
-	3,  // 15: jitllm.v1.InferenceService.Generate:input_type -> jitllm.v1.GenerateRequest
-	3,  // 16: jitllm.v1.InferenceService.Complete:input_type -> jitllm.v1.GenerateRequest
-	9,  // 17: jitllm.v1.InferenceService.Cancel:input_type -> jitllm.v1.CancelRequest
-	12, // 18: jitllm.v1.InferenceService.Embed:input_type -> jitllm.v1.EmbedRequest
-	4,  // 19: jitllm.v1.InferenceService.Generate:output_type -> jitllm.v1.GenerateResponse
-	8,  // 20: jitllm.v1.InferenceService.Complete:output_type -> jitllm.v1.CompleteResponse
-	10, // 21: jitllm.v1.InferenceService.Cancel:output_type -> jitllm.v1.CancelResponse
-	14, // 22: jitllm.v1.InferenceService.Embed:output_type -> jitllm.v1.EmbedResponse
-	19, // [19:23] is the sub-list for method output_type
-	15, // [15:19] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	3,  // 0: jitllm.v1.PromptInput.token_ids:type_name -> jitllm.v1.TokenIDs
+	4,  // 1: jitllm.v1.PromptInput.chat:type_name -> jitllm.v1.ChatPrompt
+	26, // 2: jitllm.v1.ChatPrompt.messages:type_name -> jitllm.v1.ChatMessage
+	5,  // 3: jitllm.v1.ChatPrompt.tools:type_name -> jitllm.v1.Tool
+	6,  // 4: jitllm.v1.ChatPrompt.tool_choice:type_name -> jitllm.v1.ToolChoice
+	0,  // 5: jitllm.v1.ToolChoice.mode:type_name -> jitllm.v1.ToolChoiceMode
+	1,  // 6: jitllm.v1.ResponseFormat.type:type_name -> jitllm.v1.ResponseFormat.Type
+	2,  // 7: jitllm.v1.GenerateRequest.prompt:type_name -> jitllm.v1.PromptInput
+	27, // 8: jitllm.v1.GenerateRequest.sampling:type_name -> jitllm.v1.SamplingParams
+	28, // 9: jitllm.v1.GenerateRequest.speculation:type_name -> jitllm.v1.SpeculationParams
+	7,  // 10: jitllm.v1.GenerateRequest.response_format:type_name -> jitllm.v1.ResponseFormat
+	15, // 11: jitllm.v1.GenerateResponse.started:type_name -> jitllm.v1.GenerateStarted
+	16, // 12: jitllm.v1.GenerateResponse.token:type_name -> jitllm.v1.GenerateToken
+	17, // 13: jitllm.v1.GenerateResponse.finished:type_name -> jitllm.v1.GenerateFinished
+	10, // 14: jitllm.v1.GenerateResponse.tool_calls:type_name -> jitllm.v1.GenerateToolCalls
+	12, // 15: jitllm.v1.GenerateResponse.usage:type_name -> jitllm.v1.GenerateUsage
+	29, // 16: jitllm.v1.GenerateToolCalls.calls:type_name -> jitllm.v1.ToolCall
+	11, // 17: jitllm.v1.GenerateUsage.usage:type_name -> jitllm.v1.Usage
+	14, // 18: jitllm.v1.TokenLogprob.top:type_name -> jitllm.v1.TopLogprob
+	13, // 19: jitllm.v1.GenerateToken.logprob:type_name -> jitllm.v1.TokenLogprob
+	30, // 20: jitllm.v1.GenerateFinished.reason:type_name -> jitllm.v1.FinishReason
+	15, // 21: jitllm.v1.CompleteResponse.started:type_name -> jitllm.v1.GenerateStarted
+	17, // 22: jitllm.v1.CompleteResponse.finished:type_name -> jitllm.v1.GenerateFinished
+	19, // 23: jitllm.v1.CompleteResponse.choices:type_name -> jitllm.v1.CompleteChoice
+	11, // 24: jitllm.v1.CompleteResponse.usage:type_name -> jitllm.v1.Usage
+	15, // 25: jitllm.v1.CompleteChoice.started:type_name -> jitllm.v1.GenerateStarted
+	29, // 26: jitllm.v1.CompleteChoice.tool_calls:type_name -> jitllm.v1.ToolCall
+	13, // 27: jitllm.v1.CompleteChoice.logprobs:type_name -> jitllm.v1.TokenLogprob
+	17, // 28: jitllm.v1.CompleteChoice.finished:type_name -> jitllm.v1.GenerateFinished
+	3,  // 29: jitllm.v1.EmbedInput.token_ids:type_name -> jitllm.v1.TokenIDs
+	22, // 30: jitllm.v1.EmbedRequest.inputs:type_name -> jitllm.v1.EmbedInput
+	24, // 31: jitllm.v1.EmbedResponse.embeddings:type_name -> jitllm.v1.Embedding
+	8,  // 32: jitllm.v1.InferenceService.Generate:input_type -> jitllm.v1.GenerateRequest
+	8,  // 33: jitllm.v1.InferenceService.Complete:input_type -> jitllm.v1.GenerateRequest
+	20, // 34: jitllm.v1.InferenceService.Cancel:input_type -> jitllm.v1.CancelRequest
+	23, // 35: jitllm.v1.InferenceService.Embed:input_type -> jitllm.v1.EmbedRequest
+	9,  // 36: jitllm.v1.InferenceService.Generate:output_type -> jitllm.v1.GenerateResponse
+	18, // 37: jitllm.v1.InferenceService.Complete:output_type -> jitllm.v1.CompleteResponse
+	21, // 38: jitllm.v1.InferenceService.Cancel:output_type -> jitllm.v1.CancelResponse
+	25, // 39: jitllm.v1.InferenceService.Embed:output_type -> jitllm.v1.EmbedResponse
+	36, // [36:40] is the sub-list for method output_type
+	32, // [32:36] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_jitllm_v1_inference_proto_init() }
@@ -1497,12 +2485,17 @@ func file_jitllm_v1_inference_proto_init() {
 		(*PromptInput_Chat)(nil),
 	}
 	file_jitllm_v1_inference_proto_msgTypes[2].OneofWrappers = []any{}
-	file_jitllm_v1_inference_proto_msgTypes[4].OneofWrappers = []any{
+	file_jitllm_v1_inference_proto_msgTypes[3].OneofWrappers = []any{}
+	file_jitllm_v1_inference_proto_msgTypes[5].OneofWrappers = []any{}
+	file_jitllm_v1_inference_proto_msgTypes[6].OneofWrappers = []any{}
+	file_jitllm_v1_inference_proto_msgTypes[7].OneofWrappers = []any{
 		(*GenerateResponse_Started)(nil),
 		(*GenerateResponse_Token)(nil),
 		(*GenerateResponse_Finished)(nil),
+		(*GenerateResponse_ToolCalls)(nil),
+		(*GenerateResponse_Usage)(nil),
 	}
-	file_jitllm_v1_inference_proto_msgTypes[11].OneofWrappers = []any{
+	file_jitllm_v1_inference_proto_msgTypes[20].OneofWrappers = []any{
 		(*EmbedInput_Text)(nil),
 		(*EmbedInput_TokenIds)(nil),
 	}
@@ -1511,13 +2504,14 @@ func file_jitllm_v1_inference_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_jitllm_v1_inference_proto_rawDesc), len(file_jitllm_v1_inference_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   15,
+			NumEnums:      2,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_jitllm_v1_inference_proto_goTypes,
 		DependencyIndexes: file_jitllm_v1_inference_proto_depIdxs,
+		EnumInfos:         file_jitllm_v1_inference_proto_enumTypes,
 		MessageInfos:      file_jitllm_v1_inference_proto_msgTypes,
 	}.Build()
 	File_jitllm_v1_inference_proto = out.File

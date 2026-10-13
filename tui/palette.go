@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/jitllm/jitllm/common/engine"
 	"github.com/sahilm/fuzzy"
 )
 
@@ -61,9 +62,10 @@ func actions(r *root) []action {
 		{"go", "Discover models to download", "f3", go2(scrDiscover)},
 		{"go", "Engine cockpit", "f4", go2(scrEngine)},
 		{"go", "Settings", "f5", go2(scrSettings)},
+		{"engine", r.env.badge(), "", go2(scrSettings)},
 		{"chat", "New chat", "ctrl+n", func(r *root) tea.Cmd { return tea.Batch(r.chat.newChat(), show(scrChat)) }},
-		{"chat", "Previous chat", "ctrl+↑", func(r *root) tea.Cmd { return tea.Batch(r.chat.step(-1), show(scrChat)) }},
-		{"chat", "Next chat", "ctrl+↓", func(r *root) tea.Cmd { return tea.Batch(r.chat.step(1), show(scrChat)) }},
+		{"chat", "Previous chat", "ctrl/⌥+↑", func(r *root) tea.Cmd { return tea.Batch(r.chat.step(-1), show(scrChat)) }},
+		{"chat", "Next chat", "ctrl/⌥+↓", func(r *root) tea.Cmd { return tea.Batch(r.chat.step(1), show(scrChat)) }},
 		{"chat", "Delete this chat", "/delete", func(r *root) tea.Cmd { return tea.Batch(r.chat.deleteChat(), show(scrChat)) }},
 		{"chat", "Copy last reply", "ctrl+y", func(r *root) tea.Cmd { return r.chat.copyReply() }},
 		{"chat", "Show or fold reasoning", "ctrl+t", func(r *root) tea.Cmd {
@@ -83,9 +85,9 @@ func actions(r *root) []action {
 		name := strings.TrimSuffix(lm.Name, ".jlm")
 		path := lm.Path
 		if !lm.Active {
-			as = append(as, action{"model", "Switch to " + name, "", func(*root) tea.Cmd { return load(path) }})
+			as = append(as, action{"model", "Chat with " + name, "", func(*root) tea.Cmd { return load(path) }})
 		}
-		as = append(as, action{"model", "Close " + name, "", func(r *root) tea.Cmd { r.env.e.Unload(path); return nil }})
+		as = append(as, action{"model", "Unload " + name, "", func(r *root) tea.Cmd { r.env.e.Unload(path); return nil }})
 	}
 	if n := len(st.BlockMap.Get()); n > 0 {
 		as = append(as,
@@ -93,6 +95,9 @@ func actions(r *root) []action {
 			action{"engine", "Every block on the host", "home", func(*root) tea.Cmd { return seamTo(0) }},
 			action{"engine", fmt.Sprintf("Half on the device (%d)", n/2), "", func(*root) tea.Cmd { return seamTo(n / 2) }},
 		)
+	}
+	if rem, ok := r.env.e.(*engine.Remote); ok && r.env.where.Lost {
+		as = append(as, action{"engine", "Reconnect to jitllmd at " + r.env.where.Addr, "", func(*root) tea.Cmd { rem.Reconnect(); return nil }})
 	}
 	return append(as, action{"app", "Quit", "ctrl+c", func(r *root) tea.Cmd { return r.quit() }})
 }

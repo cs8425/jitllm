@@ -12,8 +12,10 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,6 +28,7 @@ import (
 	"github.com/jitllm/jitllm/engine/sched"
 	"github.com/jitllm/jitllm/format/quant"
 	"github.com/jitllm/jitllm/internal/cmd/goheap"
+	"github.com/jitllm/jitllm/internal/localserver"
 
 	"os/exec"
 
@@ -196,7 +199,7 @@ run flags:
                          placement sizes it itself.
   -maxmem BYTES          host weight residency budget (default: the cgroup limit
                          or MemAvailable, whichever is smaller, less headroom)
-  -n N                   tokens to generate (default 32)
+  -n N                   tokens to generate; 0 (the default) runs until the model ends its reply
   -depth N               pad the prompt to N tokens, so decode is measured at that context length
   -tune-seam             measure whether fewer device blocks are faster, and relocate
   -no-gpu-fallback       fail instead of finishing on the host when the device breaks
@@ -399,7 +402,13 @@ func benchmark(path string, topts []tok.Option) error {
 
 // chatSpec is -chat and -system together; nil is raw completion, which is the
 // default and what every board row measures.
-type chatSpec struct{ system string }
+//
+// repl is the interactive conversation `jitllm run model.jlm` holds when no
+// prompt is given and stdin is a terminal (repl.go).
+type chatSpec struct {
+	system string
+	repl   bool
+}
 
 func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram, maxmem uint64, grow, tuneSeam, noFallback, relocate bool, sm *model.Sampler, imgPath string, topts []tok.Option, chat *chatSpec, kvCacheDir string, kvCacheMaxBytes, kvBudget uint64, place *model.Placement, specOpts []model.SpecOption) error {
 	if v := os.Getenv("JITLLM_N"); v != "" {
@@ -486,7 +495,13 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	// -chat is opt-in. The default stays raw completion because every board
 	// row and the llama.cpp comparisons are completions of a bare prompt.
 	ids := m.Vocab.Encode(prompt, true)
-	if chat != nil {
+	replying := chat != nil && chat.repl
+	if replying {
+		if imgPath != "" || specOpts != nil || depth > 0 {
+			return fmt.Errorf("the interactive chat takes neither -image, -spec nor -depth; give a prompt to use them")
+		}
+		ids = nil
+	} else if chat != nil {
 		if !m.HasChatTemplate() {
 			return fmt.Errorf("-chat: %s carries no chat template; it is a base model.\n"+
 				"  Run it without -chat and it completes the prompt instead.", path)
@@ -565,7 +580,11 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	// No -n: generate until the model ends its reply, in a session as long as
 	// the model's context, as the server's sessions are by default. KV pages
 	// are committed as the context grows, so the length costs nothing up front.
-	if n <= 0 {
+	replyCap := n
+	if replying {
+		// The conversation grows into the model's whole context.
+		n = m.Cfg.NCtx - 1
+	} else if n <= 0 {
 		if n = m.Cfg.NCtx - len(ids) - extra - 1; n <= 0 {
 			return fmt.Errorf("the prompt is %d positions and fills the model's context of %d", len(ids)+extra, m.Cfg.NCtx)
 		}
@@ -701,6 +720,12 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 
 	phRead(ph, dev, m)
 	ph.Mark("load")
+	if replying {
+		if err := repl(m, st, sm, chat.system, replyCap, kvCacheDir != "", os.Stdin, os.Stdout); err != nil {
+			return withDeviceErr(err, dev)
+		}
+		return nil
+	}
 
 	// -spec drafts with the model's own prediction block and verifies the
 	// drafts in one pass. The draft session attaches to the device the trunk
@@ -1429,6 +1454,10 @@ func runCmd(args []string) error {
 		"write a CPU profile here; `go tool pprof` then separates the generated "+
 			"kernels from the pool's spin and from the pager's reads")
 	spec := addSpecFlags(fs)
+	addr := fs.String("addr", localserver.DefaultAddr,
+		"the jitllmd a model NAME is run through when one answers there (see -embedded)")
+	embedded := fs.Bool("embedded", false,
+		"run in this process even when a jitllmd answers; a path, or any flag about this process's engine, does too")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1444,16 +1473,44 @@ func runCmd(args []string) error {
 		return err
 	}
 	defer closeTok()
-	if fs.NArg() < 2 {
+	prompt := strings.Join(fs.Args()[1:], " ")
+	interactive := false
+	switch {
+	case fs.NArg() == 0:
 		usage()
+	case fs.NArg() == 1 && stdinIsTerminal():
+		// No prompt and a person at the keyboard: a conversation, through the
+		// model's own template (repl.go).
+		interactive = true
+	case fs.NArg() == 1:
+		// No prompt on the command line and stdin a pipe or file: that is it.
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+		if prompt = strings.TrimRight(string(b), "\r\n"); prompt == "" {
+			usage()
+		}
 	}
 	sm := &model.Sampler{Temp: *temp, TopK: *topK, TopP: *topP, MinP: *minP,
 		RepeatPen: *repPen, RepeatLastN: *repN, Seed: *seed}
 	var cs *chatSpec
-	if *chat {
-		cs = &chatSpec{system: *system}
+	if *chat || interactive {
+		cs = &chatSpec{system: *system, repl: interactive}
 	} else if *system != "" {
 		return fmt.Errorf("-system needs -chat: without a template there is no system turn to put it in")
+	}
+	svc, path, err := runTarget(context.Background(), fs.Arg(0), *addr, *embedded, engineFlags(fs, remoteFlags), os.Stderr)
+	if err != nil {
+		return err
+	}
+	if svc != nil {
+		r := newRemoteRun(*addr, fs.Arg(0), *n, *system, fs, samplingFlags{temp: *temp, topP: *topP,
+			minP: *minP, repPen: *repPen, topK: *topK, seed: *seed})
+		if interactive {
+			return r.repl(os.Stdin, os.Stdout)
+		}
+		return r.once(*chat, prompt, os.Stdout)
 	}
 	// -relocate is on by default: without it, a card that cannot grow its
 	// history demotes every block to the host rather than one. A -devices list
@@ -1488,7 +1545,7 @@ func runCmd(args []string) error {
 	} else if *placeStrict {
 		return fmt.Errorf("-placement-strict needs -placement")
 	}
-	return run(fs.Arg(0), strings.Join(fs.Args()[1:], " "), *n, *depth, *dev, *layers, *vram, *maxmem, *grow, *tuneSeam, *noFallback, *relocate, sm, *imgPath, topts, cs, *kvCache, *kvCacheMax, *kvBudget, place, specOpts)
+	return run(path, prompt, *n, *depth, *dev, *layers, *vram, *maxmem, *grow, *tuneSeam, *noFallback, *relocate, sm, *imgPath, topts, cs, *kvCache, *kvCacheMax, *kvBudget, place, specOpts)
 }
 
 // tokenizerOption turns a -tokenizer path into the tok.Option it names, plus the
@@ -1540,8 +1597,32 @@ func loadOpts(t []tok.Option, budget uint64) []model.Option {
 	if os.Getenv("JITLLM_STREAM_TRIAL") == "0" {
 		o = append(o, model.WithStreamTrial(false))
 	}
+	// JITLLM_FUSE=0 runs decode one pool region per op (model.WithBlockFusion).
+	if os.Getenv("JITLLM_FUSE") == "0" {
+		o = append(o, model.WithBlockFusion(false))
+	}
+	// JITLLM_FUSE_GROUPS=0 keeps a fused run's matvecs a phase each
+	// (model.WithMatVecGroups).
+	if os.Getenv("JITLLM_FUSE_GROUPS") == "0" {
+		o = append(o, model.WithMatVecGroups(false))
+	}
+	// JITLLM_LOOKAHEAD=0 turns off the fused runs' weight lookahead
+	// (model.WithLookahead).
+	if os.Getenv("JITLLM_LOOKAHEAD") == "0" {
+		o = append(o, model.WithLookahead(false))
+	}
+	// JITLLM_FUSE_RESID=1 folds the residual add into the o and down groups
+	// (model.WithResidualFold).
+	if os.Getenv("JITLLM_FUSE_RESID") == "1" {
+		o = append(o, model.WithResidualFold(true))
+	}
 	if os.Getenv("JITLLM_SH_OVERLAP") == "0" {
 		o = append(o, model.WithSharedOverlap(false))
+	}
+	// JITLLM_TAIL_ROWS=0 runs a prompt's few-row chunk batched rather than as
+	// a ragged step of its rows (model.WithTailRows).
+	if os.Getenv("JITLLM_TAIL_ROWS") == "0" {
+		o = append(o, model.WithTailRows(false))
 	}
 	if n := numaNodes(); n != nil {
 		o = append(o, model.WithInterleave(n))

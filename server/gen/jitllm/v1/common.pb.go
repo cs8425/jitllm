@@ -317,6 +317,9 @@ const (
 	FinishReason_FINISH_REASON_EOS         FinishReason = 3
 	FinishReason_FINISH_REASON_CANCELLED   FinishReason = 4
 	FinishReason_FINISH_REASON_ERROR       FinishReason = 5
+	// The reply is one or more tool calls (the OpenAI surface's "tool_calls").
+	// The calls are in GenerateToolCalls events and CompleteChoice.tool_calls.
+	FinishReason_FINISH_REASON_TOOL_CALLS FinishReason = 6
 )
 
 // Enum value maps for FinishReason.
@@ -328,6 +331,7 @@ var (
 		3: "FINISH_REASON_EOS",
 		4: "FINISH_REASON_CANCELLED",
 		5: "FINISH_REASON_ERROR",
+		6: "FINISH_REASON_TOOL_CALLS",
 	}
 	FinishReason_value = map[string]int32{
 		"FINISH_REASON_UNSPECIFIED": 0,
@@ -336,6 +340,7 @@ var (
 		"FINISH_REASON_EOS":         3,
 		"FINISH_REASON_CANCELLED":   4,
 		"FINISH_REASON_ERROR":       5,
+		"FINISH_REASON_TOOL_CALLS":  6,
 	}
 )
 
@@ -443,8 +448,13 @@ type SamplingParams struct {
 	RepeatPenalty *float32 `protobuf:"fixed32,5,opt,name=repeat_penalty,json=repeatPenalty,proto3,oneof" json:"repeat_penalty,omitempty"`
 	RepeatLastN   *int32   `protobuf:"varint,6,opt,name=repeat_last_n,json=repeatLastN,proto3,oneof" json:"repeat_last_n,omitempty"`
 	MinP          *float32 `protobuf:"fixed32,7,opt,name=min_p,json=minP,proto3,oneof" json:"min_p,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// The engine's sampler has neither: a non-zero value is refused by name, as
+	// the OpenAI surface refuses it, and `repeat_penalty` is what to send. They
+	// exist so a request that carries them is answered, not silently run.
+	PresencePenalty  *float32 `protobuf:"fixed32,8,opt,name=presence_penalty,json=presencePenalty,proto3,oneof" json:"presence_penalty,omitempty"`
+	FrequencyPenalty *float32 `protobuf:"fixed32,9,opt,name=frequency_penalty,json=frequencyPenalty,proto3,oneof" json:"frequency_penalty,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *SamplingParams) Reset() {
@@ -522,6 +532,20 @@ func (x *SamplingParams) GetRepeatLastN() int32 {
 func (x *SamplingParams) GetMinP() float32 {
 	if x != nil && x.MinP != nil {
 		return *x.MinP
+	}
+	return 0
+}
+
+func (x *SamplingParams) GetPresencePenalty() float32 {
+	if x != nil && x.PresencePenalty != nil {
+		return *x.PresencePenalty
+	}
+	return 0
+}
+
+func (x *SamplingParams) GetFrequencyPenalty() float32 {
+	if x != nil && x.FrequencyPenalty != nil {
+		return *x.FrequencyPenalty
 	}
 	return 0
 }
@@ -649,7 +673,7 @@ const file_jitllm_v1_common_proto_rawDesc = "" +
 	"\tDeviceRef\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12,\n" +
 	"\abackend\x18\x02 \x01(\x0e2\x12.jitllm.v1.BackendR\abackend\x12\x14\n" +
-	"\x05index\x18\x03 \x01(\x05R\x05index\"\xcf\x02\n" +
+	"\x05index\x18\x03 \x01(\x05R\x05index\"\xdc\x03\n" +
 	"\x0eSamplingParams\x12%\n" +
 	"\vtemperature\x18\x01 \x01(\x02H\x00R\vtemperature\x88\x01\x01\x12\x18\n" +
 	"\x05top_p\x18\x02 \x01(\x02H\x01R\x04topP\x88\x01\x01\x12\x18\n" +
@@ -657,14 +681,18 @@ const file_jitllm_v1_common_proto_rawDesc = "" +
 	"\x04seed\x18\x04 \x01(\x04H\x03R\x04seed\x88\x01\x01\x12*\n" +
 	"\x0erepeat_penalty\x18\x05 \x01(\x02H\x04R\rrepeatPenalty\x88\x01\x01\x12'\n" +
 	"\rrepeat_last_n\x18\x06 \x01(\x05H\x05R\vrepeatLastN\x88\x01\x01\x12\x18\n" +
-	"\x05min_p\x18\a \x01(\x02H\x06R\x04minP\x88\x01\x01B\x0e\n" +
+	"\x05min_p\x18\a \x01(\x02H\x06R\x04minP\x88\x01\x01\x12.\n" +
+	"\x10presence_penalty\x18\b \x01(\x02H\aR\x0fpresencePenalty\x88\x01\x01\x120\n" +
+	"\x11frequency_penalty\x18\t \x01(\x02H\bR\x10frequencyPenalty\x88\x01\x01B\x0e\n" +
 	"\f_temperatureB\b\n" +
 	"\x06_top_pB\b\n" +
 	"\x06_top_kB\a\n" +
 	"\x05_seedB\x11\n" +
 	"\x0f_repeat_penaltyB\x10\n" +
 	"\x0e_repeat_last_nB\b\n" +
-	"\x06_min_p\"P\n" +
+	"\x06_min_pB\x13\n" +
+	"\x11_presence_penaltyB\x14\n" +
+	"\x12_frequency_penalty\"P\n" +
 	"\x11SpeculationParams\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12!\n" +
 	"\fdraft_tokens\x18\x02 \x01(\x05R\vdraftTokens\"6\n" +
@@ -696,14 +724,15 @@ const file_jitllm_v1_common_proto_rawDesc = "" +
 	"\rExecutionMode\x12\x1e\n" +
 	"\x1aEXECUTION_MODE_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17EXECUTION_MODE_PARALLEL\x10\x01\x12\x1d\n" +
-	"\x19EXECUTION_MODE_SERIALISED\x10\x02*\xb0\x01\n" +
+	"\x19EXECUTION_MODE_SERIALISED\x10\x02*\xce\x01\n" +
 	"\fFinishReason\x12\x1d\n" +
 	"\x19FINISH_REASON_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12FINISH_REASON_STOP\x10\x01\x12\x1c\n" +
 	"\x18FINISH_REASON_MAX_TOKENS\x10\x02\x12\x15\n" +
 	"\x11FINISH_REASON_EOS\x10\x03\x12\x1b\n" +
 	"\x17FINISH_REASON_CANCELLED\x10\x04\x12\x17\n" +
-	"\x13FINISH_REASON_ERROR\x10\x05B\x99\x01\n" +
+	"\x13FINISH_REASON_ERROR\x10\x05\x12\x1c\n" +
+	"\x18FINISH_REASON_TOOL_CALLS\x10\x06B\x99\x01\n" +
 	"\rcom.jitllm.v1B\vCommonProtoP\x01Z6github.com/jitllm/jitllm/server/gen/jitllm/v1;jitllmv1\xa2\x02\x03JXX\xaa\x02\tJitllm.V1\xca\x02\tJitllm\\V1\xe2\x02\x15Jitllm\\V1\\GPBMetadata\xea\x02\n" +
 	"Jitllm::V1b\x06proto3"
 

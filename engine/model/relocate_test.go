@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -241,6 +242,7 @@ func TestRelocationTakesFromTheDeviceThatRefused(t *testing.T) {
 // a budget raised mid-sequence (the block returns at the next token and must
 // bring the history it built on the host).
 func TestRelocatedBlocksComeBack(t *testing.T) {
+	defer fusedRunsCheck(t, true)()
 	m, ids, used := relocationModel(t)
 	host := swaRun(t, m, nil, ids, false)
 	gb := swaTier(t)
@@ -323,4 +325,54 @@ func TestRelocatedBlocksComeBack(t *testing.T) {
 				"back without its history", d, bound)
 		}
 	})
+}
+
+// TestFusedRunsFollowARelocation: a block relocated off the card mid-sequence
+// and reclaimed later changes which blocks a fused run (fuse.go) bridges, and
+// the fused decode keeps the per-op decode's answer through both moves, to the
+// bit. Each arm runs the same schedule on its own tier.
+func TestFusedRunsFollowARelocation(t *testing.T) {
+	m, ids, used := relocationModel(t)
+	const raise = relocN - relocTail
+	run := func(fused bool) ([][]float32, int64) {
+		g := relocTier(t, used)
+		defer g.Close()
+		st := m.NewState(swaMaxSeq)
+		defer st.Close()
+		st.SetBlockFusion(fused)
+		st.SetDevice(g)
+		st.SetRelocate(true)
+		var out [][]float32
+		for i, id := range ids {
+			if i == raise {
+				g.SetBudget(used + 1<<30)
+			}
+			lg, err := st.Forward(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, append([]float32(nil), lg...))
+		}
+		if st.Relocations() != 1 || st.Reclaims() != 1 {
+			t.Fatalf("fused=%v: %d relocation(s), %d reclaim(s): the schedule did not move a block both ways",
+				fused, st.Relocations(), st.Reclaims())
+		}
+		return out, st.FusedRuns
+	}
+	per, n0 := run(false)
+	fu, n1 := run(true)
+	if n0 != 0 || n1 == 0 {
+		t.Fatalf("fused runs: per-op arm %d, fused arm %d", n0, n1)
+	}
+	for i := range per {
+		if Greedy(per[i]) != Greedy(fu[i]) {
+			t.Fatalf("position %d: fused token %d, per op %d", i, Greedy(fu[i]), Greedy(per[i]))
+		}
+		for j := range per[i] {
+			if math.Float32bits(per[i][j]) != math.Float32bits(fu[i][j]) {
+				t.Fatalf("position %d logit %d: fused %v, per op %v", i, j, fu[i][j], per[i][j])
+			}
+		}
+	}
+	t.Logf("%d positions through a relocation and a reclaim, same bits; %d fused runs", len(ids), n1)
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/jitllm/jitllm/dev/bench"
 	"github.com/jitllm/jitllm/engine/model"
+	"github.com/jitllm/jitllm/jit/cpu"
 	"github.com/jitllm/jitllm/jit/gpu/ir"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -34,11 +35,14 @@ func verifyCmd(args []string) error {
 	// 0 asks the device, like run's.
 	vram := bytesFlag(fs, "vram", 0, "device weight budget, bytes or 3G/512M; 0 asks the device")
 	maxmem := bytesFlag(fs, "maxmem", 0, "host weight residency budget, bytes or 3G/512M; 0 works it out")
-	ab := fs.String("ab", "", "instead of verifying, run a paired A/B: split, submit, head, graph, softmax, ropetab, persist, persist-aa, attnchunk or attnpair")
+	ab := fs.String("ab", "", "instead of verifying, run a paired A/B: split, submit, head, graph, softmax, fuse, actfuse, ropetab, persist, persist-aa, attnchunk, attnpair or regs")
 	rounds := fs.Int("rounds", 21, "A/B rounds")
 	verify := fs.Bool("verify", false, "recompute every served matvec on the host and report disagreements")
 	prefill := fs.Int("prefill", 0, "gate the BATCHED device prefill: prefill this many tokens on both tiers and diff")
 	depth := fs.Int("depth", 0, "context depth to run an -ab arm at; attention is 1% of a token at 0 and 30% at 1536")
+	registers := fs.Bool("registers", false, "instead of verifying, run decode and the batched prefill on the "+
+		"device and report every compiled kernel's registers, spill, shared memory and occupancy")
+	asJSON := fs.Bool("json", false, "with -registers, print the report as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -77,6 +81,19 @@ func verifyCmd(args []string) error {
 	fmt.Printf("device: %s\n", g.Name())
 	fmt.Printf("model:  %s  L=%d d=%d\n", fs.Arg(0), m.Cfg.NLayer, m.Cfg.NEmbd)
 
+	if *registers {
+		// The kernels a model runs are the ones it compiles: decode, then the
+		// batched prefill (diffed against per-token decode, so a report is never
+		// read off a path that computes something else).
+		benchRun(m, nil, *n)
+		benchRun(m, g, *n)
+		if err := prefillDiff(m, g, max(*prefill, 40), 4); err != nil {
+			// The diff is printed above it; the report still describes the
+			// kernels that ran, which is what was asked for here.
+			fmt.Printf("  (prefill diff: %v)\n", err)
+		}
+		return registerReport(os.Stdout, cpu.KernelRegisters(), g.KernelResources(), *asJSON)
+	}
 	if *ab != "" {
 		abRun(m, g, *ab, *n, *rounds, *depth)
 		return nil
@@ -622,7 +639,7 @@ func abRun(m *model.Model, g *tier.GPU, which string, n, rounds, depth int) {
 	// measurement at a depth, keep rounds*n*2 small against depth.
 	fmt.Printf("  context runs %d..%d over the whole A/B (-depth is the START)\n",
 		depth, min(depth+rounds*n*2, lim))
-	step := func(iters int) {
+	runOn := func(s *model.State, iters int) {
 		tok := int32(1)
 		for i := 0; i < iters; i++ {
 			logits, err := s.Forward(tok)
@@ -652,8 +669,86 @@ func abRun(m *model.Model, g *tier.GPU, which string, n, rounds, depth int) {
 			}
 		}
 	}
+	step := func(iters int) { runOn(s, iters) }
 	var a, b bench.Case
 	switch which {
+	case "spill":
+		// The batched prefill on two tiers of the same card, each iteration
+		// four -n token prompts from a fresh history. A is a second tier that
+		// allows GemmVolta's spilling tiles unless JITLLM_AB_SPILL_A=0; B is the
+		// verify tier, which refuses them unless JITLLM_GPU_SPILLING_TILES=1.
+		// Setting both alike is the A/A self-control; swapping them prices
+		// which tier is which.
+		aAllow := os.Getenv("JITLLM_AB_SPILL_A") != "0"
+		g2, err := tier.OpenWith(append([]tier.Option{tier.WithDevices("cuda:0"),
+			tier.WithDeviceTune(tier.TuneOff)}, append(gpuOptions(),
+			tier.WithConfig(func(c *tier.Config) { c.SpillingTiles = aAllow }))...)...)
+		if err != nil {
+			panic(err)
+		}
+		defer g2.Close()
+		s2 := m.NewState(n + 16)
+		defer s2.Close()
+		if err := s2.SetDevice(g2); err != nil {
+			panic(err)
+		}
+		ids := make([]int32, n)
+		for i := range ids {
+			ids[i] = int32(1 + (i*7919)%(m.Cfg.NVocab-1))
+		}
+		// bench.AB hands each arm -n as its iteration count, which here is
+		// the prompt length; a round is four prompts instead.
+		pre := func(st *model.State, _ int) {
+			for i := 0; i < 4; i++ {
+				st.Reset()
+				if _, err := st.Prefill(ids); err != nil {
+					panic(err)
+				}
+			}
+		}
+		name := func(allow bool, which string) string {
+			if allow {
+				return "spilling tiles allowed (" + which + ")"
+			}
+			return "spilling tiles refused (" + which + ")"
+		}
+		a = bench.Case{Name: name(aAllow, "second tier"), Fn: func(it int) { pre(s2, it) }}
+		b = bench.Case{Name: name(g.SpillingTiles, "verify tier"), Fn: func(it int) { pre(s, it) }}
+		defer func() {
+			fmt.Printf("tiles refused for spilling: A %d, B %d\n", g2.Stats().SpillRefused, g.Stats().SpillRefused)
+		}()
+	case "regs":
+		// B is a second tier on the same card whose every CUDA kernel is
+		// capped at JITLLM_AB_MAXREGS registers (.maxnreg), with a State of
+		// its own. 0 caps nothing, which makes this the A/A self-control: two
+		// tiers, two States, the same kernels.
+		maxRegs, _ := strconv.Atoi(os.Getenv("JITLLM_AB_MAXREGS"))
+		g2, err := tier.OpenWith(append([]tier.Option{tier.WithDevices("cuda:0"),
+			tier.WithDeviceTune(tier.TuneOff)}, append(gpuOptions(), tier.WithCUDAMaxRegs(maxRegs))...)...)
+		if err != nil {
+			panic(err)
+		}
+		defer g2.Close()
+		s2 := m.NewState(depth + rounds*n*2 + 16)
+		defer s2.Close()
+		if err := s2.SetDevice(g2); err != nil {
+			panic(err)
+		}
+		if s2.GPULayers() != s.GPULayers() {
+			panic(fmt.Errorf("the capped tier took %d blocks and the shipped one %d: not one comparison",
+				s2.GPULayers(), s.GPULayers()))
+		}
+		if depth > 0 {
+			ids := make([]int32, depth)
+			for i := range ids {
+				ids[i] = int32(1 + i%(m.Cfg.NVocab-1))
+			}
+			if _, err := s2.Prefill(ids); err != nil {
+				panic(err)
+			}
+		}
+		a = bench.Case{Name: "shipped registers", Fn: step}
+		b = bench.Case{Name: fmt.Sprintf("capped at %d registers", maxRegs), Fn: func(it int) { runOn(s2, it) }}
 	case "attnchunk":
 		// Needs -depth to mean anything. With GQA, adjacent query heads share
 		// a kv head; one head per task scatters them across workers.
@@ -737,6 +832,40 @@ func abRun(m *model.Model, g *tier.GPU, which string, n, rounds, depth int) {
 		}
 		a = bench.Case{Name: "1 thread per head", Fn: func(it int) { g.ScalarSoftmax = true; step(it) }}
 		b = bench.Case{Name: "32 lanes per head", Fn: func(it int) { g.ScalarSoftmax = false; step(it) }}
+	case "fuse":
+		// Both arms' kernels are built (the fused ones beside their parts)
+		// and each arm's graph is captured once, so the rounds compare the
+		// launch sequences and nothing else.
+		g.NoFuse = false
+		step(2)
+		if g.Stats().FusedLaunches == 0 {
+			panic(fmt.Errorf("this device fused nothing; there is nothing to compare"))
+		}
+		a = bench.Case{Name: "per-op launches", Fn: func(it int) { g.NoFuse = true; step(it) }}
+		b = bench.Case{Name: "fused kernels", Fn: func(it int) { g.NoFuse = false; step(it) }}
+		if os.Getenv("JITLLM_AB_AA") == "1" {
+			// The A/A self-control on this harness: both arms per-op.
+			b = bench.Case{Name: "per-op launches (A/A)", Fn: func(it int) { g.NoFuse = true; step(it) }}
+		}
+	case "actfuse":
+		// The operand prologue alone: every other fusion on in both arms.
+		g.NoFuse, g.NoActFuse = false, false
+		// Long enough for the split tuner to settle: the prologue is built
+		// only for the splits it pays at (tier.actInMaxGroups).
+		step(max(n, 64))
+		switch st := g.Stats(); {
+		case st.ActInLaunches == 0 && st.ActInTimed == 0:
+			panic(fmt.Errorf("this device built no operand prologue; there is nothing to compare (%s)", g.Err()))
+		case st.ActInLaunches == 0:
+			// The tuner kept no site here: the two arms are one launch
+			// sequence, and the row is what shipping costs on this card.
+			fmt.Printf("the tuner kept none of %d sites on this device\n", st.ActInTimed)
+		}
+		a = bench.Case{Name: "operand by its own launch", Fn: func(it int) { g.NoActFuse = true; step(it) }}
+		b = bench.Case{Name: "operand in the matvec prologue", Fn: func(it int) { g.NoActFuse = false; step(it) }}
+		if os.Getenv("JITLLM_AB_AA") == "1" {
+			b = bench.Case{Name: "operand by its own launch (A/A)", Fn: func(it int) { g.NoActFuse = true; step(it) }}
+		}
 	case "ropetab":
 		// Refuse rather than compare a knob that reached nothing: a device
 		// with no rotary-table kernel uploads on both arms.
@@ -757,7 +886,7 @@ func abRun(m *model.Model, g *tier.GPU, which string, n, rounds, depth int) {
 		a = bench.Case{Name: "per-op launches", Fn: func(it int) { g.Persist = false; step(it) }}
 		b = bench.Case{Name: "per-op launches (again)", Fn: func(it int) { g.Persist = false; step(it) }}
 	default:
-		panic(fmt.Errorf("jitllm: -ab takes split, submit, head, graph, softmax, ropetab, persist or persist-aa, not %q", which))
+		panic(fmt.Errorf("jitllm: -ab takes split, submit, head, graph, softmax, fuse, actfuse, ropetab, persist or persist-aa, not %q", which))
 	}
 	r := bench.AB(a, b, rounds, n)
 	fmt.Printf("\n%d blocks on device\n%s\n", s.GPULayers(), r)
@@ -770,6 +899,11 @@ func abRun(m *model.Model, g *tier.GPU, which string, n, rounds, depth int) {
 		fmt.Printf("persistent: %d launches ran %d per-op launches in %d phases; %d built, %d fell back%s\n",
 			st.PersistLaunches, st.PersistParts, st.PersistPhases, st.PersistCompiles, st.PersistFallbacks,
 			map[bool]string{true: "; declined: " + st.PersistWhy, false: ""}[st.PersistWhy != ""])
+	}
+	if which == "fuse" || which == "actfuse" {
+		st := g.Stats()
+		fmt.Printf("%d captures; %d operand-prologue launches encoded, replacing %d; %d of %d sites kept by the tuner\n",
+			st.Captures, st.ActInLaunches, st.ActInSaved, st.ActInKept, st.ActInTimed)
 	}
 	if which == "graph" {
 		fmt.Printf("%d captures over the whole A/B\n", g.Stats().Captures)

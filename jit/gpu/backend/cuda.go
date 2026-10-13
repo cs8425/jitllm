@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,6 +74,10 @@ type cudaDev struct {
 	// posted routes every call through the owner goroutine instead of running
 	// it inline; Opts.CUDAPosted, fixed at open.
 	posted bool
+	// maxRegs is Opts.CUDAMaxRegs, fixed at open; res is what each compiled
+	// kernel cost (ResourceReporter).
+	maxRegs int
+	res     resLedger
 	// reqFree is Session's free list; see Session.
 	reqMu   sync.Mutex
 	reqFree []*sessReq
@@ -122,7 +127,7 @@ func OpenCUDAWith(ord int, opts Opts) (Device, error) {
 		return nil, o.err
 	}
 	ownedDevices.Add(1)
-	return &cudaDev{d: o.d, reqs: reqs, owner: o.tid, posted: opts.CUDAPosted}, nil
+	return &cudaDev{d: o.d, reqs: reqs, owner: o.tid, posted: opts.CUDAPosted, maxRegs: opts.CUDAMaxRegs}, nil
 }
 
 // Session batches a sequence of device calls into ONE ownership hop.
@@ -280,6 +285,7 @@ func (s *cudaSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
 	if err := m.LaunchArgs(st, groups, width, args); err != nil {
 		return err
 	}
+	ck.noteRan()
 	if t0 != nil {
 		if e, err := cuda.NewEvent(); err == nil && e.RecordOn(st) == nil {
 			directMarks.add(kernPair{t0, e, ck.name})
@@ -860,7 +866,13 @@ func (c *cudaDev) UnifiedMemory() bool { return c.d.Integrated() }
 var (
 	_ HostImport = (*cudaDev)(nil)
 	_ Unified    = (*cudaDev)(nil)
+
+	_ ResourceReporter = (*cudaDev)(nil)
 )
+
+// KernelResources is every kernel this card compiled, as the driver reports
+// ptxas's allocation of it.
+func (c *cudaDev) KernelResources() []KernelResources { return c.res.list() }
 
 // UnpinHost gives PinHost's memory back.
 func (c *cudaDev) UnpinHost(b []byte) { c.do(func() { cuda.FreeHost(b) }) }
@@ -891,12 +903,20 @@ func (c *cudaDev) Compile(k *ir.Kernel) (Kernel, error) {
 	if err != nil {
 		return nil, err
 	}
+	if c.maxRegs > 0 {
+		src = strings.Replace(src, ")\n{\n", fmt.Sprintf(")\n.maxnreg %d\n{\n", c.maxRegs), 1)
+	}
 	var m *cuda.Module
+	var a cuda.Attrs
+	var attrsOK bool
 	err = errCUDAClosed
 	ck := &cudaKern{dev: c, name: k.Name, group: k.Group, src: k}
 	c.do(func() {
-		m, err = c.d.Load(src, k.Name)
-		if err != nil || !k.GridSync() {
+		if m, err = c.d.Load(src, k.Name); err != nil {
+			return
+		}
+		a, attrsOK = m.Attrs(k.Group[0])
+		if !k.GridSync() {
 			return
 		}
 		// A grid barrier runs cooperatively, on a grid the occupancy
@@ -907,7 +927,21 @@ func (c *cudaDev) Compile(k *ir.Kernel) (Kernel, error) {
 	if err != nil {
 		return nil, err
 	}
+	if attrsOK && a.MaxThreads > 0 && a.MaxThreads < k.Group[0] {
+		// The driver refuses the launch (too many resources requested); a
+		// refusal here lets the caller keep another kernel instead.
+		c.do(m.Unload)
+		return nil, fmt.Errorf("%w: %s at %d registers a thread launches at most %d threads, not %d",
+			ErrGroupTooWide, k.Name, a.Regs, a.MaxThreads, k.Group[0])
+	}
 	ck.m = m
+	if attrsOK {
+		ck.res = KernelResources{Name: k.Name, API: "cuda", Group: k.Group[0], Regs: a.Regs,
+			SpillBytes: a.Local, SharedBytes: a.Shared, MaxGroup: a.MaxThreads,
+			Resident: a.Blocks, ResidentThreads: a.Blocks * k.Group[0], MaxThreads: c.d.MaxThreadsPerSM()}
+		ck.resOK = true
+		c.res.note(ck.res)
+	}
 	return ck, nil
 }
 
@@ -1030,6 +1064,22 @@ type cudaKern struct {
 	src         *ir.Kernel
 	resident    int
 	residentErr error
+	// res is what the driver reported for this compile (resOK false where it
+	// would not say); see KernelResourcesOf.
+	res   KernelResources
+	resOK bool
+	// ran is set at the first launch, which marks the kernel in the device's
+	// ledger as one that ran rather than one compiled and passed over.
+	ran atomic.Bool
+}
+
+func (k *cudaKern) resources() (KernelResources, bool) { return k.res, k.resOK }
+
+// noteRan is one atomic load a launch; the first launch records it.
+func (k *cudaKern) noteRan() {
+	if !k.ran.Load() && k.ran.CompareAndSwap(false, true) {
+		k.dev.res.ran(k.name)
+	}
 }
 
 func (k *cudaKern) IR() *ir.Kernel { return k.src }
@@ -1051,6 +1101,7 @@ func (k *cudaKern) Launch(groups, width int, bufs ...Buf) error {
 	err := errCUDAClosed
 	k.dev.do(func() {
 		if err = k.m.Launch(groups, width, cb...); err == nil {
+			k.noteRan()
 			err = k.dev.syncAll()
 		}
 	})

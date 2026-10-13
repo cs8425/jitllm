@@ -52,7 +52,7 @@ The saved chats, the transcript, the prompt, and at the right the engine: the op
 | `ctrl+t` | show or fold the reasoning |
 | `ctrl+y` | copy the last reply |
 | `ctrl+n` | a new chat |
-| `ctrl+↑` `ctrl+↓` | the previous and next chat |
+| `ctrl+↑` `ctrl+↓`, or `⌥↑` `⌥↓` (`alt`) | the previous and next chat; on macOS, where Mission Control takes `ctrl+↑`, use Option |
 | `pgup` `pgdn` | scroll the transcript |
 
 A prompt starting with `/` is a command, completed with `tab`:
@@ -72,7 +72,7 @@ A prompt starting with `/` is a command, completed with `tab`:
 
 <img src="/shots/tui-models.png" width="1430" height="880" alt="The terminal app's Models screen: the converted models with their quantization and size, and the selected model's details" />
 
-The `.jlm` files in your model folders and the GGUF and safetensors files beside them, with what each is, its quantization and size, and which are open. The selected file's details are read from its header without loading it: architecture, blocks, width, context, vocabulary, page size, and whether it carries a chat template and a vision tower. `enter` loads a container, converts a source into one, or rebuilds a container an older version wrote; `ctrl+x` closes it. Type to filter.
+The `.jlm` files in your model folders and the GGUF and safetensors files beside them, with what each is, its quantization and size, and which are open. The selected file's details are read from its header without loading it: architecture, blocks, width, context, vocabulary, page size, and whether it carries a chat template and a vision tower. `enter` loads a container, converts a source into one, or rebuilds a container an older version wrote; `ctrl+x` unloads it. Several models stay loaded at once, each tagged **loaded** here and marked in the chat's sidebar; loading another unloads nothing, and only `ctrl+x` (or **Unload** in the command palette, which also offers **Chat with** for each) removes one. Type to filter.
 
 ## Discover
 
@@ -89,5 +89,13 @@ Every block of the open model and where it runs, the decode rate over the last s
 ## Settings
 
 The same settings as the desktop app, in the same file: sampling, the seed, the chat template, the system prompt, the prompt cache on disk, the devices, the context and the model folders (the first is where conversions go). `tab` and `shift+tab` move between fields, `enter` on the last field saves, and `esc` throws the changes away.
+
+## Which engine
+
+Like the desktop app, the terminal app uses a `jitllmd` that answers at the service address first (the settings file's, the login service's `127.0.0.1:8080` by default) and runs its own engine only when none does. `--connect addr` connects to that address and nothing else; `--embedded` always runs the app's own engine.
+
+The right end of the bottom line always says which: `Service · 127.0.0.1:8080 (jitllmd 0.9.0)`, `Embedded · API off` or `Embedded · API on :8080`. The command palette (`ctrl+k`) lists it too, and opens Settings from it. A service that stops answering turns the badge red with `not answering` and the palette offers to reconnect; the app never switches to an engine of its own.
+
+Turning the API on where a `jitllmd` already answers is refused, naming the `--connect` address instead, and running embedded beside a `jitllmd` says that the two share the GPU's memory.
 
 The screenshots on this page are the app running Qwen3-30B-A3B for real, in a 130-column terminal.

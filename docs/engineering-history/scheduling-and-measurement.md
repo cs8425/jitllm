@@ -615,6 +615,56 @@ fallback at every thread count. On a hybrid CPU an equal slice is wrong by a ker
 1.76x for the memory-bound decode matvec -- which is why `sched.Pool.drain` claims chunks dynamically
 and has no static path (its comment quotes the first and last).
 
+## The decode row's two boundaries: `jitllm run` against llama-bench's tg
+
+A CUDA board read `jitllm speed`'s warm decode faster than llama-bench (A100,
+Llama-3.2-1B Q4_K_M: 1,615 against 1,854 us a token) while the harness's
+decode row, which times `jitllm run`, read 0.98-1.00. What each arm times:
+
+- **llama-bench tg** creates the context untimed, runs one untimed warm-up
+  generation, then times its n tokens from a fresh KV at position 0.
+- **`jitllm run`** (vs-llamacpp.sh's decode arm) opens, places, prefills the
+  prompt, and times every token from the first decode: the decode timer
+  starts after the prompt, so open, placement, upload and the prompt are
+  outside it, and the first decode token of the session is inside it.
+
+Measured per token from `run` (a timer around each step of its decode loop,
+a local build; it is not in the tree), Llama-3.2-1B Q4_K_M unless said:
+
+    V100, cuda      token 1: 3.32-3.52 ms; tokens 2-7: 1.83-1.90; median after 8: 1.842-1.862
+                    jitllm speed tg128 on the same card: 1.83-1.86 ms (538-546 tok/s)
+    T4, cuda        token 1: 5.54-5.86 ms; tokens 2-7: 4.57-4.94; median after 8: 4.16-4.39
+                    jitllm speed tg128: 4.05-4.35 ms
+    T4, 8B Q4_K_M   token 1: 22.2-22.9 ms; tokens 2-7: 20.6-20.9; median 20.86-20.89
+                    jitllm speed tg128: 20.9-22.5 ms
+
+So on both cards `run` pays one thing per session that `speed` does not: its
+first decode token is 1.5 ms (V100) to 1.7 ms (T4) longer, which is the
+session's decode graph being captured (a recording is keyed by the session,
+graphKey.sid, and speed's untimed warm-up captured it). Over 128 tokens that
+is 0.5-0.7% of the row. After it, `run` and `speed` decode at the same rate
+within 1%. Nothing else is paid per token: the printing goroutine, the
+sampler and the greedy step are off the device's path at these rates.
+
+Two start-up costs found on the way, neither per token:
+
+- **A cold tune cache tunes only part of the decode in a `run` process.** The
+  background split tuner (tier.WithLazyTune) times a trial only after 50 ms of
+  device quiet, and a `run` has that only before its prompt: on a V100 with an
+  empty cache one `run` tuned 3 of the 1B's 6 decode shapes and a `speed`
+  process all 6. The rest run the table's split until a later process tunes
+  them. On the V100 the table's split decoded at the tuned rate (1,846 us a
+  token both ways); a card the table was not fitted on can differ.
+- **The first prompt compiles one kernel after the model is ready**
+  (`jitllm speed -ttft` refuses the row and names it): a staged prefill
+  attention variant (pagedscoresmma) at the first prompt's span, compiled when
+  a chunk first needs it rather than at placement (V100, -p 16 and -p 514).
+
+The A100 gap (run about 0.3 ms a token slower than speed) is not reproduced on
+a V100 or a T4, where the gap after the first token is under 0.1 ms. It is
+open: what settles it is the same per-token timer from `run` on the A100, one
+short job.
+
 ## The 0.90 and 0.70 readings, and the harness that produced them
 
 ★★★ **Llama-3.2-1B ON LINUX CPU IS A GATED WIN AT 1.0425 / 1.0436, TWO PASSES
@@ -1520,3 +1570,50 @@ block in, and `tensorBytes` read `len(t.data)` -- zero for a weight whose page i
 out, which priced every block at nothing and made a PLACEMENT think the whole
 model was free. A gate that has been red since a refactor is not noise; it is
 that refactor's unfinished half.
+
+## Fused runs: a decode token's resident host blocks as one pool region
+
+`TestFusionCeiling` priced whole-layer fusion as regions removed times a round
+trip, and the round trip is mostly the region's door, not its barrier: a
+sequence bump, a gate every worker CASes to join and the caller closes, and a
+wait for every joined worker to leave. `sched.Pool.Fuse` keeps the door open.
+The workers join once; every region the caller issues until `Unfuse` is a
+PHASE: one store of a word carrying the phase's tag, its chunk count and the
+next chunk, claimed by CAS on the whole word, and finished when the chunks done
+reach the count. Completion is counted in chunks rather than workers, so a
+worker the OS keeps off a CPU holds nothing up unless it claimed a chunk -- the
+property the gate exists for -- and a worker reads the job only after a claim
+succeeded, so a straggler can never run a chunk of the next phase with the last
+phase's body.
+
+What the model fuses is a RUN, not a block: consecutive resident host blocks
+and the host head are one region (`engine/model/fuse.go`). A device run, a block
+whose page has to be read, or the end of the token closes it. Nothing is
+compiled, so a relocation, an eviction or a seam move needs no re-link: the next
+token's runs follow its placement as it is.
+
+    Llama-3.2-1B Q4_K_M, 16 blocks   per op 218 regions/token   fused 1 region + 218 phases
+    olmoe-1b-7b Q4_K_M,  16 blocks   per op 234                 fused 1 + 234
+    Qwen3.5-0.8B Q4_K_M, 24 blocks   per op 354                 fused 1 + 354
+    gemma-3-1b Q4_K_M,   26 blocks   per op 353                 fused 1 + 353
+    the same with a two-frame page budget: one run per block read (15-25 a token)
+
+The kernels, chunks and order are the per-op path's, so the logits are the same
+bits (`TestFusedBlocksMatchPerOp`, every principle fixture, resident and paged).
+Run against violations: a phase published before its predecessor finished
+(`TestFusedPhaseOrder` fails; the model gate crashes), and workers that drop a
+third of their chunks (the model gate fails at token 0). The first version also
+caught its own bug: a worker that joined late read `p.j` after the first phase
+had replaced the fused job and drained the phase as an ordinary region, running
+chunks twice. Whether a worker is fused is now asked of the region, not the job.
+
+Not fused, by choice: a crew another session or crew shares the turn with (a
+fused caller holding the cores while it waits on a lock another session's
+region holds would deadlock), a NUMA pool (a phase drains flat, and DoNodes'
+placement is what that pool is for), and a run with pprof region labels on (a
+phase carries no label, so a profile is the per-op run). Prefill and the batched
+step are not fused; their regions carry far more work each.
+
+On the laptop an empty phase cost 489 ns against an empty region's 1.06 us
+(`JITLLM_FUSE_BENCH=1 go test ./engine/sched -run Cheaper`, wide IQR: indicative).
+The Xeon rows are in docs/perf/current.md's evidence trail and the PR.

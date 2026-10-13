@@ -47,15 +47,54 @@ type oaSampling struct {
 	TopLogprobs       *int            `json:"top_logprobs"`
 }
 
+// samplingFields are the sampling values both surfaces validate, held as
+// pointers so an absent field is not a zero. The OpenAI routes fill them from
+// JSON and the Connect InferenceService from SamplingParams, and validate is
+// the one check, so a value either refuses the other refuses in the same
+// words.
+type samplingFields struct {
+	Temperature, TopP, MinP, RepetitionPenalty, PresencePenalty, FrequencyPenalty *float64
+	TopK                                                                          *int
+}
+
+func (q *oaSampling) fields() samplingFields {
+	return samplingFields{q.Temperature, q.TopP, q.MinP, q.RepetitionPenalty, q.PresencePenalty,
+		q.FrequencyPenalty, q.TopK}
+}
+
+// validate refuses a value outside its range, and the two penalties the
+// engine's sampler does not have.
+func (q samplingFields) validate() error {
+	if q.PresencePenalty != nil && *q.PresencePenalty != 0 {
+		return fmt.Errorf("presence_penalty is not supported; repetition_penalty is")
+	}
+	if q.FrequencyPenalty != nil && *q.FrequencyPenalty != 0 {
+		return fmt.Errorf("frequency_penalty is not supported; repetition_penalty is")
+	}
+	if q.Temperature != nil && *q.Temperature < 0 {
+		return fmt.Errorf("temperature %v is negative", *q.Temperature)
+	}
+	if q.TopP != nil && (*q.TopP < 0 || *q.TopP > 1) {
+		return fmt.Errorf("top_p %v is outside [0, 1]", *q.TopP)
+	}
+	if q.TopK != nil && *q.TopK < -1 {
+		return fmt.Errorf("top_k %d is below -1", *q.TopK)
+	}
+	if q.MinP != nil && (*q.MinP < 0 || *q.MinP > 1) {
+		return fmt.Errorf("min_p %v is outside [0, 1]", *q.MinP)
+	}
+	if q.RepetitionPenalty != nil && *q.RepetitionPenalty <= 0 {
+		return fmt.Errorf("repetition_penalty %v is not positive", *q.RepetitionPenalty)
+	}
+	return nil
+}
+
 // sampler validates the fields and builds the sampler a request runs with. nil
 // means the session's own, which only a named session with no sampling field
 // gets.
 func (q *oaSampling) sampler(session string) (*model.Sampler, error) {
-	if q.PresencePenalty != nil && *q.PresencePenalty != 0 {
-		return nil, fmt.Errorf("presence_penalty is not supported; repetition_penalty is")
-	}
-	if q.FrequencyPenalty != nil && *q.FrequencyPenalty != 0 {
-		return nil, fmt.Errorf("frequency_penalty is not supported; repetition_penalty is")
+	if err := q.fields().validate(); err != nil {
+		return nil, err
 	}
 	if session != "" && q.Temperature == nil && q.TopP == nil && q.TopK == nil &&
 		q.MinP == nil && q.RepetitionPenalty == nil && q.Seed == nil {
@@ -63,33 +102,18 @@ func (q *oaSampling) sampler(session string) (*model.Sampler, error) {
 	}
 	s := &model.Sampler{Temp: 1, TopP: 1}
 	if q.Temperature != nil {
-		if *q.Temperature < 0 {
-			return nil, fmt.Errorf("temperature %v is negative", *q.Temperature)
-		}
 		s.Temp = *q.Temperature
 	}
 	if q.TopP != nil {
-		if *q.TopP < 0 || *q.TopP > 1 {
-			return nil, fmt.Errorf("top_p %v is outside [0, 1]", *q.TopP)
-		}
 		s.TopP = *q.TopP
 	}
 	if q.TopK != nil {
-		if *q.TopK < -1 {
-			return nil, fmt.Errorf("top_k %d is below -1", *q.TopK)
-		}
 		s.TopK = max(*q.TopK, 0)
 	}
 	if q.MinP != nil {
-		if *q.MinP < 0 || *q.MinP > 1 {
-			return nil, fmt.Errorf("min_p %v is outside [0, 1]", *q.MinP)
-		}
 		s.MinP = *q.MinP
 	}
 	if q.RepetitionPenalty != nil {
-		if *q.RepetitionPenalty <= 0 {
-			return nil, fmt.Errorf("repetition_penalty %v is not positive", *q.RepetitionPenalty)
-		}
 		s.RepeatPen = *q.RepetitionPenalty
 	}
 	if q.Seed != nil {
