@@ -14,15 +14,17 @@ import (
 // Next's table rows for one position, on generated integer code.
 
 type ngramKey struct {
-	t        cpu.Tier
-	n, per   int
-	reset    bool
+	t      cpu.Tier
+	n, per int
+	reset  bool
 }
 
 var ngramHashes sync.Map
 
 // NGramConsts is the hash's constant block (cpu.NGramConsts).
-func NGramConsts(eos uint64, mul, off, voc []uint64) []byte { return cpu.NGramConsts(eos, mul, off, voc) }
+func NGramConsts(eos uint64, mul, off, voc []uint64) []byte {
+	return cpu.NGramConsts(eos, mul, off, voc)
+}
 
 // NGramHashJIT writes the table rows of one position into rows, (n-1)*per of
 // them, and the next position's predecessors into next (n-1), from its window

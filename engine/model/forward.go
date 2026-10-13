@@ -267,9 +267,9 @@ type State struct {
 	ds *ds4Scratch
 	// k3 is Kimi-K3's residual attention and latent mixture buffers (k3.go),
 	// nil on every other model.
-	k3  *k3Scratch
+	k3 *k3Scratch
 	// q4 is Qwen3.8-Flash-Next's scratch (q4e.go); xa is its streams too.
-	q4 *q4eScratch
+	q4  *q4eScratch
 	tok int32
 	// tok1 hands a decode step's token to the device (tokenIDs) without an
 	// allocation, and rowx one row's streams in a prefill's row-by-row

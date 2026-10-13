@@ -30,10 +30,10 @@ import (
 // ngramConstEOS and friends are byte offsets into NGramConsts.
 const ngramConstEOS = 0
 
-func ngramConstMul(j int) int32     { return int32(8 + 8*j) }
-func ngramConstOff(n, h int) int32  { return int32(8 + 8*n + 16*h) }
-func ngramConstVoc(n, h int) int32  { return ngramConstOff(n, h) + 8 }
-func ngramHeads(n, per int) int     { return (n - 1) * per }
+func ngramConstMul(j int) int32    { return int32(8 + 8*j) }
+func ngramConstOff(n, h int) int32 { return int32(8 + 8*n + 16*h) }
+func ngramConstVoc(n, h int) int32 { return ngramConstOff(n, h) + 8 }
+func ngramHeads(n, per int) int    { return (n - 1) * per }
 func ngramShape(n, per int) error {
 	if n < 2 || per < 1 || ngramHeads(n, per) > 64 {
 		return fmt.Errorf("jit: ngram: %d-grams with %d heads each", n, per)

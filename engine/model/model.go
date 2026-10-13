@@ -273,12 +273,12 @@ type Config struct {
 	// block size, the n-gram embedding (its one-based block, n, heads per n,
 	// row width, convolution taps, the end-of-sequence and picture ids and
 	// the hash's constants) and the delta rule's sigmoid output gate.
-	HCLowRank, QSARatio                    int
-	NGramBlock, NGram, NGramHeadsPer       int
-	NGramRowDim, NGramConv                 int
-	NGramEOS, NGramImage                   int32
-	NGramMul, NGramOff, NGramVoc           []uint64
-	DeltaSigmoidGate                       bool
+	HCLowRank, QSARatio              int
+	NGramBlock, NGram, NGramHeadsPer int
+	NGramRowDim, NGramConv           int
+	NGramEOS, NGramImage             int32
+	NGramMul, NGramOff, NGramVoc     []uint64
+	DeltaSigmoidGate                 bool
 	// q4eFault breaks one piece of Qwen3.8-Flash-Next's graph, for a gate's
 	// violation only.
 	q4eFault q4eFault

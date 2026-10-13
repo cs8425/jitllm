@@ -42,13 +42,13 @@ type ngramScratch struct {
 	// per row: the hashed table rows, the gathered embedding, its key and
 	// value, the normed residual, the gate per stream and the gated value
 	// (normed in place for the convolution once added).
-	idx, ids                    []uint64
-	konst                       []byte
-	hwin, hnext                 []uint32
-	emb, key, val, q, gate, gv  []float32
-	gvn, conv, tap              []float32
-	raw, scr                    []byte
-	dot                         *nn.AttnSet
+	idx, ids                   []uint64
+	konst                      []byte
+	hwin, hnext                []uint32
+	emb, key, val, q, gate, gv []float32
+	gvn, conv, tap             []float32
+	raw, scr                   []byte
+	dot                        *nn.AttnSet
 }
 
 // allocNGram sizes the n-gram buffers for one row.
@@ -159,7 +159,7 @@ func (s *State) ngramApply(li int, l *layer, x []float32, n int, order []int,
 	}
 	gate := g.gate[:n*h]
 	s.scale(gate, invSqrt(e))
-	ngramGate(gate)
+	nn.Act32JIT(gate, nn.ActSqrtSigmoid)
 	s.jit.NewInput()
 	for i := 0; i < n*h; i++ {
 		v := g.gv[i*e : (i+1)*e]
@@ -217,17 +217,4 @@ func ngramRow(dst []float32, t quant.Type, raw []byte) error {
 		return nil
 	}
 	return fmt.Errorf("model: an n-gram table row of %v", t)
-}
-
-// ngramGate is sigmoid(sign(s) * sqrt(max(|s|, 1e-6))) in place.
-//
-// TEMPORARY: Go arithmetic, to be replaced by a generated kernel.
-func ngramGate(s []float32) {
-	for i, v := range s {
-		m := math.Sqrt(math.Max(math.Abs(float64(v)), 1e-6))
-		if v < 0 {
-			m = -m
-		}
-		s[i] = float32(1 / (1 + math.Exp(-m)))
-	}
 }
