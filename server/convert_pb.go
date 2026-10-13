@@ -280,6 +280,10 @@ func (e *Engine) pbPlacement(s *Session) *v1.Placement {
 			Bytes:        pbBytes(lm.m.PageBytes(i)),
 			HostResident: true,
 		}
+		if i < len(snap.hist) {
+			h := snap.hist[i]
+			bp.HistoryPerPosition, bp.HistoryWindow, bp.StateBytes = pbBytes(h.perPos), int32(h.window), pbBytes(h.state)
+		}
 		if onDev[i] {
 			bp.Location = v1.BlockLocation_BLOCK_LOCATION_DEVICE
 			bp.DeviceId = single

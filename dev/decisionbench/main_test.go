@@ -87,7 +87,7 @@ func TestHarnessCountsANoul(t *testing.T) {
 	}
 	// Right: Scolopendra, Lithobius (caught), teapot, granite, Julus
 	// (rejected); wrong: Geophilus, Scutigera (missed), Lumbricus (picked).
-	want := result{Answered: 8, InWindow: 8, Positives: 4, Correct: 5, Caught: 2, WrongPicks: 1, Exhausted: true}
+	want := result{Answered: 8, Scored: 8, InWindow: 8, Positives: 4, Correct: 5, Caught: 2, WrongPicks: 1, Exhausted: true}
 	r.P50 = 0
 	if r != want {
 		t.Errorf("counted %+v, want %+v", r, want)
@@ -120,7 +120,7 @@ func TestHarnessCountsAChoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.P50 = 0
-	want := result{Answered: 8, InWindow: 8, Positives: 4, Correct: 5, Caught: 2, WrongPicks: 1, Exhausted: true}
+	want := result{Answered: 8, Scored: 8, InWindow: 8, Positives: 4, Correct: 5, Caught: 2, WrongPicks: 1, Exhausted: true}
 	if r != want {
 		t.Errorf("counted %+v, want %+v", r, want)
 	}
@@ -155,5 +155,23 @@ func TestHarnessRefusesABadLabel(t *testing.T) {
 	}
 	if _, err := newConfig(srv.URL, "m", `{"type": "choice"}`, "", 0.5, time.Minute); err == nil {
 		t.Error("a choice with no positive key was accepted")
+	}
+}
+
+// A cycling run fills the window from a short file and still counts the file once.
+func TestHarnessCyclesAShortFile(t *testing.T) {
+	srv := scripted(t, pyes)
+	defer srv.Close()
+	c, err := newConfig(srv.URL, "m", `{"type": "noul"}`, "", 0.5, 300*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.cycle = true
+	r, err := run(c, items(t), srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Answered <= 8 || r.Scored != 8 || r.Correct != 5 || r.Caught != 2 || r.WrongPicks != 1 || r.Exhausted {
+		t.Errorf("counted %+v: want more than 8 answered, the file scored once (5 right, 2 caught, 1 wrong)", r)
 	}
 }
