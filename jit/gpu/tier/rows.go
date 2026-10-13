@@ -782,11 +782,26 @@ func (g *devTier) dot4Split(m mv, ntok, tok, rowt, split int) (mv, bool) {
 func (g *devTier) voltaMV(m mv, ntok int) (mv, bool) {
 	// A build reached from inside a submission takes g.mu (subLock).
 	defer g.subUnlock(g.subLock())
-	if g.NoVolta || !(g.mmaOff || g.NoMMA) || m.slots > 0 || !kernels.Volta70OK(m.q) {
+	if g.NoVolta || m.slots > 0 || !kernels.GemmVoltaOK(m.q) {
+		return mv{}, false
+	}
+	// A two-byte float weight takes the staged GEMM where the card lowers no
+	// m16n8 instruction (sm_70): the integer MMA, which decides mmaOff, never
+	// asks for a float, so it would wait on a refusal that does not come.
+	// Elsewhere it keeps its own batched kernel, unchanged.
+	if kernels.IsFloat(m.q) {
+		if g.f16GemmK() != 0 {
+			return mv{}, false
+		}
+	} else if !(g.mmaOff || g.NoMMA) {
 		return mv{}, false
 	}
 	if bm, ok := g.voltaGemm(m, ntok); ok {
 		return bm, true
+	}
+	// A float weight has the staged GEMM alone (GemmVoltaOK).
+	if !kernels.Volta70OK(m.q) {
+		return mv{}, false
 	}
 	mt, nt := 2, 4
 	for nt > 1 && ntok%(8*nt) != 0 {
@@ -1004,8 +1019,17 @@ var voltaTiles = []kernels.VoltaTile{
 func (g *devTier) voltaGemm(m mv, ntok int) (mv, bool) {
 	// A build reached from inside a submission takes g.mu (subLock).
 	defer g.subUnlock(g.subLock())
-	return g.stagedGemm(m, ntok, voltaTiles, 0, 0)
+	if bm, ok := g.stagedGemm(m, ntok, voltaTiles, 0, 0); ok || !kernels.IsFloat(m.q) {
+		return bm, ok
+	}
+	// A float weight has no MatVecMMA70 behind this, so a row count no 96-
+	// or 128-row block divides (ModernBERT-large's 2624) takes a 64-row one.
+	return g.stagedGemm(m, ntok, voltaTiles64, 0, 0)
 }
+
+// voltaTiles64 are GemmVolta's 64-row blockings, for the float shapes
+// voltaTiles leave to a slower kernel.
+var voltaTiles64 = []kernels.VoltaTile{{MT: 2, NT: 4, WM: 1, WN: 4}, {MT: 2, NT: 2, WM: 1, WN: 4}}
 
 // f16Tiles are GemmVolta's m16n8 blockings, widest first: four warps as 2x2,
 // each four m-tiles of 16 rows by up to eight n-tiles of 8 tokens, so a
