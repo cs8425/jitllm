@@ -596,7 +596,11 @@ type State struct {
 	// HostPicked says the last prefill did. A decision readout sets them.
 	HostPick     []int32
 	HostPickVals []float32
-	HostPicked   bool
+	// pickView and pickTmp are pickOnHost's view of a slot's rows and their
+	// projections, kept here so a warm pick allocates nothing.
+	pickView   nn.Packed
+	pickTmp    [8]float32
+	HostPicked bool
 	// cs is the rotary table for the current position: NRot floats, filled once
 	// per token and read by every head and by the device blocks.
 	cs []float32
