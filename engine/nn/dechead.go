@@ -6,10 +6,10 @@ package nn
 // them once when the head is first offered, and the device keeps them for the
 // life of the value (keyed by its pointer).
 type ClefHead struct {
-	D, W, Heads, FFN, Routing int
-	Eps, RMSEps                float32
-	OutNorm                    []float32 // the backbone's output RMSNorm, D
-	HidW, HidB                 []float32
+	D, W, Heads, FFN, Routing   int
+	Eps, RMSEps                 float32
+	OutNorm                     []float32 // the backbone's output RMSNorm, D
+	HidW, HidB                  []float32
 	PMem, PQ, POQ, PG, POC, POL []float32 // W x D each
 	SumW, SumB                  []float32
 	FieldW, FieldB              []float32

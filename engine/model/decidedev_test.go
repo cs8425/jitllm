@@ -299,7 +299,6 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 	}
 }
 
-
 // clefDevGateOff hands the device a copy of Clef's head whose joint score is
 // gated off (the residual gate's value zero), which the host's head does not
 // read.

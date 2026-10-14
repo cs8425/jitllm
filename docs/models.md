@@ -13,7 +13,7 @@ by name. `internal/srcgate.TestModelsDocIsGenerated` fails when the page and the
 - **17** vision projectors (`clip.projector_type`, `convert.Projectors`)
 - **3** embedding encoders, and pooling on any decoder
 - **12** weight types read (`quant.Dequantable`), **9** of them packed quantizations (`quant.PackedTypes`)
-- **85** models in the download catalogue (`jitllm library`), **9** of them with a vision tower
+- **86** models in the download catalogue (`jitllm library`), **9** of them with a vision tower
 
 ## Text architectures
 
@@ -247,6 +247,7 @@ lists above, each entry downloaded, converted and made to generate before it was
 | `laya` | Laya (decision model) | `modern-bert` | 421M | BF16 |  |
 | `d1-3b` | d1-3B (decision model) | `lfm2` | 3B | Q8_0 |  |
 | `lev` | Lev 4B (decision model) | `qwen35` | 4B | Q8_0 |  |
+| `clef-flash` | Clef-Flash (decision model) | `clef` | 9.1B | Q8_0 |  |
 | `qwen3-embedding-0.6b` | Qwen3-Embedding 0.6B (embeddings) | `qwen3` | 0.6B | F16 |  |
 | `smolvlm-256m-instruct` | SmolVLM 256M Instruct | `llama` | 256M | Q8_0 | yes |
 | `smolvlm-500m-instruct` | SmolVLM 500M Instruct | `llama` | 500M | Q8_0 | yes |

@@ -73,6 +73,10 @@
       "graph": "bert"
     },
     {
+      "name": "clef",
+      "graph": "qwen3next"
+    },
+    {
       "name": "clip",
       "graph": "clip"
     },
