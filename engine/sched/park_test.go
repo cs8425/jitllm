@@ -39,3 +39,32 @@ func TestFuseWhileTheOtherViewIsParked(t *testing.T) {
 		t.Fatal("a view opened after a parked one closed is not counted")
 	}
 }
+
+// TestECrewDoesNotTakeThePCrewsLockBesideTheWideSet: with the P and E prefill
+// set open (every session has one), an E-core crew still has a lock of its own
+// and is no user of the P-cores' crew, so a decoder there can fuse while
+// another session prefills on the E-cores; the wide set takes the E crew's
+// lock after its own, so it never drives an E-core beside it.
+func TestECrewDoesNotTakeThePCrewsLockBesideTheWideSet(t *testing.T) {
+	if !CanSplitE() {
+		t.Skip("no E-cores a thread can be kept on here")
+	}
+	p := Shared(CoreSet("p"))
+	wide := SharedBeside(CoreSet("pe"), p)
+	e := Shared(CoreSet("e"))
+	defer p.Close()
+	defer wide.Close()
+	defer e.Close()
+	if p.crew.mu == e.crew.mu {
+		t.Fatal("the E-core crew took the P-cores' lock: a prefill there would wait on a decoder")
+	}
+	if l := wide.crew.ex.Load(); l == nil || len(*l) != 1 || (*l)[0] != e.crew.mu {
+		t.Fatal("the P and E crew does not take the E-core crew's lock")
+	}
+	if !p.Fuse() {
+		t.Fatal("a decoder on the P-cores cannot fuse beside an E-core crew")
+	}
+	p.Unfuse()
+	// A region on the wide set runs with the E crew's lock held after its own.
+	wide.Do(64, 1, func(_, _, _ int) {})
+}

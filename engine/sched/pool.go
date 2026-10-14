@@ -201,6 +201,12 @@ type Pool struct {
 	beside bool
 	// idle is how many of the crew's views are away (Park), under crews.mu.
 	idle int
+	// ex is the locks of crews wholly on the E-cores that this crew's cores
+	// overlap, taken after mu (lockAll); see SharedBeside.
+	// It is copied on write (a crew opening or closing changes it while regions
+	// run) and held is what the lock holder took, under mu.
+	ex   atomic.Pointer[[]*turn]
+	held []*turn
 	// away is this view's own state.
 	away bool
 	// fz is an open fused region's state (fuse.go), on the crew.
@@ -667,8 +673,8 @@ func (p *Pool) dispatch(j job) {
 		// and the published job are the crew's. The participant count is the
 		// view's own, so each user's tuner keeps its answer.
 		c := p.crew
-		c.mu.Lock(p.wake)
-		defer c.mu.Unlock()
+		c.lockAll(p.wake)
+		defer c.unlockAll()
 		if c.stopped.Load() {
 			p.nSerial.Add(1)
 			j.call(0, 0, total)

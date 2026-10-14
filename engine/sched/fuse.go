@@ -107,9 +107,9 @@ func (p *Pool) FuseWith(l Lookahead) bool {
 		if !alone {
 			return false
 		}
-		c.mu.Lock(p.wake)
+		c.lockAll(p.wake)
 		if c.stopped.Load() {
-			c.mu.Unlock()
+			c.unlockAll()
 			return false
 		}
 	}
@@ -158,7 +158,7 @@ func (p *Pool) Unfuse() {
 	c.fz.ahead = nil
 	c.fz.owner.Store(nil)
 	if p.crew != nil {
-		c.mu.Unlock()
+		c.unlockAll()
 	}
 }
 
