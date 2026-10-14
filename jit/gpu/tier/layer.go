@@ -6170,6 +6170,9 @@ type graphKey struct {
 	// persist says the recording holds composed persistent kernels
 	// (Config.Persist), which a per-op recording does not.
 	persist bool
+	// persistDeps says those kernels are ordered by dependency counters
+	// (Config.PersistDeps) rather than grid barriers.
+	persistDeps bool
 	// sid is the session the recording was made for: it bakes that session's
 	// page descriptors and recurrent seats, so another session never replays
 	// it. Keying on it, rather than dropping every recording when the current
@@ -6666,7 +6669,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	// home, whose uploads sit between launches.
 	persistOn := R == 1 && rag == nil && !(bs.pkv != nil && bs.pkv.st != nil) && g.ensurePersist()
 	key := graphKey{lo, hi, nCap, R, head != nil, g.TableSplit, g.ScalarSoftmax, g.flashOn(), g.KVF16,
-		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, persistOn, sid, g.NoFuse, g.NoActFuse}
+		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, persistOn, persistOn && g.PersistDeps, sid, g.NoFuse, g.NoActFuse}
 	if _, live := g.recs[key]; !live {
 		for k, r := range g.recs {
 			older := k
