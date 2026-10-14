@@ -1547,6 +1547,9 @@ type devShared struct {
 	// visCap is the rows the non-causal set is built for and visMax the
 	// largest grid a tower placed here takes (visrows.go). Guarded by mu.
 	visCap, visMax int
+	// visSmall counts the calls in a row the set was more than twice what
+	// they needed (ReserveRows), which shrinks it at visShrinkCalls.
+	visSmall int
 	// scratch is the budget the device's own buffers hold -- the block
 	// scratches and the staging -- and explicit the running sum of what
 	// charge and refund moved, which a scratch window subtracts so a weight or
@@ -1603,6 +1606,14 @@ type devShared struct {
 	recNext      backend.Buf
 	recNextBytes uint64
 	recCopies    map[[2]int]backend.Kernel
+	// recZeros is the zeros a seat's zeroing copies from (recZeroLayers),
+	// uploaded at the widest zeroing and kept while there are pools: a
+	// prompt that resets its sequence's state made and freed it each time.
+	recZeros      backend.Buf
+	recZerosBytes uint64
+	// recLs is resetRecRows' list of the blocks it zeroes, kept between
+	// calls.
+	recLs []*layer
 	// headSrc is the first byte of the projection the resident head was
 	// uploaded from, and headNormHost the norm it was built with: what a
 	// second State's PrepHead is compared against (adoptHead). altNorms are
@@ -1691,11 +1702,15 @@ type devShared struct {
 	pcache     *persistCache                 // composed persistent kernels; see persist.go
 	// convK, conv and convN are the convolutional blocks' kernels, their
 	// shared scratch and how many hold it (conv.go).
-	convK   map[convKey]backend.Kernel
-	conv    convScratch
-	convN   int
-	ragSeg  map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
-	argmaxK backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
+	convK map[convKey]backend.Kernel
+	conv  convScratch
+	// dh is Clef's decision head on this device (dechead.go), and ClefHeads
+	// how many requests it has answered.
+	dh        dhState
+	ClefHeads int64
+	convN     int
+	ragSeg    map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
+	argmaxK   backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
 	// samplePenK and sampleKs are the device sampler's kernels: the penalty
 	// over the head's rows and, per k, the two top-k passes (sample.go).
 	samplePenK backend.Kernel
@@ -2378,6 +2393,7 @@ func (g *devTier) Close() {
 	// Every session's queue, before the device that owns them, once nothing
 	// runs on one.
 	g.quiesce()
+	g.dhClose()
 	for _, ds := range g.sess {
 		ds.closeQueue()
 	}

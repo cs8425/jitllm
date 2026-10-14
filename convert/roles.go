@@ -37,6 +37,12 @@ var roleOf = map[string]jlm.Role{
 	"cls.bias":          jlm.RoleScorerBias,
 	"cls.output.weight": jlm.RoleScorerOut,
 	"cls.output.bias":   jlm.RoleScorerOutBias,
+	// Clef's scorer (conversion/clef.py), the same four positions as Laya's
+	// at another width; the rest of Clef's head is named in init below.
+	"decision.scorer.weight":     jlm.RoleScorer,
+	"decision.scorer.bias":       jlm.RoleScorerBias,
+	"decision.scorer_out.weight": jlm.RoleScorerOut,
+	"decision.scorer_out.bias":   jlm.RoleScorerOutBias,
 	// EmbeddingGemma's sentence-transformers Dense layers, which llama.cpp
 	// names after the module index they occupy in the pipeline (2 and 3).
 	"dense_2.weight": jlm.RoleEmbdDense1,
@@ -290,6 +296,19 @@ func identify(name string) (role jlm.Role, block int32, index int32, err error) 
 	rest := name
 	// "v." marks the vision tower; its blocks are "v.blk.N.".
 	vision := strings.HasPrefix(rest, "v.")
+	// A decision head's blocks are "dec.blk.N." (Clef's): model-level tensors
+	// with the head block in Index, so they never meet a backbone block.
+	if r, ok := strings.CutPrefix(rest, "dec.blk."); ok {
+		i := strings.IndexByte(r, '.')
+		n, e := strconv.ParseInt(r[:max(i, 0)], 10, 32)
+		if i <= 0 || e != nil || n < 0 {
+			return 0, 0, 0, fmt.Errorf("convert: %q: no head block index", name)
+		}
+		if role, ok := roleOf["dec."+r[i+1:]]; ok {
+			return role, jlm.DenseBlock, int32(n), nil
+		}
+		return 0, 0, 0, fmt.Errorf("convert: tensor %q has no role in this container's vocabulary", name)
+	}
 	for _, p := range []string{"v.blk.", "blk."} {
 		if strings.HasPrefix(rest, p) {
 			r := rest[len(p):]
