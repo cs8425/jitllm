@@ -318,7 +318,7 @@ func (e *Embedder) encode(ids []int32) error {
 		}
 	}
 	scale := float32(1 / math.Sqrt(float64(c.HeadDim)))
-	if err := e.devPrepare(n, 0); err != nil {
+	if err := e.devPrepare(n, 0, 0); err != nil {
 		return err
 	}
 	var cs []float32
@@ -453,10 +453,12 @@ func (e *Embedder) mm(out []float32, w tensor, x []float32, n int) error {
 // closure literal over a call's locals escapes into the pool's job, a heap
 // object per region, every block of every sequence.
 type encRegions struct {
-	rows   encRowRegion
-	vec    encVecRegion
-	attn   encAttnRegion
-	lfAttn lfAttnRegion
+	rows encRowRegion
+	vec  encVecRegion
+	attn encAttnRegion
+	// audAttn is an audio tower's attention (audio.go).
+	audAttn audAttnRegion
+	lfAttn  lfAttnRegion
 }
 
 // encRowOp is which per-row op an encRowRegion runs.

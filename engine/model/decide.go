@@ -115,7 +115,11 @@ type Decider struct {
 	// omniPre is d1-omni's picture prefix for the request in flight, rows of
 	// NEmbd (none for text), and omniVis the vision segment that encodes it.
 	omniPre []float32
-	omniVis *State
+	// omniSpoken says the prefix is a voice clip's (DecideAudio), and
+	// omniClip is the clip as the tower reads it.
+	omniSpoken bool
+	omniClip   []float32
+	omniVis    *State
 	// vscores is each variant's scores (variantScores): a question's
 	// variants are answered together, so each keeps its own.
 	vscores [][]float32
@@ -240,7 +244,15 @@ func (d *Decider) Close() error {
 // (Embedder.SetDevice).
 func (d *Decider) SetDevice(dev nn.Device, max int) error {
 	if d.emb != nil {
-		return d.emb.SetDeviceLayers(dev, max)
+		if err := d.emb.SetDeviceLayers(dev, max); err != nil {
+			return err
+		}
+		// An audio tower's blocks go where the encoder's do, every one the
+		// device takes (d1-omni's).
+		if max != 0 {
+			return d.emb.setAudioDevice(dev)
+		}
+		return d.emb.setAudioDevice(nil)
 	}
 	if err := d.st.SetDeviceLayers(dev, max); err != nil {
 		return err
@@ -279,9 +291,11 @@ func (d *Decider) Prepare(state jinja.Value, qs []DecisionQuestion, images int) 
 	if len(qs) == 0 {
 		return fmt.Errorf("questions must be a non-empty object")
 	}
-	// d1 and Clef read a null state (pictures alone): d1's runner and
+	// d1, d1-omni and Clef read a null state (pictures alone): d1's runner,
+	// d1-omni's system_one ("" for None) and
 	// llama.cpp allow it, and Clef's systemone renders it as JSON null.
-	if (state.IsNone() || state.IsUndefined()) && d.kind != jlm.DecisionLFM2D1 && d.kind != jlm.DecisionClef {
+	if (state.IsNone() || state.IsUndefined()) && d.kind != jlm.DecisionLFM2D1 && d.kind != jlm.DecisionClef &&
+		d.kind != jlm.DecisionD1Omni {
 		return fmt.Errorf("state must be provided")
 	}
 	for i := range qs {
@@ -1157,6 +1171,9 @@ type DecisionBody struct {
 	// (DecisionVideos).
 	Images []string
 	Videos []VideoURLs
+	// Audio is the voice clips' data URLs (data:audio/...): at most one, and
+	// never beside a picture (d1-omni's).
+	Audio []string
 }
 
 // ParseDecisionRequest reads a /v1/systemone body, every object's keys in the
@@ -1167,6 +1184,20 @@ func ParseDecisionRequest(body []byte) (DecisionBody, error) {
 	out.Model, out.State, out.Questions, out.Images, err = parseDecisionRequest(body)
 	if err != nil {
 		return out, err
+	}
+	// A voice clip rides "files" beside the pictures (llama.cpp's server
+	// tells them apart by content; here by the URL's media type).
+	pics := out.Images[:0]
+	for _, u := range out.Images {
+		if strings.HasPrefix(u, "data:audio/") {
+			out.Audio = append(out.Audio, u)
+		} else {
+			pics = append(pics, u)
+		}
+	}
+	out.Images = pics
+	if len(out.Audio) > 1 || len(out.Audio) == 1 && len(out.Images) > 0 {
+		return out, fmt.Errorf("a request has images or one audio clip, not both")
 	}
 	v, _ := jinja.FromJSON(body)
 	out.Videos, err = DecisionVideos(v.AsDict())

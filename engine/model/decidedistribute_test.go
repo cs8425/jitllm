@@ -241,7 +241,7 @@ func TestDecisionDistributes(t *testing.T) {
 			} {
 				t.Run(arm.name, func(t *testing.T) {
 					pl := Placement{Blocks: map[int]Place{}, Head: &Place{On: b}, Strict: true}
-					if c.kind == jlm.DecisionLaya {
+					if c.kind == jlm.DecisionLaya || c.kind == jlm.DecisionD1Omni {
 						pl.Head = nil // an encoder has no output projection: its scorer is the head's last block
 					}
 					want := map[string]int{}
@@ -395,8 +395,14 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 						if st.MaxSeqs < 2 {
 							t.Fatalf("no step carried two prompts: the batch ran them one at a time")
 						}
-						if d.BatchDeviceBlocks() != placed {
+						// A device with no room for a step brings the session's
+						// blocks home first (nn.RowsRoomer); otherwise the
+						// session holds what the Decider holds.
+						if d.BatchDeviceBlocks() != placed && st.RoomHome == 0 {
 							t.Fatalf("the batch session holds %d device blocks, the Decider %d", d.BatchDeviceBlocks(), placed)
+						}
+						if st.RoomHome > 0 {
+							t.Logf("%d step(s) found no room on the device and ran with the blocks home", st.RoomHome)
 						}
 					}
 					// The band each readout is held to against llama.cpp: a batch

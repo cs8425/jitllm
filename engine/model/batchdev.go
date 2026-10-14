@@ -93,7 +93,7 @@ func (s *State) rowsTake(seq, pos []int) ([]int, error) {
 
 // relocateRows is relocateFor for a step in which slot q takes took[q] rows:
 // what has to fit is each stepping sequence's next took[q] positions.
-func (s *State) relocateRows(took []int) {
+func (s *State) relocateRows(took []int, rows int) {
 	if s.ld == nil {
 		return
 	}
@@ -103,28 +103,29 @@ func (s *State) relocateRows(took []int) {
 			end = max(end, s.bpos[q]+k)
 		}
 	}
+	room := func() bool { return true }
+	if rr, ok := s.ld.(nn.RowsRoomer); ok && s.devCount() > 0 {
+		room = func() bool { return rr.RowsRoom(rows, s.nseq) }
+		// Counted once a step: blocks go home for the step's room here,
+		// or all at once in forwardRows when relocation is off.
+		if !room() {
+			s.roomHome++
+		}
+	}
 	sd, ok := s.ld.(nn.SeqKVDevice)
 	if !ok || !sd.PerSequenceKV() || s.nseq == 1 {
 		s.relocateFor(end)
+		s.relocateUntil(end, room)
 		return
 	}
-	bases, ends := s.rrBases[:0], s.rrEnds[:0]
+	var bases, ends []int
 	for q, k := range took {
 		if k > 0 {
 			bases, ends = append(bases, q*s.maxSeq), append(ends, s.bpos[q]+k)
 		}
 	}
-	s.rrBases, s.rrEnds, s.rrSD = bases, ends, sd
-	if s.rrFits == nil {
-		s.rrFits = s.reserveSeqs
-	}
-	s.relocateUntil(end, s.rrFits)
-	s.rrSD = nil
+	s.relocateUntil(end, func() bool { return room() && sd.ReserveKVSeqs(bases, ends) })
 }
-
-// reserveSeqs is relocateRows' question to the device: whether the stepping
-// sequences' next positions fit (nn.SeqKVDevice.ReserveKVSeqs).
-func (s *State) reserveSeqs() bool { return s.rrSD.ReserveKVSeqs(s.rrBases, s.rrEnds) }
 
 // flatSlots is each row's place in the device's flat history, sequence q's
 // position p at q*maxSeq+p (nn.RowsDevice).
