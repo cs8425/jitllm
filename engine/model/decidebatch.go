@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"image"
 
 	"github.com/jitllm/jitllm/engine/nn"
 	"github.com/jitllm/jitllm/format/jlm"
@@ -21,6 +22,10 @@ import (
 type DecisionRequest struct {
 	State     jinja.Value
 	Questions []DecisionQuestion
+	// Images are the request's pictures, in its order (d1's); a request with
+	// pictures runs on its own (Decide), its tower once and its picture rows
+	// from the image cache for every question after the first.
+	Images []image.Image
 }
 
 // decisionBatchRows is the most prompts one batch session runs at once.
@@ -97,7 +102,12 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 	n := 0
 	for r := range reqs {
 		rq, res := &reqs[r], &out[r]
-		if res.Err = d.Prepare(rq.State, rq.Questions); res.Err != nil {
+		if res.Err = d.Prepare(rq.State, rq.Questions, len(rq.Images)); res.Err != nil {
+			continue
+		}
+		if len(rq.Images) > 0 {
+			res.Answers, res.Err = d.Decide(rq.State, rq.Questions, rq.Images)
+			res.InputTokens = d.InputTokens()
 			continue
 		}
 		first := n

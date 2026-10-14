@@ -84,7 +84,7 @@ func decideOn(t *testing.T, m *Model, dev nn.Device, n int, ok func(placed int) 
 	var out [][]DecisionAnswer
 	for _, req := range decisionRequests {
 		state, qs := decisionRequest(t, filepath.Join("testdata", "decision", req+".json"))
-		ans, err := d.Decide(state, qs)
+		ans, err := d.Decide(state, qs, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -262,6 +262,11 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 							// label, the answers move (the pick is what they read).
 							if picked == 0 {
 								t.Fatalf("no prompt's labels were picked on %s: the head's whole row came home", spec)
+							}
+							// And by the picked rows' own projection, not the whole
+							// head and a gather (tier.Config.NoPickMV's arm).
+							if n := g.Stats().PickRows; n == 0 {
+								t.Fatalf("%d prompts picked on %s, none by the picked rows' projection", picked, spec)
 							}
 							row, _, _, rowPicked := decideOn(t, m, g, -1, all, "no-pick")
 							if rowPicked != 0 {

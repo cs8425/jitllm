@@ -65,7 +65,7 @@ func readClefGoldOf(t *testing.T, prefix, req string) clefGold {
 func clefLogits(t *testing.T, d *Decider, req string) (*clefPrompt, []float32) {
 	t.Helper()
 	state, qs := decisionRequest(t, filepath.Join("testdata", "decision", req+".json"))
-	if err := d.Prepare(state, qs); err != nil {
+	if err := d.Prepare(state, qs, 0); err != nil {
 		t.Fatal(err)
 	}
 	p, err := d.clefPrompt(state, qs)
