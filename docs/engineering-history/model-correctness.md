@@ -9592,8 +9592,30 @@ a logit, 5.5e-6 on a probability (`TestD1OmniMatchesReference`).
 
 A warm pass over every prompt makes no engine allocation, and half the
 blocks' pages give the same scores to the bit (`TestD1OmniKeepsThePrinciples`).
-The device tiers decline the trunk by name until its convolution and prefix
-mask are planned there.
+On a device the trunk is the encoder segment's non-causal blocks
+(`engine/model/encdev.go`): RMSNorm, SwiGLU, GQA with the per-head q/k norm
+and NEOX rotary on the attention blocks, and on the convolution blocks a
+short convolution with no state, `nn.RecurrentPlan.Centred`, run by
+`kernels.Conv3Centred` -- three taps on the row before, at and after, each
+read only where the row's window holds it. The windows are the ones the
+attention's mask reads (`nn.RowWindowDevice`, one a row: a prefix row's the
+prefix, a text row's the whole call), copied whole into one buffer for the
+convolution (`blockScratch.vwinAll`), so the prefix's last row's cut and the
+zeros past either end are the same fact on both. The convolution and
+attention blocks share one set, built from the union of their plans. The
+head attends at 16 key heads with LayerNorm after a trunk of 8 with RMSNorm,
+and every kernel of a set bakes those, so the head runs in a non-causal set
+of its own (`nn.LayerPlan.HeadSet`, the tier's `geoNCHead`), resized with the
+trunk's and never row-chunked.
+
+`TestD1OmniOnEveryDevice` places every block, three, and eight (a seam that
+leaves the trunk's rest home) and compares the text and the picture
+questions' scores with the host's: CUDA 8.6e-3, 2.8e-3 and 3.9e-3 on the
+laptop's RTX 3050 Ti, Vulkan 1.7e-5. With the prefix reading the text on the
+device the scores move 1.0. The kernel alone against its loop, the prefix
+windows included: `backend.TestConv3CentredMatchesTheLoop`, which fails when
+the right tap ignores the window. A warm question makes no allocation on
+either device at a seam or with every block placed.
 
 #### d1-omni's pictures
 

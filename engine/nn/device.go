@@ -894,6 +894,11 @@ type LayerPlan struct {
 	// the call was handed (KeyRunDevice) rather than over every row
 	// (Qwen2.5-VL's tower, every block but each n'th).
 	Windowed bool
+	// HeadSet says a NonCausal block is a decision head's that attends and
+	// norms otherwise than the encoder before it (d1-omni: LayerNorm and 16
+	// key heads after an RMSNorm trunk of 8): a device runs it in a scratch
+	// set of its own rather than declining it for the trunk's geometry.
+	HeadSet bool
 	// AttnOutGate says the q projection is double width and its second half,
 	// interleaved per head, gates the attention output through a sigmoid.
 	AttnOutGate bool
@@ -1033,7 +1038,13 @@ type RecurrentPlan struct {
 	// heads and no state beside the convolution's window over Chans channels.
 	// Wq is x, SSMWeights.Gate is B and SSMWeights.BA is C, and the block is
 	// out_proj(C * conv(B * x)).
-	ShortConv              bool
+	ShortConv bool
+	// Centred is a ShortConv over a whole non-causal call (LFM2's encoder,
+	// d1-omni's trunk): three taps on the rows before, at and after each
+	// row, zero past either end, and no state. A tap reads a neighbour only
+	// where the row's window holds it (nn.RowWindowDevice), so a media
+	// prefix's last row does not read the text's first.
+	Centred                bool
 	NormGroups             int
 	NormBeforeGate, NoNorm bool
 	// SigmoidGate gates the output norm by sigmoid(z) where the gated delta

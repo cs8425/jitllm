@@ -164,13 +164,22 @@ func TestD1OmniFeaturesAreLoadBearing(t *testing.T) {
 // TestD1OmniKeepsThePrinciples holds d1-omni's readout to two of the five
 // principles on the host: a warm pass over every prompt makes no engine
 // allocation, and a page budget of half its blocks evicts, re-reads and
-// gives the same scores to the bit. (The device tiers decline its trunk by
-// name; relocation comes with them.)
+// gives the same scores to the bit; on each device, a seam and every block
+// placed make no allocation either (relocation: TestDecisionRelocatesBetweenDevices).
 func TestD1OmniKeepsThePrinciples(t *testing.T) {
 	t.Run("allocation", func(t *testing.T) {
 		m := openDecision(t, d1OmniModel, jlm.DecisionD1Omni, noTune)
 		defer m.Close()
-		decisionAllocs(t, m, nil, 0)
+		t.Run("host", func(t *testing.T) { decisionAllocs(t, m, nil, 0) })
+		for _, arm := range layaArms(t) {
+			if arm.gpu == nil {
+				continue
+			}
+			t.Run(arm.name, func(t *testing.T) {
+				t.Run("seam", func(t *testing.T) { decisionAllocs(t, m, arm.gpu, decisionBlocks(m)/2) })
+				t.Run("every-block", func(t *testing.T) { decisionAllocs(t, m, arm.gpu, -1) })
+			})
+		}
 	})
 	t.Run("paging", func(t *testing.T) {
 		state, qs := decisionRequest(t, filepath.Join("testdata", "decision", "support.json"))

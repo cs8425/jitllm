@@ -241,7 +241,7 @@ func TestDecisionDistributes(t *testing.T) {
 			} {
 				t.Run(arm.name, func(t *testing.T) {
 					pl := Placement{Blocks: map[int]Place{}, Head: &Place{On: b}, Strict: true}
-					if c.kind == jlm.DecisionLaya {
+					if c.kind == jlm.DecisionLaya || c.kind == jlm.DecisionD1Omni {
 						pl.Head = nil // an encoder has no output projection: its scorer is the head's last block
 					}
 					want := map[string]int{}

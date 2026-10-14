@@ -202,6 +202,15 @@ func (g *devTier) setWindowsLocked(runs []nn.KeyRun, perRow bool) bool {
 		}
 		bs.vwins = wins
 	}
+	if bs.convCentred != nil && bs.vwinAll == nil {
+		w := g.scratchWin()
+		var err error
+		bs.vwinAll, err = g.dev.Alloc(bs.rows * 8)
+		w.close()
+		if err != nil {
+			return fail("row windows for the convolution: %v", err)
+		}
+	}
 	// Every row's window, the scratch's padded rows past n given the whole
 	// image: they are never read, and a row with no key would softmax to NaN.
 	if cap(g.winBuf) < bs.rows*8 {
@@ -236,6 +245,11 @@ func (g *devTier) setWindowsLocked(runs []nn.KeyRun, perRow bool) bool {
 	for i, b := range bs.vwins {
 		if err := b.Write(buf[i*ar*8 : (i+1)*ar*8]); err != nil {
 			return fail("windowed runs: %v", err)
+		}
+	}
+	if bs.vwinAll != nil {
+		if err := bs.vwinAll.Write(buf); err != nil {
+			return fail("row windows for the convolution: %v", err)
 		}
 	}
 	bs.vwinRows = n

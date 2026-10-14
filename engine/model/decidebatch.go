@@ -226,18 +226,8 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 		}
 		return nil
 	}
-	if d.kind == jlm.DecisionLaya {
+	if d.kind == jlm.DecisionLaya || d.kind == jlm.DecisionD1Omni {
 		return d.layaPacked(jobs)
-	}
-	if d.kind == jlm.DecisionD1Omni {
-		for _, j := range jobs {
-			s, err := d.d1OmniForward(j.ids, j.qt, j.markers, 0)
-			if err != nil {
-				return err
-			}
-			j.scores = append(j.scores[:0], s...)
-		}
-		return nil
 	}
 	if len(jobs) == 0 {
 		return nil
@@ -325,7 +315,13 @@ func (d *Decider) layaPacked(jobs []*batchJob) error {
 		if len(pass) == 1 {
 			e.seqs, e.seqTypes = e.seqs[:0], e.seqTypes[:0]
 		}
-		if err := e.mbEncode(ids); err != nil {
+		var err error
+		if d.kind == jlm.DecisionD1Omni {
+			err = e.lfm2Encode(ids, nil)
+		} else {
+			err = e.mbEncode(ids)
+		}
+		if err != nil {
 			return err
 		}
 		out := d.variantScores(0, len(marks))
