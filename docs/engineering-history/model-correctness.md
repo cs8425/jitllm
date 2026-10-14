@@ -9651,6 +9651,60 @@ away (`TestD1OmniDecidesOverPicturesAsItsReference`). The prefix length and
 the prompt after it are exact. Letting the prefix read the text moves a logit
 0.91, and swapping the two pictures 1.53.
 
+#### d1-omni's voice: the first audio tower
+
+The mmproj's audio half (`d1omni_a`) is audio.py's: NeMo's log-mel front
+end, an 8x convolutional subsampling, 17 FastConformer blocks and an adapter
+with a residual correction. It is carried as tower blocks after the vision
+blocks in the one tower page array (`jlm.Audio`, an optional tail of the
+Vision record, so a container with no audio is the bytes it was). The
+converter reads what the file states and writes what audio.py hardcodes
+(16 kHz, a 512-point transform of 400-sample windows every 160); it cuts
+pointwise_conv1 into the GLU's halves, makes the depthwise convolutions
+tap-major, and reorders the subsampling's output matrix to read its 4096
+inputs channel-last, the layout the engine's activations take.
+
+On the host every product is the generated matmul and every elementwise step
+a generated kernel:
+
+- the |STFT|^2 is two matmuls of the centred frames (one strided copy)
+  against the Hann-windowed cos and sin bases, built once at load; the mel
+  filterbank is librosa's Slaney one, transcribed; the log is a new
+  elementwise kernel (`nn.Ln32JIT`, the log-softmax's ln on every lane, on
+  AVX2, SSE and NEON); each feature's normalising scale is one scalar from
+  the generated sums;
+- the subsampling's first convolution is nine strided copies and a matmul,
+  its depthwise ones the tower's existing depthwise rows (`DWConvRow`), each
+  layer's input cut at the frames still valid, and only the valid rows go on:
+  the conformer's mask is exactly that cut, and a relative position does not
+  depend on the length;
+- the relative-position term of row i is the score kernel over the projected
+  position table read from row t-1-i, so the reference's rel-shift is an
+  offset, not a gather;
+- the convolution module's depthwise convolution is its taps' shifted
+  multiply-adds, BatchNorm folded into a scale and a shift by the converter.
+
+A voice clip arrives as a data:audio WAV in "files" (16 kHz mono 16-bit PCM;
+any other is refused, the engine does not resample), at most one and never
+beside a picture, as llama.cpp's server takes it. The prompt after it is
+written as the audio questions were trained (a choice's options as
+`option_000: <description>`, a noul as plain no and yes, a null state as
+{}), cut to audio_text_length (15360), with no temperature.
+
+Against audio.py with the F16-rounded weights (`TestD1OmniHearsAsItsReference`,
+on the repo's 3.3-second clip): the log-mel features 1.7e-6 off, the 41
+prefix rows at NMSE 1.2e-4 (the tower at Q8_0), the prompt token for token,
+the logits 0.039 and the probabilities 0.012 away. Removing the
+relative-position term moves the answers 0.32, the convolution module 0.63,
+writing the questions as text 0.11 (`TestD1OmniAudioFeaturesAreLoadBearing`);
+a warm clip's encoding allocates nothing. llama.cpp's d1-omni server reads
+the same 251 positions and answers within 0.012
+(`TestD1OmniVoiceMatchesLlamaCpp`).
+
+The audio tower runs on the host: its blocks are not offered to a device yet
+-- the relative-position score and the subsampling's convolutions have no
+device plan -- and that is the next piece of work, not a design.
+
 ## qwen4exp: Qwen3.8-Flash-Next (plan, before the code)
 
 The graph, read off llama.cpp's `src/models/qwen4exp.cpp` and its converter

@@ -1319,6 +1319,8 @@ type Model struct {
 	// tower is the vision tower, nil for a container with no vision section.
 	// It shares this model's container, budget and pager.
 	tower *Tower
+	// audio is the container's audio tower (audio.go), nil without one.
+	audio *audioTower
 	// imgCache is the vision segment's output rows by picture (imagekey.go),
 	// shared by every State of the model.
 	imgCache imageCache
@@ -1649,6 +1651,10 @@ func openContainer(path string, options ...Option) (*Model, error) {
 		}
 		m.tower = tw
 		m.imgCache.budget = defaultImageCache
+		if m.audio, err = buildAudio(c, m); err != nil {
+			c.Close()
+			return nil, err
+		}
 		if tw.mn != nil && tw.mn.hard != nil {
 			m.hardEmbd = tw.mn.hardRows(m.Cfg.EmbdScale)
 		}

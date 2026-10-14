@@ -26,15 +26,22 @@ var d1OmniDelims = [...]string{"<|reserved_7|>", "<|reserved_8|>", "<|reserved_9
 	"<|reserved_11|>", "<|mask|>"}
 
 // d1OmniMaxLen is the text's room: the reference's max_length, the
-// container's context, less a picture prefix and cut to image_text_length
-// when there is one.
+// container's context, less a media prefix and cut to image_text_length
+// after pictures, audio_text_length after a voice clip.
 func (d *Decider) d1OmniMaxLen() int {
 	p := len(d.omniPre) / d.m.Cfg.NEmbd
-	if p == 0 {
+	switch {
+	case p == 0:
 		return d.m.Cfg.NCtx
+	case d.omniSpoken:
+		return min(d1OmniAudioText, d.m.Cfg.NCtx-p)
 	}
 	return min(d1OmniImageText, d.m.Cfg.NCtx-p)
 }
+
+// d1OmniAudioText is the reference's audio_text_length (D1OmniConfig's
+// default; the GGUF does not carry it).
+const d1OmniAudioText = 15360
 
 // d1OmniSequence is one question's ids and the position of each option's
 // marker, in the order the model reads them (a noul false first).
@@ -54,7 +61,7 @@ func (d *Decider) d1OmniSequence(state jinja.Value, q *DecisionQuestion, maxLen 
 		return nil, nil, fmt.Errorf("the vocabulary has no BOS")
 	}
 	enc := func(s string) []int32 { return v.EncodeSpecial(d1OmniEscape(s), false) }
-	opts := d1OmniOptions(q, len(d.omniPre) > 0)
+	opts := d1OmniOptions(q, len(d.omniPre) > 0, d.omniSpoken && d.violation != "unspoken")
 	k := len(opts)
 	budget := max(96, min(k*24+32, maxLen/2))
 	per := max(2, (budget-3*k)/k)
@@ -136,13 +143,23 @@ func d1OmniCriterion(v jinja.Value) string {
 
 // d1OmniOptions is prompt.render_options: a noul as [false, true], with its
 // default wording where the request gives none -- after pictures the
-// reference's YES_NO, "no" and "yes".
-func d1OmniOptions(q *DecisionQuestion, yesNo bool) []string {
+// reference's YES_NO, "no" and "yes". After a voice clip (spoken) the
+// options are written as the audio questions were trained: a choice's as
+// "option_000: <its description, or its name>", a noul as plain no and yes.
+func d1OmniOptions(q *DecisionQuestion, yesNo, spoken bool) []string {
 	out := make([]string, len(q.Options))
 	for i, o := range q.Options {
 		desc := o.Description
 		empty := desc.IsUndefined() || desc.IsNone() || (desc.IsString() && desc.AsString() == "")
 		switch {
+		case spoken && q.Type == jlm.QuestionChoice && empty:
+			out[i] = fmt.Sprintf("option_%03d: %s", i, o.Key)
+		case spoken && q.Type == jlm.QuestionChoice:
+			out[i] = fmt.Sprintf("option_%03d: %s", i, d1OmniCriterion(desc))
+		case spoken && q.Type == jlm.QuestionNoul && o.Key == "true":
+			out[i] = "true: yes"
+		case spoken && q.Type == jlm.QuestionNoul:
+			out[i] = "false: no"
 		case q.Type == jlm.QuestionChoice && empty:
 			out[i] = o.Key
 		case q.Type == jlm.QuestionChoice:
@@ -218,4 +235,61 @@ func (d *Decider) d1OmniPrefix(imgs []image.Image) error {
 			len(d.omniPre)/d.m.Cfg.NEmbd, d.m.Cfg.NCtx)
 	}
 	return nil
+}
+
+// d1OmniSamples is a clip as audio.waveform makes it: cut to 30 seconds,
+// padded with silence to half of one.
+func (d *Decider) d1OmniSamples(clip []float32) []float32 {
+	a := d.m.audio
+	sr := int(a.cfg.SampleRate)
+	n := min(len(clip), 30*sr)
+	buf := growA(&d.omniClip, max(n, sr/2))
+	clear(buf)
+	copy(buf, clip[:n])
+	return buf
+}
+
+// DecideAudio is Decide over a voice clip (d1-omni): one clip of 16 kHz mono
+// samples in [-1, 1], encoded once into the prompt's prefix; the questions
+// written as its audio questions were trained, a null state as {} and no
+// temperature.
+func (d *Decider) DecideAudio(state jinja.Value, qs []DecisionQuestion, clip []float32) ([]DecisionAnswer, error) {
+	if d.kind != jlm.DecisionD1Omni {
+		return nil, fmt.Errorf("this model reads no audio; a request with a voice clip needs d1-omni")
+	}
+	if d.m.audio == nil {
+		return nil, fmt.Errorf("this container carries no audio encoder; convert the model with its mmproj " +
+			"(jitllm convert model.gguf mmproj.gguf out.jlm)")
+	}
+	if len(clip) == 0 {
+		return nil, fmt.Errorf("the audio clip is empty")
+	}
+	if state.IsNone() || state.IsUndefined() {
+		state = jinja.NewDict()
+	}
+	if err := d.Prepare(state, qs, 0); err != nil {
+		return nil, err
+	}
+	rows, err := d.emb.encodeAudio(d.d1OmniSamples(clip))
+	if err != nil {
+		return nil, err
+	}
+	d.omniPre = append(d.omniPre[:0], rows...)
+	d.omniSpoken = true
+	defer func() { d.omniPre, d.omniSpoken = d.omniPre[:0], false }()
+	if d.d1OmniMaxLen() < 64 {
+		return nil, fmt.Errorf("the audio takes %d of the %d positions", len(rows)/d.m.Cfg.NEmbd, d.m.Cfg.NCtx)
+	}
+	d.input = 0
+	out := make([]DecisionAnswer, len(qs))
+	for i := range qs {
+		s, err := d.run(state, &qs[i], 0)
+		if err != nil {
+			return nil, fmt.Errorf("questions.%s: %w", qs[i].ID, err)
+		}
+		if out[i], err = d.answer(&qs[i], [][]float32{s}); err != nil {
+			return nil, fmt.Errorf("questions.%s: %w", qs[i].ID, err)
+		}
+	}
+	return out, nil
 }
