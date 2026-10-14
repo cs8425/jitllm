@@ -282,6 +282,10 @@ type Config struct {
 	// kernels.FlashPrefillTile on Metal -- the other arm of those kernels'
 	// gates and measurements.
 	NoFlashPrefill bool
+	// NoRagPrefill keeps a ragged step's prompt chunks on the decode plan, a
+	// row at a time, instead of the run-table flash prefill
+	// (raggedprefill.go) -- the other arm of its gates and measurements.
+	NoRagPrefill bool
 	// SpillingTiles lets the batched GEMM run a tile whose kernel spills
 	// registers to local memory. By default a tile the device's compiler
 	// reports spilling (backend.KernelResources.SpillBytes) is passed over
@@ -990,6 +994,10 @@ type Stats struct {
 	// kernels.FlashPrefill80, scores, softmax and accumulate in one kernel
 	// on m16n8k16 (sm_80 on).
 	FlashPrefill80 int
+	// RagPrefills counts run-table prefill launches inside ragged steps
+	// (raggedprefill.go): the selection check that a step's prompt chunks
+	// attended as a prefill rather than through the decode plan.
+	RagPrefills int
 	// PagedPrefillPasses counts the passes those launches ran over a history
 	// longer than one launch attends -- the selection check for the fold.
 	PagedPrefillPasses int
@@ -1298,6 +1306,7 @@ func (s *Stats) add(o Stats) {
 	s.PagedPrefill70 += o.PagedPrefill70
 	s.PagedAccMMA += o.PagedAccMMA
 	s.FlashPrefill80 += o.FlashPrefill80
+	s.RagPrefills += o.RagPrefills
 	s.PagedPrefillPasses += o.PagedPrefillPasses
 	s.EmbedLaunches += o.EmbedLaunches
 	s.HeadFolds += o.HeadFolds

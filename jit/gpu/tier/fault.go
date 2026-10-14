@@ -117,6 +117,8 @@ func recFaulted(f string) bool { return recFault == f }
 //	"nope"     a ragged step rotates the layers Llama 4 leaves unrotated
 //	"notemp"   a ragged step skips Llama 4's attention temperature
 //	"nowin"    a ragged step's windowed or chunked layers attend every key
+//	"ragtab"   a ragged step's run-table prefill reads its rows' keys through
+//	          the decode descriptors, where those rows are empty
 var rowsFault string
 
 // SetRowsFault arms one violation for the calls after it; "" disarms.

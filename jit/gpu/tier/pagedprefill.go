@@ -51,6 +51,11 @@ type pagedPrefill struct {
 	// flash is the one-kernel form, and fmerge its merge where the plan has
 	// sinks (the kernel's one split writes partials; the merge adds the sink).
 	flash, fmerge backend.Kernel
+	// fs is the flash forms' shape, k8 that the flash is FlashPrefill80K8,
+	// and ragK the run-table form by slot count (raggedprefill.go).
+	fs   kernels.FlashPrefill70Shape
+	k8   bool
+	ragK map[int]backend.Kernel
 	// flash80 says flash is kernels.FlashPrefill80, the m16n8k16 form, or
 	// its m16n8k8 twin on sm_75 (FlashPrefill80K8).
 	flash80         bool
@@ -137,6 +142,7 @@ func (g *devTier) initPagedPrefill(bs *blockScratch) error {
 	if p.AttnSinks {
 		fs.Splits = 1
 	}
+	pf.fs = fs
 	// The flash forms and the m16n8k16 scores read no latent row (MLA): the
 	// FMA tiles and sm_70's pair do.
 	if !g.NoFlashPrefill && !p.MLA() {
@@ -161,7 +167,7 @@ func (g *devTier) initPagedPrefill(bs *blockScratch) error {
 			// the k16 form's. A width it does not divide keeps sm_70's pair.
 			if pf.flash = comp(kernels.FlashPrefill80K8(fs)); pf.flash != nil {
 				pf.fGroups, pf.fWidth = kernels.FlashPrefill80Groups(fs), kernels.FlashPrefill80Threads
-				pf.flash80 = true
+				pf.flash80, pf.k8 = true, true
 			}
 		case g.tileF32():
 			// The collective tiles where they lower and FlashPrefill80 does
@@ -422,6 +428,9 @@ func (pf *pagedPrefill) free() {
 		if k != nil {
 			closeKern(k)
 		}
+	}
+	for _, k := range pf.ragK {
+		closeKern(k)
 	}
 	bufs := []backend.Buf{pf.sc, pf.wt, pf.part, pf.run[0], pf.run[1], pf.buf[0], pf.buf[1]}
 	bufs = append(append(bufs, pf.pass[0]...), pf.pass[1]...)

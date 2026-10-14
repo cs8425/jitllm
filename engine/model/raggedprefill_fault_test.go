@@ -1,0 +1,142 @@
+//go:build jitllmfault
+
+package model
+
+import (
+	"fmt"
+	"os"
+	"testing"
+
+	"github.com/jitllm/jitllm/internal/testmodels"
+	"github.com/jitllm/jitllm/jit/gpu/tier"
+)
+
+// TestRaggedStepAttendsAsAPrefill holds a batch session's prompt chunks,
+// attended through the run table's flash prefill (tier raggedprefill.go,
+// docs/design/ragged-prefill.md), to each prompt's own prefill on the same
+// device: each sequence's first-token logits in the device band. The launches
+// must have been the run table's (Stats.RagPrefills), the decode-plan arm
+// (Config.NoRagPrefill) is held to the same band as the control, and the
+// violation -- the table's rows reading their keys through the emptied
+// descriptors (rows fault "ragtab") -- must part.
+func TestRaggedStepAttendsAsAPrefill(t *testing.T) {
+	path := testmodels.Path("lfm2/LFM2-350M-Q4_K_M.jlm")
+	if _, err := os.Stat(path); err != nil {
+		testmodels.Missing(t, "MODEL MISSING: %v (set JITLLM_MODELS) (RULE 11)", err)
+	}
+	m, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	vocab := min(m.Cfg.NVocab, 30000)
+	prompts := [][]int32{linPrompt(130, vocab), linPrompt(170, vocab)[3:], linPrompt(90, vocab)[5:]}
+	const seq = 400
+	open := func(t *testing.T, noRag bool) *tier.GPU {
+		o := append(testTierOpts(t), tier.WithDeviceTune(tier.TuneOff),
+			tier.WithConfig(func(c *tier.Config) { c.NoRagPrefill = noRag }))
+		if v := os.Getenv("JITLLM_TEST_DEVICES"); v != "" {
+			o = append(o, tier.WithDevices(v))
+		}
+		g, err := tier.OpenWith(o...)
+		if err != nil || g == nil {
+			noDevice(t, "device", err)
+		}
+		return g
+	}
+	place := func(t *testing.T, st *State, g *tier.GPU) {
+		if err := st.SetDeviceLayers(g, -1); err != nil || st.GPULayers() != m.Cfg.NLayer {
+			t.Fatalf("%v: %d of %d blocks placed: %s", err, st.GPULayers(), m.Cfg.NLayer, g.Err())
+		}
+	}
+	// Each prompt alone on the device: the reference.
+	g := open(t, false)
+	defer g.Close()
+	want := make([][]float32, len(prompts))
+	for i, p := range prompts {
+		st := m.NewState(seq)
+		place(t, st, g)
+		lg, err := st.Prefill(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[i] = append([]float32(nil), lg...)
+		st.Close()
+	}
+	// The run table is FlashPrefill80's form so far; a device whose prefill
+	// runs another form keeps the decode plan in ragged steps.
+	if g.Stats().FlashPrefill80 == 0 {
+		t.Skipf("%s's prefill is not FlashPrefill80's, the one form with a run table yet: this gate proved nothing here", g.Name())
+	}
+	batch := func(t *testing.T, g *tier.GPU, fault string) ([][]float32, tier.Stats) {
+		sc := NewScheduler(m, len(prompts), seq)
+		defer sc.Close()
+		place(t, sc.st, g)
+		got := make([][]float32, len(prompts))
+		seqs := make([]Seq, len(prompts))
+		for i := range seqs {
+			seqs[i] = Seq{Prompt: prompts[i], MaxTokens: 1, Sample: func(lg []float32) int32 {
+				got[i] = append([]float32(nil), lg...)
+				return 0
+			}}
+			sc.Submit(&seqs[i])
+		}
+		tier.SetRowsFault(fault)
+		defer tier.SetRowsFault("")
+		s0 := g.Stats()
+		for sc.Pending() > 0 || sc.Live() > 0 {
+			done, err := sc.Step()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range done {
+				if s.Err != nil {
+					t.Fatal(s.Err)
+				}
+			}
+		}
+		s1 := g.Stats()
+		s1.RagPrefills -= s0.RagPrefills
+		return got, s1
+	}
+	worst := func(got [][]float32) float64 {
+		w := 0.0
+		for i := range want {
+			w = max(w, logitNMSE(want[i], got[i]))
+		}
+		return w
+	}
+	// The band is the batch step's other reduction orders (its GEMMs are
+	// the row kernels, not the prefill's tiles): the decode-plan control
+	// reads 2.9e-3 on an sm_86 card, the run table the same.
+	const band = 1e-2
+	got, st := batch(t, g, "")
+	if st.RagPrefills == 0 {
+		t.Fatal("no run-table launch: the ragged step's chunks never attended as a prefill")
+	}
+	e := worst(got)
+	t.Logf("run table: %d launches, NMSE %.3g", st.RagPrefills, e)
+	if e > band {
+		t.Fatalf("the run table's batch against each prompt alone: NMSE %.3g (band %g)", e, band)
+	}
+	msg := fmt.Sprintf("%d run-table launches; NMSE %.3g against each alone", st.RagPrefills, e)
+
+	gc := open(t, true)
+	defer gc.Close()
+	got, st = batch(t, gc, "")
+	if st.RagPrefills != 0 {
+		t.Fatalf("NoRagPrefill still launched the run table %d times", st.RagPrefills)
+	}
+	ec := worst(got)
+	t.Logf("decode-plan control: NMSE %.3g", ec)
+	if ec > band {
+		t.Fatalf("the decode-plan control against each prompt alone: NMSE %.3g (band %g)", ec, band)
+	}
+	got, _ = batch(t, g, "ragtab")
+	ev := worst(got)
+	t.Logf("violation: NMSE %.3g", ev)
+	if ev < 10*band {
+		t.Fatalf("the violation (the table's rows reading the emptied descriptors) moved the logits only %.3g", ev)
+	}
+	t.Logf("%s; the decode-plan control %.3g", msg, ec)
+}
