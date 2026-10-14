@@ -332,6 +332,11 @@ type LoadedModel struct {
 	decMu     sync.Mutex
 	dec       *model.Decider
 	decClosed bool
+	// decQ is the decisions waiting for the Decider, guarded by decQMu;
+	// decBatchMax the most requests one batch has answered.
+	decQMu      sync.Mutex
+	decQ        []*decJob
+	decBatchMax atomic.Int64
 
 	tokensGenerated atomic.Int64
 	tokensPrefilled atomic.Int64
@@ -2338,6 +2343,9 @@ func (e *Engine) MoveBlocks(ctx context.Context, s *Session, first, last int, to
 	}
 	s.move = r
 	s.moveMu.Unlock()
+	// The pool's States are no sequence's, and would keep the blocks where
+	// they are (dropIdle).
+	e.dropIdle(s.lm)
 	tick := time.NewTicker(2 * time.Millisecond)
 	defer tick.Stop()
 	for {

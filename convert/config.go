@@ -33,10 +33,14 @@ var archOf = map[string]jlm.Arch{
 	// the interleaved M-RoPE is exactly NEOX for a text prompt. See qwen35Of.
 	"qwen35":    jlm.ArchQwen3Next,
 	"qwen35moe": jlm.ArchQwen3Next,
-	"qwen2vl":   jlm.ArchQwen2VL,
-	"gemma2":    jlm.ArchGemma2,
-	"gemma3":    jlm.ArchGemma3,
-	"gpt-oss":   jlm.ArchGPTOSS,
+	// Clef-Flash: Qwen3.5-9B's text model under another name, with a joint
+	// schema head after it that the decision readout reads (decisionOf,
+	// jlm.DecisionClef).
+	"clef":    jlm.ArchQwen3Next,
+	"qwen2vl": jlm.ArchQwen2VL,
+	"gemma2":  jlm.ArchGemma2,
+	"gemma3":  jlm.ArchGemma3,
+	"gpt-oss": jlm.ArchGPTOSS,
 	// DeepSeek-V2/V3/R1, Kimi-K2 and Moonlight-16B-A3B. Not GLM: see
 	// jlm.ArchDeepseek2 for which GLM is this graph and which is not.
 	"deepseek2": jlm.ArchDeepseek2,
@@ -1097,6 +1101,7 @@ var projectorOf = map[string]jlm.Projector{
 	"hunyuanvl":        jlm.ProjHunyuanVL,
 	"kimivl":           jlm.ProjKimiVL,
 	"qwen3vl_merger":   jlm.ProjQwen3VL,
+	"lfm2":             jlm.ProjLFM2,
 }
 
 // Projectors is every name in that list, sorted.
@@ -1234,6 +1239,31 @@ func visionOf(f *meta.File) (*jlm.Vision, error) {
 		if v.MinPixels == 0 || v.MaxPixels < v.MinPixels {
 			return nil, fmt.Errorf("convert: clip: phi4 states image_min_pixels %d and "+
 				"image_max_pixels %d; a picture read at its own size needs both", v.MinPixels, v.MaxPixels)
+		}
+	case jlm.ProjLFM2:
+		// LFM2-VL's (and d1's): SigLIP2's NaFlex tower with its
+		// post-LayerNorm, the pixel unshuffle the file states, an optional
+		// LayerNorm and mm.1, GELU, mm.2. The tiling is Lfm2VlImageProcessor's,
+		// which the file does not state and llama.cpp hardcodes: the class's
+		// defaults, 64 to 256 tokens a piece, 2 to 10 tiles of 512 pixels
+		// past twice the token budget. The resampling filter is the file's
+		// image_resize_algo, bilinear (the class default) when absent.
+		last = "mm.2.weight"
+		v.Scale = uint32(f.UintKey("vision.projector.scale_factor", 2))
+		if v.Scale == 0 || v.PatchSize == 0 || v.ImageSize%v.PatchSize != 0 {
+			return nil, fmt.Errorf("convert: clip: lfm2 with a %d merge over %d-pixel patches of a %d table",
+				v.Scale, v.PatchSize, v.ImageSize)
+		}
+		unit := v.PatchSize * v.Scale * v.PatchSize * v.Scale
+		v.MinTiles, v.MaxTiles = 2, 10
+		v.MinPixels, v.MaxPixels = 64*unit, 256*unit
+		v.TileSize, v.Tolerance = 512, 2
+		switch algo, _ := f.KV["clip.vision.image_resize_algo"].String(); algo {
+		case "", "bilinear":
+		case "bicubic":
+			v.Flags |= jlm.FlagVisionBicubic
+		default:
+			return nil, fmt.Errorf("convert: clip: lfm2 resamples %q, which is not implemented: %w", algo, ErrNotImplemented)
 		}
 	case jlm.ProjGemma4V:
 		// Gemma 4's tower. llama.cpp's graph scales the [0, 1] pixels to

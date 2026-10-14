@@ -3,7 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
-	"sync"
+	"github.com/jitllm/jitllm/jit/gpu/kernels"
 	"time"
 
 	"github.com/jitllm/jitllm/engine/nn"
@@ -340,12 +340,7 @@ func (s *State) prefillInto(slot int, tokens []int32) ([]float32, error) {
 	if slot == 0 {
 		s.kv.note(s.seqPos(0), tokens...)
 	}
-	src := make([]func(dst []float32) error, len(tokens))
-	for i, id := range tokens {
-		id := id
-		src[i] = func(dst []float32) error { return s.embedInto(dst, id) }
-	}
-	return s.prefillSrc(slot, src, tokens, nil)
+	return s.prefillSrc(slot, nil, tokens, nil)
 }
 
 // ErrPrefillInterrupted is a prefill stopped between chunks because its
@@ -370,7 +365,13 @@ func (s *State) SetPrefillInterrupt(f func() bool) { s.interrupt = f }
 // like text (ropeOf).
 func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int32, rp [][4]int) ([]float32, error) {
 	m, c := s.m, s.c
-	if len(src) == 0 {
+	// src nil: every row is a vocabulary lookup of ids, with no function a
+	// row (prefillInto), so a warm prompt makes no closure per token.
+	total := len(src)
+	if src == nil {
+		total = len(ids)
+	}
+	if total == 0 {
 		return nil, errEmptyPrompt{}
 	}
 	// Every row's token for what reads it past the embedding (per-layer
@@ -380,21 +381,20 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 	if rowIDs == nil {
 		rowIDs = s.spanTok
 	}
-	s.relocateFresh(len(src))
+	s.relocateFresh(total)
 	// One token is decode; the batched path would allocate megabytes to beat
 	// it by nothing. Single-sequence only, because Forward writes row 0; a
 	// batch slot takes the chunked path at any length.
-	if !s.batched && len(src) == 1 && s.emb == nil && len(s.deep) == 0 {
+	if !s.batched && total == 1 && s.emb == nil && len(s.deep) == 0 {
 		var lg []float32
 		var err error
 		s.tok = -1
 		if rowIDs != nil {
 			s.tok = rowIDs[0]
 		}
-		for _, fill := range src {
-			fill := fill
+		for i := range total {
 			if lg, err = s.forward(func() error {
-				if err := fill(s.x); err != nil {
+				if err := s.fillRow(src, ids, i, s.x); err != nil {
 					return err
 				}
 				s.m.trace(-1, "embd", s.x)
@@ -413,7 +413,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 		}
 		return lg, nil
 	}
-	if s.seqPos(slot)+len(src) > s.maxSeq {
+	if s.seqPos(slot)+total > s.maxSeq {
 		return nil, errFull{s.maxSeq, s.reqSeq}
 	}
 	// A bidirectional embedding run is one chunk: no row's attention exists
@@ -423,18 +423,18 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 	// A speculation step that wants more than its last row's outputs runs as
 	// one chunk: the rows it wants are read out of the last chunk's residual,
 	// and a verification is a handful of rows.
-	spanAll := s.rows != nil && s.rows.from < len(src)-1
+	spanAll := s.rows != nil && s.rows.from < total-1
 	if bidir || spanAll {
-		chunkCap = len(src)
+		chunkCap = total
 	}
-	chunkRows := min(chunkCap, len(src))
+	chunkRows := min(chunkCap, total)
 	if s.allOnDevice() {
 		s.growDeviceBatch(chunkRows)
 	} else {
 		s.growBatch(chunkRows)
 	}
 	if c.MoE() {
-		if w := min(chunkCap, len(src)) * c.NExpertUsed; len(s.bsel) < w {
+		if w := min(chunkCap, total) * c.NExpertUsed; len(s.bsel) < w {
 			s.bsel = make([]int32, w)
 			s.bw = make([]float32, w)
 		}
@@ -457,12 +457,12 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 	// The prompt's host blocks may stream through the device for it
 	// (prefillstream.go): measured on its first two chunks, undone after the
 	// last.
-	chunks := (len(src) + nn.MaxDevicePrefillChunk - 1) / nn.MaxDevicePrefillChunk
+	chunks := (total + nn.MaxDevicePrefillChunk - 1) / nn.MaxDevicePrefillChunk
 	// Not with a bidirectional run either: a streamed block runs on the device
 	// without being told of it.
 	ps := s.newPrefillStreamer(chunks, bidir || len(s.bidir) > 0)
 	defer func() { ps.finish(s.seqPos(slot)) }()
-	for base := 0; base < len(src); {
+	for base := 0; base < total; {
 		if s.interrupt != nil && s.interrupt() {
 			return nil, ErrPrefillInterrupted
 		}
@@ -471,7 +471,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 		// chunks deliberately use different widths.
 		width := s.jit.PrefillChunk()
 		if bidir || spanAll {
-			width = len(src)
+			width = total
 		}
 		// Snapped to the page boundary when a hybrid is being cached: a
 		// recurrent summary exists for a boundary only at the instant the
@@ -497,10 +497,10 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 				width = min(width, nn.MaxDevicePrefillChunk)
 			}
 		}
-		n := min(width, len(src)-base)
+		n := min(width, total-base)
 		// A bidirectional run is never cut (bidir.go).
 		if len(s.bidir) > 0 && !s.bidirCutFault {
-			n = min(s.bidirChunk(s.seqPos(slot), n), len(src)-base)
+			n = min(s.bidirChunk(s.seqPos(slot), n), total-base)
 		}
 		chunkBidir := s.bidirIn(s.seqPos(slot), n)
 		lastBase = base
@@ -523,21 +523,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 					return nil
 				}
 			}
-			var mu sync.Mutex
-			var first error
-			s.jit.Parallel(n, max(1, n/(4*s.jit.Workers())), func(lo, hi int) {
-				for i := lo; i < hi; i++ {
-					if err := src[base+i](s.bx[i*c.NEmbd : (i+1)*c.NEmbd]); err != nil {
-						mu.Lock()
-						if first == nil {
-							first = err
-						}
-						mu.Unlock()
-						return
-					}
-				}
-			})
-			return first
+			return s.embedRun(src, ids, base, n)
 		}
 		// Gemma 4's per-layer inputs are built from each row's token and its
 		// embedding, inside refill for the same reason.
@@ -680,7 +666,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 					continue
 				}
 				var fh *nn.Head
-				if li == s.lo && hi == s.hi && base+n == len(src) && s.emb == nil && s.head != nil && !s.noHeadFold &&
+				if li == s.lo && hi == s.hi && base+n == total && s.emb == nil && s.head != nil && !s.noHeadFold &&
 					!c.streamHead() {
 					fh = s.head
 					// A speculation step folds the head only over the rows it
@@ -879,19 +865,19 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 		// AltUp's head reads every stream of the row: collapsed in place, the
 		// chunk's rows' stream 0 is their head input, and the last row's is
 		// s.x's (altup.go).
-		if c.AltUp != 0 && base+n == len(src) {
+		if c.AltUp != 0 && base+n == total {
 			if err := s.altCollapse(s.bx[:n*c.ResidW()], n); err != nil {
 				return nil, err
 			}
 			copy(s.x, s.bx[(n-1)*c.NEmbd:n*c.NEmbd])
 		}
-		if c.DSV4() && base+n == len(src) {
+		if c.DSV4() && base+n == total {
 			if err := s.ds4Collapse(s.bx[:n*c.ResidW()], n); err != nil {
 				return nil, err
 			}
 			copy(s.x, s.bx[(n-1)*c.NEmbd:n*c.NEmbd])
 		}
-		if c.ResAttn() && base+n == len(src) {
+		if c.ResAttn() && base+n == total {
 			if err := s.k3Collapse(s.bx[:n*c.ResidW()], n); err != nil {
 				return nil, err
 			}
@@ -912,7 +898,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 	}
 
 	if s.rows != nil {
-		return nil, s.finishRows(headDone, lastBase, len(src))
+		return nil, s.finishRows(headDone, lastBase, total)
 	}
 	// Only the final token needs logits; the earlier positions exist to fill
 	// the KV cache. The head runs on the device where the device holds it, as
@@ -951,6 +937,12 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 	}
 	s.norm(s.h, s.x, s.outNorm, m.outNormB)
 	s.jit.NewInput()
+	if s.pickOnHost() {
+		if err := s.kvCheck(); err != nil {
+			return nil, err
+		}
+		return s.logits, nil
+	}
 	if err := s.mv(s.logits, *s.outW, s.h); err != nil {
 		return nil, err
 	}
@@ -1446,63 +1438,15 @@ attend:
 				masks, mstride = s.qsa().masks, 0
 				s.qsaRows(kvli, l, n, func(int) (*State, int) { return s, slot }, func(i int) int { return p0 + i + 1 }, masks)
 			}
-			s.jit.Parallel(n, 1, func(lo, hi int) {
-				for i := lo; i < hi; i++ {
-					pos := p0 + i
-					out := bxb[i*qDim : (i+1)*qDim]
-					if !mla {
-						for j := range out {
-							out[j] = 0
-						}
-					}
-					qfi := qsrc[i*c.NHead*qw : (i+1)*c.NHead*qw]
-					ofi := odst[i*c.NHead*ow : (i+1)*c.NHead*ow]
-					for hh := 0; hh < c.NHead; hh++ {
-						qh := qfi[hh*qw : (hh+1)*qw]
-						if !mla {
-							copy(qh, bq[i*qDim+hh*hd:])
-						}
-						kvh := hh / gqaN
-						// The same generated kernels and sliding window decode
-						// uses, so Prefill and Forward compute the same
-						// attention.
-						w0, an := c.AttnWindow(li, pos)
-						// A row of a bidirectional run sees keys to the
-						// run's end; the window still starts where the
-						// row's own position puts it.
-						if e := s.bidirEnd(pos); e > 0 && (!c.BidirSWA || c.SWA(li)) {
-							an = e - w0
-						}
-						if bidir {
-							// Every position of the sequence, before
-							// this one and after it.
-							w0, an = 0, p0+n
-							if c.SWA(li) {
-								w0, an = symmetricWindow(pos, p0+n, c.SWAWindow)
-							}
-						}
-						af := attf[i*astride : i*astride+an]
-						s.kvScores(fast, kvli, slot, kvh, qh, af, w0, an)
-						// Llama 4's temperature is per row: it steps with
-						// the position.
-						s.scale(af, float32(scale*c.AttnTemp(li, pos)))
-						softcap(af, c.AttnSoftcap)
-						if masks != nil && masks[i] != nil {
-							s.idxApply(af, masks[i][kvh*mstride:], w0)
-						}
-						s.softmaxSink(af, l.sinks, hh)
-						oh := ofi[hh*ow : (hh+1)*ow]
-						s.kvAcc(fast, kvli, slot, kvh, oh, af, w0, an)
-						// MLA's result stays in bmlaAcc, where the un-absorb
-						// reads it.
-						if !mla {
-							for x, v := range oh {
-								out[hh*hd+x] = v
-							}
-						}
-					}
-				}
-			})
+			s.rg.pattn = prefAttnRegion{l: l, li: li, kvli: kvli, slot: slot, p0: p0, n: n,
+				qDim: qDim, qw: qw, ow: ow, hd: hd, gqa: gqaN, astride: astride, mstride: mstride,
+				mla: mla, bidir: bidir, scale: scale, bq: bq, bxb: bxb, qsrc: qsrc, odst: odst,
+				attf: attf, masks: masks, fast: fast, fn: s.rg.pattn.fn}
+			if s.rg.pattn.fn == nil {
+				s.rg.pattn.fn = s.prefAttnRows
+			}
+			s.jit.Parallel(n, 1, s.rg.pattn.fn)
+			s.rg.pattn = prefAttnRegion{fn: s.rg.pattn.fn}
 
 			s.tock(opAttn, ta)
 		}
@@ -1668,4 +1612,46 @@ attend:
 	}
 	s.layerOutScale(l, s.bx[:n*c.NEmbd])
 	return nil
+}
+
+// pickOnHost is the label pick on the host (State.HostPick): the projection
+// at the picked rows alone, each a one-row view of the packed head through
+// the generated matvec, where the whole vocabulary was projected for a
+// handful of ids -- on Lev, 248320 rows of Q8_0 read for nine. It reads the
+// normed row in s.h and leaves s.logits as it was, so a caller that picked
+// reads HostPickVals. False, with nothing done, where the pick does not
+// apply: no pick asked, a head the generated matvec does not read packed, or
+// a model that adjusts its logits after the head (a bias, a final softcap or a
+// logit scale), which the picked values would have to take too.
+func (s *State) pickOnHost() bool {
+	s.HostPicked = false
+	w := s.outW
+	if len(s.HostPick) == 0 || len(s.HostPickVals) < len(s.HostPick) || w.packed == nil || s.m.outB != nil ||
+		s.c.FinalSoftcap != 0 || s.c.LogitScale != 1 {
+		return false
+	}
+	// A narrow format packs DSlots rows' scales in a word, so a view starts
+	// on a word: the slot's rows are projected and the one asked kept.
+	sl := 1
+	if q, ok := kernels.QuantOf(w.typ); ok {
+		sl = max(kernels.DSlots(q), 1)
+	}
+	var tmp [8]float32
+	if sl > len(tmp) {
+		return false
+	}
+	for j, id := range s.HostPick {
+		lo := int(id) - int(id)%sl
+		if id < 0 || lo+sl > w.rows {
+			return false
+		}
+		v := *w.packed
+		v.Stride, v.Row = max(v.Stride, w.rows), v.Row+lo
+		if !s.jit.MatVecPacked(tmp[:sl], w.typ, &v, s.h, sl, w.k) {
+			return false
+		}
+		s.HostPickVals[j] = tmp[int(id)-lo]
+	}
+	s.HostPicked = true
+	return true
 }

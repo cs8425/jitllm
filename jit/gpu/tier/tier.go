@@ -494,6 +494,9 @@ type Config struct {
 	// replaying a captured graph: the other arm of that comparison, a field so
 	// both arms can be live in one process.
 	NoGraph bool
+	// NoPickMV runs the label pick as the head's whole matvec and a gather
+	// (the arm before kernels.MatVec's PickOf), for the A/B.
+	NoPickMV bool
 	// ScalarSoftmax runs the thread-per-head softmax instead of the warp
 	// reduction, the other arm of that comparison. It is ignored on a device
 	// that did not pass pickSoftmax's check, where the scalar kernel runs
@@ -975,6 +978,9 @@ type Stats struct {
 	// HeadFolds counts batched chunks that ran the output projection on
 	// their last row inside their own submission.
 	HeadFolds int
+	// PickRows counts label picks the head ran as the picked rows' own
+	// projection (pickMV) instead of the whole head and a gather.
+	PickRows int
 	// FlashPrefills counts batched attention launches of a one-kernel form
 	// (kernels.FlashPrefill70, FlashPrefillTile), paged or not.
 	FlashPrefills int
@@ -1264,6 +1270,7 @@ func (s *Stats) add(o Stats) {
 	s.PagedPrefillPasses += o.PagedPrefillPasses
 	s.EmbedLaunches += o.EmbedLaunches
 	s.HeadFolds += o.HeadFolds
+	s.PickRows += o.PickRows
 	s.FlashPrefills += o.FlashPrefills
 	s.VisionAttnChunks += o.VisionAttnChunks
 	if o.MMAWhy != "" {
@@ -1547,6 +1554,9 @@ type devShared struct {
 	// visCap is the rows the non-causal set is built for and visMax the
 	// largest grid a tower placed here takes (visrows.go). Guarded by mu.
 	visCap, visMax int
+	// visSmall counts the calls in a row the set was more than twice what
+	// they needed (ReserveRows), which shrinks it at visShrinkCalls.
+	visSmall int
 	// scratch is the budget the device's own buffers hold -- the block
 	// scratches and the staging -- and explicit the running sum of what
 	// charge and refund moved, which a scratch window subtracts so a weight or
@@ -1603,6 +1613,14 @@ type devShared struct {
 	recNext      backend.Buf
 	recNextBytes uint64
 	recCopies    map[[2]int]backend.Kernel
+	// recZeros is the zeros a seat's zeroing copies from (recZeroLayers),
+	// uploaded at the widest zeroing and kept while there are pools: a
+	// prompt that resets its sequence's state made and freed it each time.
+	recZeros      backend.Buf
+	recZerosBytes uint64
+	// recLs is resetRecRows' list of the blocks it zeroes, kept between
+	// calls.
+	recLs []*layer
 	// headSrc is the first byte of the projection the resident head was
 	// uploaded from, and headNormHost the norm it was built with: what a
 	// second State's PrepHead is compared against (adoptHead). altNorms are
@@ -1691,17 +1709,25 @@ type devShared struct {
 	pcache     *persistCache                 // composed persistent kernels; see persist.go
 	// convK, conv and convN are the convolutional blocks' kernels, their
 	// shared scratch and how many hold it (conv.go).
-	convK   map[convKey]backend.Kernel
-	conv    convScratch
-	convN   int
-	ragSeg  map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
-	argmaxK backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
+	convK map[convKey]backend.Kernel
+	conv  convScratch
+	// dh is Clef's decision head on this device (dechead.go), and ClefHeads
+	// how many requests it has answered.
+	dh        dhState
+	ClefHeads int64
+	convN     int
+	ragSeg    map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
+	argmaxK   backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
 	// samplePenK and sampleKs are the device sampler's kernels: the penalty
 	// over the head's rows and, per k, the two top-k passes (sample.go).
 	samplePenK backend.Kernel
 	sampleKs   map[int]sampleKerns
 	// pickK is the label pick's gather over the head's rows (pick.go).
-	pickK  backend.Kernel
+	pickK backend.Kernel
+	// pickMV projects the picked rows of the head alone (kernels.MatVec's
+	// PickOf), in place of the head's whole matvec and pickK's gather; nil
+	// where the head's format or a cap needs the whole row.
+	pickMV backend.Kernel
 	hostA  []uint32
 	hostAX []float32
 
@@ -2378,6 +2404,7 @@ func (g *devTier) Close() {
 	// Every session's queue, before the device that owns them, once nothing
 	// runs on one.
 	g.quiesce()
+	g.dhClose()
 	for _, ds := range g.sess {
 		ds.closeQueue()
 	}

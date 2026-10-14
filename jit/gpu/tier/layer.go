@@ -8594,6 +8594,12 @@ func (g *devTier) layersSession(s backend.Session) {
 				lc.la(hb.normApply, p.NEmbd, hb.x, hNorm, hb.part, hb.h)
 			}
 			lc.la(hb.quantE, kernels.QuantizeThreads(p.NEmbd/32), hb.h, hb.a, hb.ax)
+			// The label pick projects the picked rows alone (pickMV).
+			pickOnly := pick && g.pickMV != nil && hb.headCap == nil
+			if pickOnly {
+				lc.la(g.pickMV, pickMax, hr.qs, hr.d, hr.sc, hb.a, hb.ax, g.pickOut, g.pickIDs)
+				g.PickRows++
+			}
 			m := hb.mvHead
 			if g.TableSplit && m.alt != nil {
 				m = *m.alt
@@ -8606,15 +8612,17 @@ func (g *devTier) layersSession(s backend.Session) {
 			if m.rowt > 1 {
 				n /= m.rowt
 			}
-			lamv(m, m.kern, n, hr.qs, hr.d, hr.sc, hb.a, hb.ax, out)
-			if m.split > 1 && !m.group {
-				lc.la(m.red, m.rows, g.partBuf, hb.logits)
-			}
-			if hb.headCap != nil {
-				lc.la(hb.headCap, m.rows, hb.logits, hb.logitsCap)
-			}
-			if pick {
-				lc.la(g.pickK, pickMax, hb.headOut(), g.pickIDs, g.pickOut)
+			if !pickOnly {
+				lamv(m, m.kern, n, hr.qs, hr.d, hr.sc, hb.a, hb.ax, out)
+				if m.split > 1 && !m.group {
+					lc.la(m.red, m.rows, g.partBuf, hb.logits)
+				}
+				if hb.headCap != nil {
+					lc.la(hb.headCap, m.rows, hb.logits, hb.logitsCap)
+				}
+				if pick {
+					lc.la(g.pickK, pickMax, hb.headOut(), g.pickIDs, g.pickOut)
+				}
 			}
 			g.HeadFolds++
 		} else if head != nil {
@@ -8643,10 +8651,17 @@ func (g *devTier) layersSession(s backend.Session) {
 			lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
 			// HeadMatvecRepeat is the same idempotent-repeat probe on the head
 			// matvec, pricing it by repetition.
-			for r := 0; r < g.HeadMatvecRepeat; r++ {
+			pickOnly := pick && g.pickMV != nil && bs.headCap == nil && R == 1
+			if pickOnly {
+				// The label pick projects the picked rows alone (pickMV).
+				lc.la(g.pickMV, pickMax, bs.head.qs, bs.head.d, bs.head.sc, bs.a, bs.ax, g.pickOut, g.pickIDs)
+				g.PickRows++
+			} else {
+				for r := 0; r < g.HeadMatvecRepeat; r++ {
+					mvrun(bs.mvHead, bs.head, bs.logits)
+				}
 				mvrun(bs.mvHead, bs.head, bs.logits)
 			}
-			mvrun(bs.mvHead, bs.head, bs.logits)
 			if bs.headCap != nil {
 				lc.la(bs.headCap, bs.mvHead.rows, bs.logits, bs.logitsCap)
 			}
@@ -8656,7 +8671,7 @@ func (g *devTier) layersSession(s backend.Session) {
 			if sampleK > 0 && err == nil {
 				err = g.launchSample(lc, bs.headOut(), bs.mvHead.rows, sampleK, samplePen)
 			}
-			if pick {
+			if pick && !pickOnly {
 				lc.la(g.pickK, pickMax, bs.headOut(), g.pickIDs, g.pickOut)
 			}
 		}
@@ -8749,7 +8764,8 @@ func (g *devTier) layersSession(s backend.Session) {
 	}
 	if pe != nil {
 		hr := g.bs.head
-		w(g.bs.embIds, embIDs(pe.ids, R, hr.nrows))
+		g.subBytes.embIDs = embIDs(g.subBytes.embIDs, pe.ids, R, hr.nrows)
+		w(g.bs.embIds, g.subBytes.embIDs)
 		if err == nil {
 			err = lc.launch(g.bs.embK, gatherN/128, 128, hr.qs, hr.d, hr.sc, g.bs.embIds, bs.x)
 		}
@@ -8933,6 +8949,7 @@ type stagingBytes struct {
 	pn, koffs, kposs, rposs []byte
 	tok                     []byte // a ragged step's tokens, read home
 	mlaPOff                 []byte // a batched latent attention's rotary key slots
+	embIDs                  []byte // a prompt chunk's ids for the gather on the card (embIDs)
 	one                     [4]byte
 }
 
