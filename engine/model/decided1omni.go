@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"image"
 	"strconv"
 	"strings"
 
@@ -25,8 +26,15 @@ var d1OmniDelims = [...]string{"<|reserved_7|>", "<|reserved_8|>", "<|reserved_9
 	"<|reserved_11|>", "<|mask|>"}
 
 // d1OmniMaxLen is the text's room: the reference's max_length, the
-// container's context.
-func (d *Decider) d1OmniMaxLen() int { return d.m.Cfg.NCtx }
+// container's context, less a picture prefix and cut to image_text_length
+// when there is one.
+func (d *Decider) d1OmniMaxLen() int {
+	p := len(d.omniPre) / d.m.Cfg.NEmbd
+	if p == 0 {
+		return d.m.Cfg.NCtx
+	}
+	return min(d1OmniImageText, d.m.Cfg.NCtx-p)
+}
 
 // d1OmniSequence is one question's ids and the position of each option's
 // marker, in the order the model reads them (a noul false first).
@@ -46,7 +54,7 @@ func (d *Decider) d1OmniSequence(state jinja.Value, q *DecisionQuestion, maxLen 
 		return nil, nil, fmt.Errorf("the vocabulary has no BOS")
 	}
 	enc := func(s string) []int32 { return v.EncodeSpecial(d1OmniEscape(s), false) }
-	opts := d1OmniOptions(q)
+	opts := d1OmniOptions(q, len(d.omniPre) > 0)
 	k := len(opts)
 	budget := max(96, min(k*24+32, maxLen/2))
 	per := max(2, (budget-3*k)/k)
@@ -126,9 +134,10 @@ func d1OmniCriterion(v jinja.Value) string {
 	return b.String()
 }
 
-// d1OmniOptions is prompt.render_options for text: a noul as [false, true],
-// with its default wording where the request gives none.
-func d1OmniOptions(q *DecisionQuestion) []string {
+// d1OmniOptions is prompt.render_options: a noul as [false, true], with its
+// default wording where the request gives none -- after pictures the
+// reference's YES_NO, "no" and "yes".
+func d1OmniOptions(q *DecisionQuestion, yesNo bool) []string {
 	out := make([]string, len(q.Options))
 	for i, o := range q.Options {
 		desc := o.Description
@@ -140,6 +149,10 @@ func d1OmniOptions(q *DecisionQuestion) []string {
 			out[i] = o.Key + ": " + d1OmniCriterion(desc)
 		case q.Type == jlm.QuestionScore:
 			out[i] = "level " + strconv.Itoa(i) + ": " + d1OmniCriterion(desc)
+		case empty && yesNo && o.Key == "true":
+			out[i] = "true: yes"
+		case empty && yesNo:
+			out[i] = "false: no"
 		case empty && o.Key == "true":
 			out[i] = "true: yes, the statement holds"
 		case empty:
@@ -154,13 +167,55 @@ func d1OmniOptions(q *DecisionQuestion) []string {
 // d1OmniForward encodes ids, runs the head at the markers and returns the
 // scores.
 func (d *Decider) d1OmniForward(ids []int32, qt jlm.QuestionType, markers []int, v int) ([]float32, error) {
-	if err := d.emb.lfm2Encode(ids, 0); err != nil {
+	if err := d.emb.lfm2Encode(ids, d.omniPre); err != nil {
 		return nil, err
 	}
 	out := d.variantScores(v, len(markers))
 	if err := d.emb.layaScores(out, len(ids), qt, markers); err != nil {
 		return nil, err
 	}
-	d.input += len(ids)
+	d.input += len(ids) + len(d.omniPre)/d.m.Cfg.NEmbd
 	return out, nil
+}
+
+// d1-omni's pictures (vision.py): each picture cut as LFM2-VL cuts it (tiles
+// of 512 pixels and a thumbnail, resampled bilinear), every piece through the
+// tower and projector, and the rows of every piece of every picture, in
+// order, a prefix in front of the prompt's embeddings. No marker tokens: the
+// prefix's rows are told apart by the mask (a prefix row attends to the
+// prefix alone) and the convolution's cut at the prefix's end.
+
+// d1OmniImageText is the reference's image_text_length: a prompt after
+// pictures is cut to it (D1OmniConfig's default; the GGUF does not carry it).
+const d1OmniImageText = 896
+
+// d1OmniPrefix encodes the request's pictures into d.omniPre, the prefix
+// rows the prompt's embeddings follow, on the Decider's vision segment.
+func (d *Decider) d1OmniPrefix(imgs []image.Image) error {
+	tw := d.m.Tower()
+	if d.omniVis == nil {
+		d.omniVis = tw.newState(d.emb.jit, false)
+	}
+	d.omniPre = d.omniPre[:0]
+	for i, img := range imgs {
+		if img == nil {
+			return fmt.Errorf("images[%d] is empty", i)
+		}
+		_, _, pieces, err := tw.LFM2Pieces(img)
+		if err != nil {
+			return fmt.Errorf("images[%d]: %w", i, err)
+		}
+		for _, pc := range pieces {
+			rows, err := d.omniVis.encodePicture(pc)
+			if err != nil {
+				return fmt.Errorf("images[%d]: %w", i, err)
+			}
+			d.omniPre = append(d.omniPre, rows...)
+		}
+	}
+	if d.d1OmniMaxLen() < 64 {
+		return fmt.Errorf("the images take %d of the %d positions; send fewer images",
+			len(d.omniPre)/d.m.Cfg.NEmbd, d.m.Cfg.NCtx)
+	}
+	return nil
 }

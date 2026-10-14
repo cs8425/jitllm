@@ -182,15 +182,18 @@ func (e *Embedder) lfTaps(b *lfBlock, t, n int) []float32 {
 	return rows
 }
 
-// lfm2Encode runs the trunk over the prefix's rows (p of them, already in
-// e.x, a media prefix) and ids after them, and leaves the final norm's output
-// in e.x, every row.
-func (e *Embedder) lfm2Encode(ids []int32, p int) error {
+// lfm2Encode runs the trunk over a media prefix's rows (pre, rows of NEmbd;
+// none for text alone) and ids after them, and leaves the final norm's
+// output of the text rows in e.x from row 0: the head reads the text alone.
+func (e *Embedder) lfm2Encode(ids []int32, pre []float32) error {
 	m, c, lf := e.m, e.m.Cfg, e.m.enc.lf
-	n, d := p+len(ids), c.NEmbd
+	d := c.NEmbd
+	p := len(pre) / d
+	n := p + len(ids)
 	hd, kvw := c.HeadDim, c.NKVHead*c.HeadDim
 	e.grow(n)
 	x := e.x[:n*d]
+	copy(x, pre)
 	for i, id := range ids {
 		if err := m.embedRow(x[(p+i)*d:(p+i+1)*d], int(id)); err != nil {
 			return err
@@ -265,6 +268,9 @@ func (e *Embedder) lfm2Encode(ids []int32, p int) error {
 		}
 	}
 	e.rowsRMS(x, x, lf.outNorm, n, d)
+	if p > 0 {
+		copy(x, x[p*d:])
+	}
 	return nil
 }
 

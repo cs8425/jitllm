@@ -1111,6 +1111,9 @@ var projectorOf = map[string]jlm.Projector{
 	"kimivl":           jlm.ProjKimiVL,
 	"qwen3vl_merger":   jlm.ProjQwen3VL,
 	"lfm2":             jlm.ProjLFM2,
+	// d1-omni's vision half: LFM2-VL's tower and projector with no input
+	// norm, resampled bilinear (its vision.py).
+	"d1omni_v": jlm.ProjLFM2,
 }
 
 // Projectors is every name in that list, sorted.

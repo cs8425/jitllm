@@ -74,6 +74,7 @@ func buildGGUF(f, vf *meta.File, src, mmproj string, o options) (*jlm.Source, er
 			return nil, fmt.Errorf("convert: %s is itself a vision tower; the first "+
 				"argument is the TEXT model", src)
 		}
+		vf = withoutAudio(vf)
 		vs, err := sourceOf(vf)
 		if err != nil {
 			return nil, err
