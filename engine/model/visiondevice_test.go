@@ -60,14 +60,31 @@ func towerOnDevices(t *testing.T, open func(testing.TB, ...Option) (*Model, *Tow
 		ran++
 		t.Run(spec, func(t *testing.T) {
 			defer g.Close()
-			// Every block, and the whole tower's output.
+			// Every block, and the whole tower's output. A card whose free
+			// memory does not hold the tower resident takes it paged: the
+			// blocks stream through the device (paging is the design), and
+			// the answer is held to the host's the same way.
 			all := tw.testState()
 			all.SetDevice(g)
 			if n := all.GPUBlocks(); n != c.NLayer {
+				why := g.Err()
 				all.Close()
-				t.Fatalf("%s took %d of %d tower blocks (%s)", spec, n, c.NLayer, g.Err())
+				pm, ptw := open(t, WithPlacement(Placement{Rest: &Place{On: spec, Stream: true}}))
+				defer pm.Close()
+				all = ptw.testState()
+				all.SetDevice(g)
+				if n2 := all.GPUBlocks(); n2 != c.NLayer {
+					all.Close()
+					t.Fatalf("%s took %d of %d tower blocks resident (%s) and %d streamed (%s)",
+						spec, n, c.NLayer, why, n2, g.Err())
+				}
+				t.Logf("%s held %d of %d tower blocks resident (%s): the tower streams through it", spec, n, c.NLayer, why)
 			}
+			s0 := g.Stats().Submits
 			_, gotAll := encode(all)
+			if g.Stats().Submits == s0 {
+				t.Fatalf("%s: the encode submitted nothing to the device: the tower ran on the host", spec)
+			}
 			nm, worst := nmseOf(gotAll, want)
 			t.Logf("%s, all %d blocks: projector output NMSE %.3e, max|d| %.4f", spec, c.NLayer, nm, worst)
 			if math.IsNaN(nm) || math.IsInf(nm, 0) || nm > 1e-2 {
@@ -94,7 +111,11 @@ func towerOnDevices(t *testing.T, open func(testing.TB, ...Option) (*Model, *Tow
 			if s.GPUBlocks() != 1 {
 				t.Fatalf("asked for 1 device block, got %d", s.GPUBlocks())
 			}
+			s1 := g.Stats().Submits
 			got0, _ := encode(s)
+			if g.Stats().Submits == s1 {
+				t.Fatalf("%s: block 0's encode submitted nothing to the device", spec)
+			}
 			nm, worst = nmseOf(got0, want0)
 			t.Logf("%s, after block 0: NMSE %.3e, max|d| %.4f", spec, nm, worst)
 			if math.IsNaN(nm) || math.IsInf(nm, 0) || math.IsInf(worst, 0) {
@@ -116,3 +137,73 @@ func towerOnDevices(t *testing.T, open func(testing.TB, ...Option) (*Model, *Tow
 
 func TestGemma3TowerOnDevice(t *testing.T)   { towerOnDevices(t, openGemma3) }
 func TestInternVLTowerOnDevice(t *testing.T) { towerOnDevices(t, openInternVL) }
+
+// TestGemma3TowerPagesThroughTheDevice runs the Gemma 3 tower placed to
+// stream (Place.Stream) under budgets below what it holds resident: every
+// block must still be placed, blocks must page in during the encode, and the
+// projector output must be the resident tower's bit for bit -- a page-in
+// uploads the same bytes. Before streamed tower blocks paged out to make room
+// for a picture's row set (resizeTower), the set sent them home instead and
+// the device ran a fraction of the tower.
+func TestGemma3TowerPagesThroughTheDevice(t *testing.T) {
+	m0, tw0 := openGemma3(t)
+	px := rainbow(tw0.Cfg.ImageSz)
+	m0.Close()
+	ran := 0
+	for _, spec := range stepDevices() {
+		run := func(budget uint64) (out []float32, placed, ins int, used uint64, ok bool) {
+			opts := []tier.Option{tier.WithDevices(spec), tier.WithDeviceTune(tier.TuneOff)}
+			if budget > 0 {
+				opts = append(opts, tier.WithBudget(budget))
+			}
+			g, err := tier.OpenWith(opts...)
+			if err != nil || g == nil {
+				return nil, 0, 0, 0, false
+			}
+			defer g.Close()
+			m, tw := openGemma3(t, WithPlacement(Placement{Rest: &Place{On: spec, Stream: true}}))
+			defer m.Close()
+			s := tw.testState()
+			defer s.Close()
+			if err := s.SetDevice(g); err != nil {
+				t.Fatal(err)
+			}
+			used = g.Budgets()[0].Used
+			p0 := g.Stats().PageIns
+			e, err := s.Encode(px)
+			if err != nil {
+				t.Fatalf("%s under %d bytes: %v", spec, budget, err)
+			}
+			return append([]float32(nil), e...), s.GPUBlocks(), g.Stats().PageIns - p0, used, true
+		}
+		ref, placed, ins, used, ok := run(0)
+		if !ok {
+			t.Logf("%s: not present", spec)
+			continue
+		}
+		ran++
+		if placed != tw0.Cfg.NLayer || ins != 0 {
+			t.Fatalf("%s: the unbounded arm placed %d of %d blocks with %d page-ins: it is not the resident tower",
+				spec, placed, tw0.Cfg.NLayer, ins)
+		}
+		paged := 0
+		for _, frac := range []float64{0.75, 0.6} {
+			b := uint64(float64(used) * frac)
+			got, p, in, _, _ := run(b)
+			t.Logf("%s, %d of %d bytes: %d of %d blocks placed, %d page-ins", spec, b, used, p, tw0.Cfg.NLayer, in)
+			if p != tw0.Cfg.NLayer || in == 0 {
+				continue
+			}
+			paged++
+			if nm, worst := nmseOf(got, ref); worst != 0 {
+				t.Fatalf("%s under %d bytes: paging the tower changed its output (NMSE %.3e)", spec, b, nm)
+			}
+		}
+		if paged == 0 {
+			t.Fatalf("%s: no budget below the resident tower paged every block through the device", spec)
+		}
+	}
+	if ran == 0 {
+		t.Skip("no GPU backend on this host")
+	}
+}
