@@ -125,6 +125,11 @@ type Decider struct {
 	jobs []*batchJob
 	// batchN is how many of jobs the last batch ran.
 	batchN int
+	// packIDs and packMarks are a packed encoder pass's ids and marker rows
+	// (layaPacked), and packs counts the passes run.
+	packIDs   []int32
+	packMarks []int
+	packs     int
 
 	// clef is Clef's head and its working memory (decideclef.go), and
 	// clefEmb the prefill mode its prompt runs under: the residual of every
@@ -191,9 +196,9 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 			return nil, err
 		}
 		return d, nil
-	case jlm.DecisionLaya:
+	case jlm.DecisionLaya, jlm.DecisionD1Omni:
 		if m.encMB() == nil || m.encMB().head == nil {
-			return nil, fmt.Errorf("model: a laya readout wants a ModernBERT encoder with its head")
+			return nil, fmt.Errorf("model: a %v readout wants an encoder with its head", kind)
 		}
 		d.emb = &Embedder{m: m}
 		if err := d.emb.encoderJIT(); err != nil {
@@ -405,6 +410,13 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 			return nil, err
 		}
 		return d.layaForward(ids, q.Type, markers, v)
+	}
+	if d.kind == jlm.DecisionD1Omni {
+		ids, markers, err := d.d1OmniSequence(state, q, d.d1OmniMaxLen())
+		if err != nil {
+			return nil, err
+		}
+		return d.d1OmniForward(ids, q.Type, markers, v)
 	}
 	if len(d.pics) > 0 {
 		spans, groups, err := d.promptSpans(state, q, v)
@@ -902,7 +914,7 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 		}
 		a.Confidence = confidenceScore(float64(dist), uni, n)
 	}
-	if d.kind == jlm.DecisionClef && d.violation != "typesafe-confidence" {
+	if (d.kind == jlm.DecisionClef || d.kind == jlm.DecisionD1Omni) && d.violation != "typesafe-confidence" {
 		// Clef's own (systemone_answer): the chosen option's probability, and
 		// a score's largest; llama.cpp gives TypeSafe's formula.
 		a.Confidence = top

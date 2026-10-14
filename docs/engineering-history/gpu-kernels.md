@@ -6335,3 +6335,38 @@ grid. What would win is not composition but fusion that keeps an intermediate
 on chip (norm into the matvec's activation, the reduce into its consumer) and
 so removes phases, which is the composer's next step rather than this one.
 Off by default (RULE 6: a clear regression).
+
+## The dependency-counter block: correct, and slower than both
+
+`Config.PersistDeps` (`tier.WithPersistDeps`, `JITLLM_GPU_PERSIST=deps`;
+design in `docs/design/dep-block.md`) composes the same runs as the persistent
+block and orders them with completion counters (`ir.PersistDeps`): a task waits
+only on the tasks it reads or overwrites, a tile of an elementwise task only on
+the producer tiles its span analysis says it touches, and a workgroup with no
+tile in a task skips its waits.
+
+Gates on the V100 (sm_70): `TestPersistentDecodeMatchesPerOp` holds the
+dependency-counter arm bit-identical to per-op on Llama-3.2-1B, Qwen2-1.5B and
+gemma-2b, every block placed with and without the graph and on a partial seam;
+`TestDepDecodeSeesABrokenWait` (every wait returning at once) changes 897792 of
+1026048 logits; `backend.TestDepCountersOrderTheChain` and its violation hold
+the protocol at the co-residency limit (1280 workgroups of 128) and inside a
+graph. A Llama-3.2-1B decode takes 476 tile edges in 1792 kernels; the rest
+are whole-task edges, because every matvec reads its whole input.
+
+Measured on the V100 (CUDA, in-process `verify -ab`, n=24 rounds of 64
+tokens, graph replay, two passes):
+
+| model | A/A | deps vs per-op | deps vs grid barrier |
+|---|---|---|---|
+| Llama-3.2-1B Q4_K_M | 1.0010 / 0.9945 | 0.8467 / 0.8430 | 0.9696 / 0.9702 |
+| Llama-3.2-3B Q4_K_M | 1.0009 / 1.0017 | 0.8164 / 0.8189 | 0.9700 / 0.9730 |
+| Llama-3.1-8B Q4_K_M | 0.9996 / 1.0009 | 0.8555 / 0.8572 | 0.9721 / 0.9728 |
+
+(IQR/median 0.9-5.3%.) It loses 14-18% to per-op and 3% to the grid barrier.
+A whole-task wait still waits on every active workgroup of the producer --
+the barrier's arrival set -- and adds a signal per task per workgroup and a
+wait per tile; the decode block's edges are almost all whole, so the counters
+remove little waiting and add atomics. What would change this is fusion that
+keeps an intermediate on chip and removes tasks, not finer ordering of the
+same tasks. Off by default (RULE 6: a clear regression).

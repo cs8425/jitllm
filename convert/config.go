@@ -200,6 +200,15 @@ func ArchitectureGraph(name string) (jlm.Arch, bool) {
 }
 
 func configOf(f *meta.File) (*jlm.Config, error) {
+	if head, ok := d1OmniHead(f); ok {
+		return d1OmniConfig(f, head)
+	}
+	return configOfFile(f)
+}
+
+// configOfFile is configOf for every file but the ones read through a view
+// (d1OmniConfig).
+func configOfFile(f *meta.File) (*jlm.Config, error) {
 	name := f.Arch()
 	arch, ok := archOf[name]
 	if !ok {

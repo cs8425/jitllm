@@ -14,9 +14,10 @@ import (
 // readout's prompts -- every question and every variant of every request --
 // run as rows of one batch session (Scheduler), a step reading the weights
 // once for every prompt in it, and each prompt's label logits are read where
-// its last row comes out. An encoder readout (Laya) runs its sequences one
-// encoder pass each: its blocks are non-causal over the call's rows, so
-// sequences packed into one call would attend to each other.
+// its last row comes out. An encoder readout (Laya) packs its sequences into
+// encoder passes of up to layaPackRows rows: each sequence's rows attend
+// inside it and count their positions from its start, on the host and on a
+// device (nn.SeqRunsDevice), and its type row and markers are its own.
 
 // DecisionRequest is one request's state and questions.
 type DecisionRequest struct {
@@ -141,6 +142,8 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 				var err error
 				if d.kind == jlm.DecisionLaya {
 					j.ids, j.markers, err = d.layaSequence(rq.State, q)
+				} else if d.kind == jlm.DecisionD1Omni {
+					j.ids, j.markers, err = d.d1OmniSequence(rq.State, q, d.d1OmniMaxLen())
 				} else {
 					j.ids, j.groups, err = d.prompt(rq.State, q, v)
 				}
@@ -165,8 +168,8 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 	at := 0
 	for r := range reqs {
 		res := &out[r]
-		// A request that failed, or ran alone (its pictures, a device), has
-		// no prompt among the jobs.
+		// A request that failed alone, or that ran alone (its media, or on a device), has
+		// its answer already and no job in the batch.
 		if res.Err != nil || res.Answers != nil {
 			continue
 		}
@@ -224,8 +227,11 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 		return nil
 	}
 	if d.kind == jlm.DecisionLaya {
+		return d.layaPacked(jobs)
+	}
+	if d.kind == jlm.DecisionD1Omni {
 		for _, j := range jobs {
-			s, err := d.layaForward(j.ids, j.qt, j.markers, 0)
+			s, err := d.d1OmniForward(j.ids, j.qt, j.markers, 0)
 			if err != nil {
 				return err
 			}
@@ -269,6 +275,56 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 func (d *Decider) batchAlone() bool {
 	return d.kind != jlm.DecisionLaya && d.kind != jlm.DecisionClef && d.st != nil &&
 		d.st.GPULayers() > 0 && d.violation != "device-batch"
+}
+
+// layaPackRows is the most rows a packed encoder pass holds: a device's
+// non-causal set is built for 1024 rows at placement (tier visStart), so a
+// pass at or under it does not grow the set.
+const layaPackRows = 1024
+
+// layaPacked runs an encoder readout's jobs packed into passes of up to
+// layaPackRows rows, a sequence longer than that alone in its pass, and
+// leaves each job's scores.
+func (d *Decider) layaPacked(jobs []*batchJob) error {
+	e := d.emb
+	defer func() { e.seqs, e.seqTypes = e.seqs[:0], e.seqTypes[:0] }()
+	for len(jobs) > 0 {
+		n, k := 0, 0
+		for k < len(jobs) && (k == 0 || n+len(jobs[k].ids) <= layaPackRows) {
+			n += len(jobs[k].ids)
+			k++
+		}
+		pass := jobs[:k]
+		jobs = jobs[k:]
+		ids, marks := d.packIDs[:0], d.packMarks[:0]
+		e.seqs, e.seqTypes = e.seqs[:0], e.seqTypes[:0]
+		for _, j := range pass {
+			lo := len(ids)
+			for _, m := range j.markers {
+				marks = append(marks, lo+m)
+			}
+			ids = append(ids, j.ids...)
+			e.seqs = append(e.seqs, nn.KeyRun{Lo: lo, Hi: len(ids)})
+			e.seqTypes = append(e.seqTypes, j.qt)
+		}
+		d.packIDs, d.packMarks = ids, marks
+		if len(pass) == 1 {
+			e.seqs, e.seqTypes = e.seqs[:0], e.seqTypes[:0]
+		}
+		if err := e.mbEncode(ids); err != nil {
+			return err
+		}
+		out := d.variantScores(0, len(marks))
+		if err := e.layaScores(out, len(ids), pass[0].qt, marks); err != nil {
+			return err
+		}
+		d.packs++
+		for _, j := range pass {
+			j.scores = append(j.scores[:0], out[:len(j.markers)]...)
+			out = out[len(j.markers):]
+		}
+	}
+	return nil
 }
 
 // batchSession is the Decider's batch session, at least rows wide, placed on

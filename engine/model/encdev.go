@@ -38,7 +38,7 @@ func (m *Model) encBlocks() int {
 		return 0
 	}
 	if mb := m.enc.mb; mb != nil {
-		return len(mb.blocks) + len(mb.head)
+		return mb.trunk + len(mb.head)
 	}
 	return len(m.enc.blocks)
 }
@@ -96,6 +96,12 @@ func (e *Embedder) SetDeviceLayers(d nn.Device, max int) error {
 			return nil
 		}
 		return e.st.SetDeviceLayers(d, max)
+	}
+	if e.m.enc.lf != nil && d != nil {
+		// An LFM2 encoder's centred convolution and prefix mask have no
+		// device plan yet; declined by name until they do (RULE 8a).
+		return fmt.Errorf("model: an LFM2 encoder's blocks (centred convolution, prefix mask) " +
+			"are not planned on a device yet")
 	}
 	if e.seg == nil {
 		if d == nil {
@@ -179,7 +185,27 @@ func (e *Embedder) devPrepare(n, window int) error {
 			s.SetGPULayers(hi)
 		}
 	}
-	if window <= 0 || s.devCount() == 0 {
+	if s.devCount() == 0 {
+		return nil
+	}
+	// The sequences, every time: a pass of one sequence clears the last
+	// pass's runs.
+	if sr, ok := s.ld.(nn.SeqRunsDevice); ok {
+		runs := e.seqs
+		if e.violation == "sequences-attend-across" {
+			runs = nil
+		}
+		if !sr.SetSeqRuns(runs) {
+			why := ""
+			if er, ok := s.ld.(nn.ErrReporter); ok {
+				why = er.Err()
+			}
+			return fmt.Errorf("model: the device refused the %d packed sequences: %s", len(e.seqs), why)
+		}
+	} else if len(e.seqs) > 1 {
+		return fmt.Errorf("model: the device takes no sequence runs, and %d sequences are packed", len(e.seqs))
+	}
+	if window <= 0 {
 		return nil
 	}
 	rw, ok := s.ld.(nn.RowWindowDevice)
@@ -188,7 +214,12 @@ func (e *Embedder) devPrepare(n, window int) error {
 	}
 	wins := e.wins[:0]
 	for i := 0; i < n; i++ {
-		wins = append(wins, nn.KeyRun{Lo: max(0, i-window), Hi: min(n, i+window+1)})
+		lo, hi := 0, n
+		if len(e.seqs) > 0 {
+			sq := e.seqs[e.rowSeq[i]]
+			lo, hi = sq.Lo, sq.Hi
+		}
+		wins = append(wins, nn.KeyRun{Lo: max(lo, i-window), Hi: min(hi, i+window+1)})
 	}
 	e.wins = wins
 	if !rw.SetRowWindows(wins) {
@@ -226,7 +257,7 @@ func (s *State) encPlan(li int) *nn.LayerPlan {
 	enc := m.enc
 	if mb := enc.mb; mb != nil {
 		v := s.enc.violation
-		if li >= len(mb.blocks) {
+		if li >= mb.trunk {
 			// The decision head's: a pre-norm torch TransformerEncoderLayer,
 			// no positions, an ungated ReLU MLP of its own width.
 			p.NHead, p.NKVHead = mb.headHeads, mb.headHeads
@@ -274,8 +305,8 @@ func (s *State) encWeights(li int) nn.LayerWeights {
 	m, d := s.m, s.c.NEmbd
 	enc := m.enc
 	if mb := enc.mb; mb != nil {
-		if li >= len(mb.blocks) {
-			b := &mb.head[li-len(mb.blocks)]
+		if li >= mb.trunk {
+			b := &mb.head[li-mb.trunk]
 			return nn.LayerWeights{
 				AttnNorm: b.ln1W, AttnNormB: b.ln1B, FFNNorm: b.ln2W, FFNNormB: b.ln2B,
 				Wq: wt(b.wq), Wk: wt(b.wk), Wv: wt(b.wv), Wo: wt(b.wo),

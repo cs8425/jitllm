@@ -47,9 +47,22 @@ type Embedder struct {
 	// The attention kernel sets of the encoder's blocks and of a decision
 	// head's, which differ when their head widths do.
 	attnEnc, attnHead *nn.AttnSet
+	// attnLF is an LFM2 encoder's: its head width, k and v rows of its GQA
+	// key heads.
+	attnLF *nn.AttnSet
 
 	// rg is the pool regions the host's blocks run (encRegions).
 	rg encRegions
+
+	// seqs packs several sequences into one encoder pass: each run of rows is
+	// a sequence of its own, whose rows attend inside it and count their
+	// positions from its start, and seqTypes is each one's question type (a
+	// decision head's type row). nil is one sequence over every row.
+	// rowSeq is each row's sequence and qseq, qpos the attention's queries'
+	// sequence and row, kept between calls.
+	seqs               []nn.KeyRun
+	seqTypes           []jlm.QuestionType
+	rowSeq, qseq, qpos []int32
 
 	// afterBlock, when set, sees the residual after every encoder block --
 	// the per-layer bisection hook the correctness gates use.
@@ -110,6 +123,13 @@ func (e *Embedder) encoderJIT() error {
 	types := []quant.Type{quant.F32, m.embd.typ}
 	width := max(c.NEmbd, c.NFFN)
 	if mb := m.enc.mb; mb != nil {
+		if lf := m.enc.lf; lf != nil {
+			for i := range lf.blocks {
+				for _, w := range lf.blocks[i].weights() {
+					types = append(types, w.typ)
+				}
+			}
+		}
 		for i := range mb.blocks {
 			for _, w := range mb.blocks[i].weights() {
 				types = append(types, w.typ)
@@ -144,6 +164,9 @@ func (e *Embedder) encoderJIT() error {
 	e.attnHead = e.attnEnc
 	if mb := m.enc.mb; mb != nil && mb.head != nil {
 		e.attnHead = e.jit.AttnSetFor(c.NEmbd/mb.headHeads, c.NEmbd/mb.headHeads, c.NEmbd, cpu.KVF32)
+	}
+	if m.enc.lf != nil {
+		e.attnLF = e.jit.AttnSetFor(c.HeadDim, c.HeadDim, c.NKVHead*c.HeadDim, cpu.KVF32)
 	}
 	return nil
 }

@@ -1585,6 +1585,11 @@ type blockScratch struct {
 	vwins    []backend.Buf
 	winMask  backend.Kernel
 	vwinRows int
+	// vsegs is the packed sequences' runs as each pass's rows' windows,
+	// which every unwindowed non-causal block masks with (SetSeqRuns), and
+	// vsegRows the rows they cover; 0 is one sequence and no mask.
+	vsegs    []backend.Buf
+	vsegRows int
 	// DBRX's clamp on q, k and v (LayerPlan.ClampKQV), out of place for the
 	// same reason: the clamped copies are what everything after the
 	// projections reads. nil for every other architecture.
@@ -5812,7 +5817,7 @@ func (g *devTier) layersCall(sid uint64, lo, hi, pos, n int, x, cs, csSWA []floa
 		bs := g.bs
 		// The windows staged in the set are whichever session's picture
 		// came last: this session's go in again.
-		wok := g.setWindowsLocked(g.winRuns, g.winPerRow)
+		wok := g.setWindowsLocked(g.winRuns, g.winPerRow) && g.setSeqsLocked(g.seqRuns)
 		g.mu.Unlock()
 		if !wok {
 			return false
@@ -6170,6 +6175,9 @@ type graphKey struct {
 	// persist says the recording holds composed persistent kernels
 	// (Config.Persist), which a per-op recording does not.
 	persist bool
+	// persistDeps says those kernels are ordered by dependency counters
+	// (Config.PersistDeps) rather than grid barriers.
+	persistDeps bool
 	// sid is the session the recording was made for: it bakes that session's
 	// page descriptors and recurrent seats, so another session never replays
 	// it. Keying on it, rather than dropping every recording when the current
@@ -6343,6 +6351,12 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 		if l.windowed && (bs.winMask == nil || bs.vwinRows != len(x)/bs.p.NEmbd) {
 			return refuse("block %d attends inside windows and the device holds windows for %d "+
 				"rows, not %d (SetKeyRuns)", li, bs.vwinRows, len(x)/bs.p.NEmbd)
+		}
+		// Packed sequences over other rows than the call's would let a row
+		// read another sequence's keys.
+		if l.nonCausal && bs.vsegRows != 0 && bs.vsegRows != len(x)/bs.p.NEmbd {
+			return refuse("block %d: the device holds packed sequences over %d rows, not %d (SetSeqRuns)",
+				li, bs.vsegRows, len(x)/bs.p.NEmbd)
 		}
 	}
 	g.Submits++
@@ -6666,7 +6680,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	// home, whose uploads sit between launches.
 	persistOn := R == 1 && rag == nil && !(bs.pkv != nil && bs.pkv.st != nil) && g.ensurePersist()
 	key := graphKey{lo, hi, nCap, R, head != nil, g.TableSplit, g.ScalarSoftmax, g.flashOn(), g.KVF16,
-		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, persistOn, sid, g.NoFuse, g.NoActFuse}
+		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, persistOn, persistOn && g.PersistDeps, sid, g.NoFuse, g.NoActFuse}
 	if _, live := g.recs[key]; !live {
 		for k, r := range g.recs {
 			older := k
@@ -7829,7 +7843,9 @@ func (g *devTier) layersSession(s backend.Session) {
 							// Qwen2.5-VL's windowed blocks: every key outside a
 							// row's window to -inf before the softmax, the windows
 							// of this pass's rows in win.
-							if l.windowed {
+							// Packed sequences: every key outside a row's own
+							// sequence, the same mask over the runs (SetSeqRuns).
+							if win != nil {
 								lc.la(bs.winMask, R*p.NHead*bs.sstride, att, win, bs.attWin)
 								att = bs.attWin
 							}

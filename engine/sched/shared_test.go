@@ -112,6 +112,27 @@ func TestOverlappingCrewsShareTheirTurn(t *testing.T) {
 	}
 }
 
+// The E-cores alone are a set of their own, disjoint from the P-cores, so a
+// session on them takes turns apart from one decoding on the P-cores.
+func TestECoresAreTheirOwnCrew(t *testing.T) {
+	e := CoreSet("e")
+	if len(ECores()) == 0 {
+		if len(e) != 0 {
+			t.Fatalf("no E-cores here, and the \"e\" set is %v", e)
+		}
+		t.Skip("no E-cores on this host: the \"e\" set is empty")
+	}
+	if fmt.Sprint(e) != fmt.Sprint(ECores()) {
+		t.Fatalf("the \"e\" set is %v, want ECores %v", e, ECores())
+	}
+	p, ev := Shared(CoreSet("p")), Shared(e)
+	defer p.Close()
+	defer ev.Close()
+	if p.crew.mu == ev.crew.mu {
+		t.Fatal("the E-cores' crew takes turns with the P-cores'")
+	}
+}
+
 // A view waiting for the crew is handed the turn before the holder takes it
 // again: on a three-core runner one session once ran a whole reply while
 // another's generate produced no token. View a loops regions back to back on
