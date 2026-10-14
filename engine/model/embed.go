@@ -141,6 +141,17 @@ func (e *Embedder) encoderJIT() error {
 			}
 		}
 	}
+	// A decision encoder that reads pictures runs its tower on this JIT
+	// (d1-omni's prefix): the tower's formats and widths too.
+	if m.tower != nil {
+		for i := range m.container.Entries() {
+			e := &m.container.Entries()[i]
+			if t, ok := containerShape(e); ok && e.Role.Vision() {
+				types = append(types, t.typ)
+				width = max(width, t.k, t.rows)
+			}
+		}
+	}
 	e.jit = nn.NewJIT(width, width, types, m.jit...)
 	if e.jit == nil {
 		return fmt.Errorf("model: no code generator for the encoder on this host")

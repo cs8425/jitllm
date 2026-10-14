@@ -75,7 +75,7 @@ func TestD1OmniMatchesReference(t *testing.T) {
 						q.ID, ids, markers, gq.IDs, gq.Markers)
 				}
 				d.emb.afterBlock = nil
-				if err := d.emb.lfm2Encode(ids, 0); err != nil {
+				if err := d.emb.lfm2Encode(ids, nil); err != nil {
 					t.Fatal(err)
 				}
 				dm := m.Cfg.NEmbd

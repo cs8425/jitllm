@@ -1942,8 +1942,9 @@ func (m *Model) pageIn(li int) error {
 	if m.container == nil || li >= len(m.layers) || li >= m.container.NPages() {
 		return nil
 	}
-	// An encoder's blocks are its own structs (encoder.go, modernbert.go).
-	if m.enc != nil {
+	// An encoder's blocks are its own structs (encoder.go, modernbert.go);
+	// a tower's after them (d1-omni's) are layers like any model's.
+	if m.enc != nil && li < m.encBlocks() {
 		return m.encBlockPageIn(li)
 	}
 	// The block's own weights, not its experts: moe() ensures those after the

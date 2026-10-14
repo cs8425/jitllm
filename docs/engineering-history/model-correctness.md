@@ -9595,6 +9595,40 @@ blocks' pages give the same scores to the bit (`TestD1OmniKeepsThePrinciples`).
 The device tiers decline the trunk by name until its convolution and prefix
 mask are planned there.
 
+#### d1-omni's pictures
+
+The mmproj's vision half (`d1omni_v`) is LFM2-VL's: SigLIP2 NaFlex with its
+post-LayerNorm, the 2x2 unshuffle, mm.1, erf GELU, mm.2, no input norm, and
+vision.py's plan -- LFM2-VL's tiles and thumbnail, resampled bilinear with
+antialias (no image_resize_algo in the file, so the class default). It
+converts as `jlm.ProjLFM2`. The mmproj also carries the audio encoder
+(`d1omni_a`), which this converter does not build yet: its `a.*` and `mm.a.*`
+tensors are set aside (`withoutAudio`), so a request with a voice clip finds
+no audio encoder and is refused rather than run without one.
+
+A picture is not marked in the prompt: every piece of every picture goes
+through the tower, and the projected rows in order are a prefix in front of
+the prompt's embeddings. The prefix rows attend to the prefix alone, the
+prefix's last row does not read the text through the convolution, the head
+reads the text rows, the prompt is cut to image_text_length (896) and the
+noul's default wording is the reference's YES_NO ("no", "yes"). The
+reference calibrates text alone: an answer over pictures takes no
+temperature. The trunk's context is max_length (16384), stated at conversion
+(`decision.max_length`, D1OmniConfig's default) where the GGUF says 128000.
+
+The encoder's Decider runs the tower on its own JIT through a vision
+segment (`Tower.newState`), so the encoder's JIT is built with the tower's
+formats and widths, and `Model.pageIn` sends a tower block through the
+layers' bind rather than the encoder's.
+
+The tower is stored Q8_0 and runs on int8 activations (convert/vision.go,
+the converter's one lossy step), and the reference reads F16 weights: the
+prefix rows sit at NMSE 1.6e-3 against the reference's (an outlier channel
+near -110 is 26 off), the head's logits 0.21 and the probabilities 5.2e-3
+away (`TestD1OmniDecidesOverPicturesAsItsReference`). The prefix length and
+the prompt after it are exact. Letting the prefix read the text moves a logit
+0.91, and swapping the two pictures 1.53.
+
 ## qwen4exp: Qwen3.8-Flash-Next (plan, before the code)
 
 The graph, read off llama.cpp's `src/models/qwen4exp.cpp` and its converter

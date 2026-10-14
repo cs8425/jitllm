@@ -112,6 +112,10 @@ type Decider struct {
 	// pics is the request in flight's pictures, each its run of the prompt
 	// (cutPictures); nil between requests and for a text request.
 	pics [][]Span
+	// omniPre is d1-omni's picture prefix for the request in flight, rows of
+	// NEmbd (none for text), and omniVis the vision segment that encodes it.
+	omniPre []float32
+	omniVis *State
 	// vscores is each variant's scores (variantScores): a question's
 	// variants are answered together, so each keeps its own.
 	vscores [][]float32
@@ -211,6 +215,9 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 // Close releases the Decider's State.
 func (d *Decider) Close() error {
 	if d.emb != nil {
+		if d.omniVis != nil {
+			d.omniVis.Close()
+		}
 		d.emb.Close()
 		return nil
 	}
@@ -317,7 +324,12 @@ func (d *Decider) DecideMedia(state jinja.Value, qs []DecisionQuestion, imgs []i
 	}
 	d.input = 0
 	d.pics, d.vids = nil, nil
-	if len(imgs) > 0 {
+	if len(imgs) > 0 && d.kind == jlm.DecisionD1Omni {
+		if err := d.d1OmniPrefix(imgs); err != nil {
+			return nil, err
+		}
+		defer func() { d.omniPre = d.omniPre[:0] }()
+	} else if len(imgs) > 0 {
 		pics, err := d.cutPictures(imgs)
 		if err != nil {
 			return nil, err
@@ -817,6 +829,9 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 	shown := d.order(q)
 	n := len(variants[0])
 	t := d.cfg.Temperature(q.Type, len(q.Options))
+	if d.kind == jlm.DecisionD1Omni && len(d.omniPre) > 0 {
+		t = 1 // the reference calibrates text alone (calibrate, modeling_d1.py)
+	}
 	if d.violation == "uncalibrated" {
 		t = 1
 	}

@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/jitllm/jitllm/convert/meta"
 	"github.com/jitllm/jitllm/format/jlm"
@@ -89,6 +90,10 @@ func d1OmniConfig(f *meta.File, head uint32) (*jlm.Config, error) {
 		}
 		c.NFFN = uint32(vs[0])
 	}
+	// The trunk's context is the reference's max_length (D1OmniConfig's
+	// default, 16384), not the base model's 128000 the file states: a state
+	// is cut to it, and a picture prefix comes off it.
+	c.NCtx = uint32(f.UintKey("decision.max_length", 16384))
 	c.Arch = jlm.ArchLFM2Enc
 	c.Flags |= jlm.FlagNonCausal
 	return c, nil
@@ -140,4 +145,24 @@ func unfuseThirds(e *jlm.Tensor, c *jlm.Config) ([]jlm.Tensor, bool, error) {
 		out = append(out, t)
 	}
 	return out, true, nil
+}
+
+// withoutAudio is an mmproj with its audio encoder's tensors (a.*, mm.a.*)
+// set aside: the container carries the vision half, and a request with a
+// voice clip is refused at the decision for want of an audio encoder rather
+// than run without one. A file with no audio encoder comes back as it is.
+func withoutAudio(f *meta.File) *meta.File {
+	if v, ok := f.KV["clip.has_audio_encoder"]; !ok || v.Type != meta.Bool || len(v.Raw) != 1 || v.Raw[0] == 0 {
+		return f
+	}
+	var ts []meta.Tensor
+	for _, t := range f.Tensors {
+		if !strings.HasPrefix(t.Name, "a.") && !strings.HasPrefix(t.Name, "mm.a.") {
+			ts = append(ts, t)
+		}
+	}
+	g := *f
+	g.Tensors = ts
+	g.Reindex()
+	return &g
 }
