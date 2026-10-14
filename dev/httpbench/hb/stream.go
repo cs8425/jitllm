@@ -83,6 +83,10 @@ type Request struct {
 	Temp   float64
 	// Extra is merged into the body as is: ignore_eos, an engine's own fields.
 	Extra map[string]any
+	// OnText, when set, is called with each text chunk's text as it is read,
+	// for a client that shows the stream live. It runs on the reading
+	// goroutine, so a slow one delays the next chunk's timestamp.
+	OnText func(text string)
 }
 
 func (r Request) body() ([]byte, error) {
@@ -145,7 +149,7 @@ func Do(ctx context.Context, c *http.Client, r Request) Sample {
 		s.Total = time.Since(t0)
 		return s
 	}
-	err = readStream(resp.Body, t0, &s)
+	err = readStream(resp.Body, t0, &s, r.OnText)
 	s.Total = time.Since(t0)
 	if err != nil {
 		s.Err = err.Error()
@@ -176,7 +180,7 @@ type chunk struct {
 // `data: [DONE]` ending the stream. The time of each frame with text is
 // taken when its line is read, which is when the bytes arrived to within the
 // reader's buffering.
-func readStream(r io.Reader, t0 time.Time, s *Sample) error {
+func readStream(r io.Reader, t0 time.Time, s *Sample, onText func(string)) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), 16<<20)
 	var last time.Time
@@ -220,6 +224,9 @@ func readStream(r io.Reader, t0 time.Time, s *Sample) error {
 		for _, ch := range c.Choices {
 			if ch.Text != "" || ch.Delta.Content != "" || ch.Delta.ReasoningContent != "" {
 				text = true
+				if onText != nil {
+					onText(ch.Text + ch.Delta.ReasoningContent + ch.Delta.Content)
+				}
 			}
 			if ch.FinishReason != nil && *ch.FinishReason != "" {
 				s.FinishReason = *ch.FinishReason
