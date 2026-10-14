@@ -9631,6 +9631,9 @@ func (g *devTier) prepBatch(width int) bool {
 		g.bbs = map[int]*blockScratch{}
 	}
 	if g.bbs[width] == nil {
+		if g.noRoomFor(width) {
+			return false
+		}
 		tok := BatchTok
 		if k := g.kb.batch.Tok; k >= 1 && batchWidth%k == 0 {
 			tok = k
@@ -9653,6 +9656,7 @@ func (g *devTier) prepBatch(width int) bool {
 		// whatever room placement left): they are given back first.
 		if !g.NoScratchReserve && !g.kvCompact(g.promisedBytes(), nil) && width != g.promptW && width != g.stepW && !g.reserving {
 			g.dropBatch(width)
+			g.markNoRoom(width)
 			g.ScratchRefused++
 			g.LastErr = fmt.Sprintf("a %d-row batched scratch does not fit the budget (%d of %d bytes charged)", width, g.used, g.limit)
 			return false
