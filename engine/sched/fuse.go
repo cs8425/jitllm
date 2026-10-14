@@ -102,7 +102,7 @@ func (p *Pool) FuseWith(l Lookahead) bool {
 		// The crew's only user, under the registry's lock: a view opened
 		// after this point waits for the crew's turn like any region does.
 		crews.mu.Lock()
-		alone := c.views == 1 && c.mu.users == 1
+		alone := c.views-c.idle == 1 && c.mu.users == 1
 		crews.mu.Unlock()
 		if !alone {
 			return false

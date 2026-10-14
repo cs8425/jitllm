@@ -199,6 +199,10 @@ type Pool struct {
 	// beside is a view opened beside another of the same caller's
 	// (SharedBeside), which the turn's users do not count.
 	beside bool
+	// idle is how many of the crew's views are away (Park), under crews.mu.
+	idle int
+	// away is this view's own state.
+	away bool
 	// fz is an open fused region's state (fuse.go), on the crew.
 	fz fused
 }

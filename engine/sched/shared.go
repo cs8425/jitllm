@@ -77,7 +77,10 @@ func (c *Pool) release(v *Pool) {
 		return // this view was already closed
 	}
 	c.views--
-	if !v.beside {
+	switch {
+	case v.away:
+		c.idle--
+	case !v.beside:
 		c.mu.users--
 	}
 	if c.views > 0 {
@@ -85,6 +88,46 @@ func (c *Pool) release(v *Pool) {
 	}
 	delete(crews.m, c.key)
 	c.Close()
+}
+
+// Park says the caller of view v is not using its cores for now, so a fused
+// region (Fuse) on another view of the crew, or of one that takes turns with
+// it, is its cores' only user: the view stays open and is still there to run
+// a region, and Unpark takes it back. A session that sends its prefill to the
+// E-cores parks its decode view on the P-cores for the length of the prefill,
+// so a session decoding beside it can fuse. Park and Unpark pair, on one
+// caller's view, and are not for a view of a pool that owns its workers.
+func (p *Pool) Park() {
+	if p == nil || p.crew == nil {
+		return
+	}
+	crews.mu.Lock()
+	defer crews.mu.Unlock()
+	if p.away || p.stopped.Load() {
+		return
+	}
+	p.away = true
+	p.crew.idle++
+	if !p.beside {
+		p.crew.mu.users--
+	}
+}
+
+// Unpark is Park's pair: v is a user of its crew's cores again.
+func (p *Pool) Unpark() {
+	if p == nil || p.crew == nil {
+		return
+	}
+	crews.mu.Lock()
+	defer crews.mu.Unlock()
+	if !p.away {
+		return
+	}
+	p.away = false
+	p.crew.idle--
+	if !p.beside {
+		p.crew.mu.users++
+	}
 }
 
 func overlaps(a, b []int) bool {
