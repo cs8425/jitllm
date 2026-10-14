@@ -286,6 +286,15 @@ func extract(t Quant, blk []byte, s int, q []int32) (dBits, dminBits uint16, sc,
 		}
 		return binary.LittleEndian.Uint16(blk), 0, 0, 0
 
+	case TQ2:
+		// Sub-block s is elements 32s..32s+31: bits 2(s%4) of qs[32(s/4)+l]
+		// (quant's TQ2_0 decoder). Every sub-block carries the block's d.
+		g, sh := blk[32*(s/4):], uint(2*(s%4))
+		for l := 0; l < 32; l++ {
+			q[l] = int32(g[l] >> sh & 3)
+		}
+		return binary.LittleEndian.Uint16(blk[64:]), 0, 0, 0
+
 	case MXFP4:
 		// Q4_0's nibble order with the raw e2m1 code kept; the kernels translate
 		// it through qinfo.codes. mxfp4Refuse has already rejected exponents the
@@ -566,8 +575,12 @@ func PackedWords(t Quant, nrows, k int) (qs, d, sc int, err error) {
 		}
 		return nrows * k * qi.float / 4, 0, 0, nil
 	}
-	if qi.blockE == 0 || k%qi.blockE != 0 {
-		return 0, 0, 0, fmt.Errorf("kernels: PackedWords: k=%d is not a multiple of %d", k, qi.blockE)
+	// The layout's granule is a super-block of sub-blocks, which is the source
+	// block for every format but TQ2, whose 256-wide source block is eight
+	// sub-blocks of their own scale: a k-slice of a packed row (superWords)
+	// is whole sub-blocks, and packing checks the source block itself.
+	if unit := qi.sub * qi.perSuper; qi.blockE == 0 || k <= 0 || k%unit != 0 {
+		return 0, 0, 0, fmt.Errorf("kernels: PackedWords: k=%d is not a multiple of %d", k, unit)
 	}
 	nsub := k / qi.sub
 	qs = nrows * nsub * (qi.sub * (qi.bits + qi.hi) / 32)

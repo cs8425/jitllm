@@ -29,6 +29,17 @@ const (
 	// in it, read only by a row gather.
 	IQ4_NL Type = 20
 	BF16   Type = 30
+	// TQ1_0 and TQ2_0 are llama.cpp's ternary formats: 256 weights of {-1, 0,
+	// 1} times one f16 scale, base-3 packed five to a byte (TQ1_0) or as 2-bit
+	// codes q+1 (TQ2_0). TQ2_0 is the engine's ternary weight type; TQ1_0
+	// converts into it exactly.
+	TQ1_0 Type = 34
+	TQ2_0 Type = 35
+	// I2_S is bitnet.cpp's ternary type, the number its fork of ggml gives it
+	// (ggml itself retired 36). It has no block: a tensor is n/4 bytes of
+	// 2-bit codes and then one f32 scale, padded to 32 bytes, so it is sized
+	// by I2SBytes rather than by blockInfo and decoded only by the converter.
+	I2_S Type = 36
 	// MXFP4 is the OCP microscaling format gpt-oss ships its expert banks in:
 	// 32 e2m1 codes and one E8M0 exponent per block.
 	MXFP4 Type = 39
@@ -58,8 +69,8 @@ var blockInfo = map[Type][2]uint64{
 	27:    {1, 8},     // I64
 	28:    {1, 8},     // F64
 	29:    {256, 56},  // IQ1_M
-	34:    {256, 54},  // TQ1_0
-	35:    {256, 66},  // TQ2_0
+	TQ1_0: {256, 54},
+	TQ2_0: {256, 66},
 	MXFP4: {32, 17},
 }
 
@@ -68,7 +79,7 @@ var typeNames = map[Type]string{
 	Q8_0: "Q8_0", Q8_1: "Q8_1", Q2_K: "Q2_K", Q3_K: "Q3_K", Q4_K: "Q4_K", Q5_K: "Q5_K",
 	Q6_K: "Q6_K", Q8_K: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS", 19: "IQ1_S",
 	20: "IQ4_NL", 21: "IQ3_S", 22: "IQ2_S", 23: "IQ4_XS", 24: "I8", 25: "I16", 26: "I32",
-	27: "I64", 28: "F64", 29: "IQ1_M", BF16: "BF16", 34: "TQ1_0", 35: "TQ2_0", MXFP4: "MXFP4",
+	27: "I64", 28: "F64", 29: "IQ1_M", BF16: "BF16", TQ1_0: "TQ1_0", TQ2_0: "TQ2_0", I2_S: "I2_S", MXFP4: "MXFP4",
 }
 
 func (t Type) String() string {
@@ -77,6 +88,10 @@ func (t Type) String() string {
 	}
 	return "type(" + itoa(uint64(t)) + ")"
 }
+
+// I2SBytes is an I2_S tensor's size for n elements: the codes, then the
+// 32-byte tail that holds the scale.
+func I2SBytes(n uint64) uint64 { return n/4 + 32 }
 
 // BlockElems is how many logical elements one block encodes.
 func (t Type) BlockElems() uint64 { return blockInfo[t][0] }
@@ -107,7 +122,7 @@ func itoa(v uint64) string {
 //
 // A gate that sweeps this cannot miss a newly added format, where hand-written
 // lists in each test once did.
-var PackedTypes = []Type{Q4_0, Q5_0, Q5_1, Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, MXFP4}
+var PackedTypes = []Type{Q4_0, Q5_0, Q5_1, Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, MXFP4, TQ2_0}
 
 // PlantScales overwrites every block's scale fields in src -- a buffer of whole
 // blocks of t, typically random bytes -- with finite values, drawn in turn from
@@ -186,6 +201,8 @@ func scaleOffsets(t Type) ([]int, bool) {
 		return []int{208}, true // d, after the quants and scales
 	case Q3_K:
 		return []int{108}, true
+	case TQ2_0:
+		return []int{64}, true // d, after the 64 code bytes
 	}
 	return nil, false
 }

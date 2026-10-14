@@ -136,6 +136,10 @@ var archOf = map[string]jlm.Arch{
 	"dots1":       jlm.ArchDots1,
 	"phimoe":      jlm.ArchPhiMoE,
 	"apertus":     jlm.ArchApertus,
+	// BitNet b1.58: llama.cpp's converter names it "bitnet", bitnet.cpp's
+	// "bitnet-b1.58"; one graph (convert/bitnet.go, jlm.ArchBitNet).
+	"bitnet":       jlm.ArchBitNet,
+	"bitnet-b1.58": jlm.ArchBitNet,
 	// DeepSeek V4 (text): hyper-connected residual streams, single-key MQA
 	// over a sliding window and a compressed history. See jlm.ArchDeepseek4.
 	"deepseek4": jlm.ArchDeepseek4,
@@ -289,6 +293,8 @@ func configOf(f *meta.File) (*jlm.Config, error) {
 	case jlm.ArchLlama:
 		// llama3 is this arch too: it differs only in values the header carries
 		// (rope base, GQA, vocabulary size) and in its BPE tokenizer.
+	case jlm.ArchBitNet:
+		bitnetConfig(c)
 	case jlm.ArchQwen2:
 		// llama's graph with biases on q, k and v, which are tensors.
 		c.Flags |= jlm.FlagRopeNeox

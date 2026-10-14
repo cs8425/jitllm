@@ -71,7 +71,14 @@ const (
 	// (RoleNGramTable), read a row at a time and gathered, never multiplied.
 	TypeIQ4NL Type = 13
 
-	typeMax = TypeIQ4NL
+	// TypeTQ2 is a ternary weight (GGUF's TQ2_0, into which TQ1_0 and
+	// bitnet.cpp's I2_S convert): Q4's planes with a constant bias of one, so
+	// the payload is q in {0, 1, 2} for {-1, 0, 1}, and one f16 scale per
+	// 32-wide sub-block (the source block's, repeated). Its arithmetic is over
+	// int8 activations (kernels.TQ2).
+	TypeTQ2 Type = 14
+
+	typeMax = TypeTQ2
 )
 
 // Valid reports whether t is a code this format defines. A file carrying
@@ -106,6 +113,8 @@ func (t Type) String() string {
 		return "bf16"
 	case TypeIQ4NL:
 		return "iq4nl"
+	case TypeTQ2:
+		return "tq2"
 	}
 	return "type(" + itoa(uint64(t)) + ")"
 }
@@ -154,6 +163,8 @@ func Layout(t Type) (TypeLayout, bool) {
 		// HasMin at SuperSub 1: there is no per-sub-block minimum to read, so
 		// the minimum is the d word's high half, stored negated.
 		return TypeLayout{Sub: 32, Planes: [2]int{4, 1}, SuperSub: 1, HasMin: true}, true
+	case TypeTQ2:
+		return TypeLayout{Sub: 32, Planes: [2]int{4, 0}, SuperSub: 1, Bias: 1}, true
 	}
 	return TypeLayout{}, false
 }
@@ -577,6 +588,8 @@ func SourceType(t Type) (quant.Type, bool) {
 		return quant.Q6_K, true
 	case TypeIQ4NL:
 		return quant.IQ4_NL, true
+	case TypeTQ2:
+		return quant.TQ2_0, true
 	}
 	return 0, false
 }
@@ -610,6 +623,8 @@ func TypeOf(t quant.Type) (Type, bool) {
 		return TypeQ6S, true
 	case quant.IQ4_NL:
 		return TypeIQ4NL, true
+	case quant.TQ2_0:
+		return TypeTQ2, true
 	}
 	return 0, false
 }
@@ -680,5 +695,5 @@ func (r Role) Expanded() bool {
 		RoleNextnENorm, RoleNextnHNorm, RoleNextnHeadNorm:
 		return true
 	}
-	return r == RoleXIELU || flagshipExpanded(r) || visionFamExpanded(r) || visionFamilyExpanded(r)
+	return r == RoleXIELU || r == RoleAttnSubNorm || r == RoleFFNSubNorm || flagshipExpanded(r) || visionFamExpanded(r) || visionFamilyExpanded(r)
 }

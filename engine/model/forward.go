@@ -1110,6 +1110,8 @@ func (s *State) SetDeviceLayers(d nn.Device, max int) error {
 		// post-norms are optional per-layer roles.
 		PostNorm:    s.m.hasPostNorm(),
 		NoPreNorm:   s.m.hasNoPreNorm(),
+		// BitNet's inner norms, which the arch carries on every block.
+		SubNorm: c.TokenAct,
 		AttnSoftcap: c.AttnSoftcap,
 		ActWin:      s.jit.ActWindow(),
 		// Zero for a dense model, which is what makes every existing plan
@@ -1503,6 +1505,7 @@ func (s *State) layerWeightsAt(li int) nn.LayerWeights {
 	w := nn.LayerWeights{
 		AttnNorm: l.attnNorm, FFNNorm: l.ffnNorm,
 		PostAttnNorm: l.postAttnNorm, PostFFNNorm: l.postFFNNorm,
+		AttnSubNorm: l.attnSubNorm, FFNSubNorm: l.ffnSubNorm,
 		QNorm: qn, KNorm: kn,
 		Bq: l.bq, Bk: l.bk, Bv: l.bv, Bo: l.bo,
 		Wq: wt(l.wq), Wk: wt(l.wk), Wv: wt(l.wv), Wo: wt(l.wo),
@@ -2909,6 +2912,7 @@ func (s *State) PrewarmGPU(n int) <-chan struct{} {
 			w := nn.LayerWeights{
 				AttnNorm: l.attnNorm, FFNNorm: l.ffnNorm,
 				PostAttnNorm: l.postAttnNorm, PostFFNNorm: l.postFFNNorm,
+				AttnSubNorm: l.attnSubNorm, FFNSubNorm: l.ffnSubNorm,
 				QNorm: qn, KNorm: kn,
 				Bq: l.bq, Bk: l.bk, Bv: l.bv, Bo: l.bo,
 				Wq: wt(l.wq), Wk: wt(l.wk), Wv: wt(l.wv), Wo: wt(l.wo),
@@ -3840,6 +3844,13 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 					s.jit.NewInput()
 					src = s.ogate
 				}
+				// BitNet's norm over the attention output, before wo.
+				if l.attnSubNorm != nil {
+					t0 = s.tick()
+					s.rmsnorm(src[:c.QDimAt(li)], src[:c.QDimAt(li)], l.attnSubNorm, c.RMSEps)
+					s.jit.NewInput()
+					s.tock(opRMSNorm, t0)
+				}
 				// With nothing between the projection and the residual, the
 				// add rides the projection's rows (fuse.go).
 				plain := s.residFold && l.bo == nil && !kind.Recurrent() && l.postAttnNorm == nil &&
@@ -3988,13 +3999,25 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 				s.grp.Resid, s.grp.Alpha = s.x, float32(c.ResidualScale)
 			}
 			s.aheadNext(li)
-			grouped := s.groupOf(gate, [nn.MaxGroup]*tensor{&l.down}, [nn.MaxGroup][]float32{s.h}, 1)
+			if l.ffnSubNorm != nil {
+				// BitNet normalises act(gate)*up before down, so the product
+				// is formed whole rather than inside down's group.
+				s.grp.ActUp, s.grp.Act = nil, 0
+			}
+			grouped := l.ffnSubNorm == nil &&
+				s.groupOf(gate, [nn.MaxGroup]*tensor{&l.down}, [nn.MaxGroup][]float32{s.h}, 1)
 			ffnResid = grouped && s.grp.Resid != nil
 			s.grp.ActUp, s.grp.Resid = nil, nil
 			if !grouped {
 				s.actmulAll(gate, up, act)
 				s.jit.NewInput()
 				s.tock(opAct, t0)
+				if l.ffnSubNorm != nil {
+					t0 = s.tick()
+					s.rmsnorm(gate, gate, l.ffnSubNorm, c.RMSEps)
+					s.jit.NewInput()
+					s.tock(opRMSNorm, t0)
+				}
 				if err := s.mv(s.h, l.down, gate); err != nil {
 					return nil, err
 				}

@@ -36,11 +36,17 @@ const (
 	// Q5_1 is Q5_0's planes with an f16 minimum: weight = d*q + m. Its d word
 	// carries both halves the way a k-quant's does; see MinInD.
 	Q5_1
+	// TQ2 is a ternary weight, llama.cpp's TQ2_0: codes q+1 in {0, 1, 2} for
+	// weights {-1, 0, 1}, one f16 scale per 256 weights repeated on each
+	// 32-wide sub-block, so it is Q4_0's planes with a bias of one. Ternary x
+	// int8 is the ordinary unsigned 4-bit dot with the activation sum
+	// subtracted. Its activations are always int8 (see qinfo.intAct).
+	TQ2
 )
 
 func (q Quant) String() string {
 	return [...]string{"Q4_0", "Q8_0", "Q4_K", "Q3_K", "Q5_K", "Q6_K", "Q5_0", "MXFP4",
-		"F32", "F16", "BF16", "Q5_1"}[q]
+		"F32", "F16", "BF16", "Q5_1", "TQ2"}[q]
 }
 
 // FloatOf maps an unquantized weight type to its device format.
@@ -106,6 +112,12 @@ type qinfo struct {
 	// e8m0 says the super-scale is a power of two stored as one byte rather
 	// than an f16 (MXFP4's E8M0 exponent). See DSlots.
 	e8m0 bool
+	// intAct says the format's arithmetic is defined over int8 activations:
+	// a ternary model is trained with every input of its projections
+	// quantized per token, so a kernel that takes binary16 activations
+	// (the Volta tile, GemmVolta) computes a different function, not a
+	// rounding of the same one. Such kernels decline the format by name.
+	intAct bool
 }
 
 // Scales are stored unfolded: one f16 d per super-block plus one integer byte
@@ -133,6 +145,10 @@ var qtab = [...]qinfo{
 	// plane m is one, and the packer stores the minimum negated as dmin, so
 	// d*q + m = d*q - (-m)*1. See MinInD.
 	Q5_1: {bits: 4, hi: 1, sub: 32, biasArray: true, blockB: 24, blockE: 32, perSuper: 1},
+	// TQ2 is Q4_0's planes with a bias of one: q in {0, 1, 2} (3 is the
+	// format's own unused code, read as 2), and the source block's one d
+	// written on each of its eight sub-blocks.
+	TQ2: {bits: 4, sub: 32, biasK: 1, blockB: 66, blockE: 256, perSuper: 1, intAct: true},
 	// A "block" of a float format is one 32-element activation block.
 	Float32:  {sub: 32, blockB: 128, blockE: 32, perSuper: 1, float: 4},
 	Float16:  {sub: 32, blockB: 64, blockE: 32, perSuper: 1, float: 2},

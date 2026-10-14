@@ -15,7 +15,7 @@ import (
 // it ships.
 func SupportedA64Packed(t quant.Type) bool {
 	switch t {
-	case quant.Q8_0, quant.Q4_0, quant.Q5_0, quant.Q5_1, quant.Q4_K, quant.Q5_K, quant.Q3_K, quant.Q6_K, quant.MXFP4:
+	case quant.Q8_0, quant.Q4_0, quant.Q5_0, quant.Q5_1, quant.Q4_K, quant.Q5_K, quant.Q3_K, quant.Q6_K, quant.MXFP4, quant.TQ2_0:
 		return true
 	}
 	return false

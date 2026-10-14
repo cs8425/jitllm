@@ -24,6 +24,7 @@ var f16At = map[kernels.Quant][]int{
 	kernels.Q5_K: {0, 2},
 	kernels.Q3_K: {108},
 	kernels.Q6_K: {208},
+	kernels.TQ2:  {64},
 }
 
 func randWeights(q kernels.Quant, rows, k int, rng *rand.Rand) []byte {

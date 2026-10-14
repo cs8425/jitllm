@@ -27,6 +27,8 @@ func QuantOf(t quant.Type) (Quant, bool) {
 		return Q6_K, true
 	case quant.MXFP4:
 		return MXFP4, true
+	case quant.TQ2_0:
+		return TQ2, true
 	}
 	return 0, false
 }

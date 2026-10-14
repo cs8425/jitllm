@@ -38,7 +38,7 @@ func TestMatVecMMAMatchesDot4(t *testing.T) {
 	for _, d := range mmaDevices(t, devs, ir.MMAS8Turing) {
 		t.Run(d.API(), func(t *testing.T) {
 			for _, q := range []kernels.Quant{kernels.Q4_0, kernels.Q8_0, kernels.Q4_K,
-				kernels.Q3_K, kernels.Q5_K, kernels.Q6_K, kernels.MXFP4, kernels.Q5_0, kernels.Q5_1} {
+				kernels.Q3_K, kernels.Q5_K, kernels.Q6_K, kernels.MXFP4, kernels.Q5_0, kernels.Q5_1, kernels.TQ2} {
 				for _, sp := range []struct{ rows, k, ntok, mt, nt int }{
 					{16, 256, 8, 1, 1},
 					{64, 256, 16, 2, 2},
