@@ -231,3 +231,34 @@ What this says about the candidates:
 
 So the order is: the matvec decomposition per card first, the exact
 norm-statistics epilogue second, chaining not at all at decode.
+
+### Headroom in the decomposition, probed
+
+Before building a joint tuner: does any decomposition the knobs can force beat
+the tuned default? V100, CUDA, graph replay, p64 tg256, three runs each, one
+process per configuration, the default run first and last:
+
+| configuration | Llama-3.2-1B tok/s | Llama-3.1-8B tok/s |
+|---|---|---|
+| tuned default (first) | 545.6 / 552.9 / 551.8 | 138.7 / 139.0 / 138.8 |
+| prologue on every site (ActInSites 15) | 540.6 / 539.1 / 542.2 | 117.2 / 117.5 / 117.1 |
+| prologue on down only (8) | 540.1 / 538.6 / 538.4 | 132.0 / 132.0 / 132.0 |
+| prologue on o only (2) | 544.4 / 546.4 / 543.3 | 137.8 / 138.0 / 137.9 |
+| no act(gate)*up fusion | 537.4 / 536.1 / 541.7 | 137.5 / 137.6 / 137.6 |
+| row tile 2 | 421.6 / 421.3 / 420.2 | 119.9 / 120.1 / 120.1 |
+| row tile 4 | 362.5 / 364.5 / 357.6 | 109.0 / 109.2 / 109.2 |
+| split 4 everywhere | 332.2 / 334.1 / 333.6 | 95.8 / 95.6 / 95.6 |
+| split 8 everywhere | 404.7 / 405.1 / 404.7 | 114.4 / 114.5 / 114.5 |
+| split 16 everywhere | 440.8 / 440.0 / 440.2 | 120.5 / 120.6 / 120.7 |
+| the table, no tuning | 464.5 / 465.6 / 463.5 | 124.6 / 124.5 / 124.8 |
+| tuned default (last) | 555.0 / 556.6 / 555.9 | 138.3 / 138.4 / 138.6 |
+
+Nothing beats the tuned default; the tuner is worth 1.19x on the 1B and 1.11x
+on the 8B over the table. What is left is per shape, and the per-kernel times
+say where: the 8B's large matvecs run at ~80-87% of the wall (the 14336x4096
+gate/up ~44 us for 33 MB), while the 1B's 2048x2048 q/o matvec runs ~8 us for
+2.4 MB, about a third of it. A small matrix is bound by its fill and drain,
+not its decomposition: no split or prologue choice moves a fixed few
+microseconds a launch, which is the 1B's missing 37%. The levers for that are
+launches that overlap their neighbours' tails (programmatic dependent launch,
+sm_90 only) or fewer, larger matvecs (q/k/v and gate/up already run as one).
