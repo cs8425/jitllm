@@ -54,6 +54,16 @@ type Embedder struct {
 	// rg is the pool regions the host's blocks run (encRegions).
 	rg encRegions
 
+	// seqs packs several sequences into one encoder pass: each run of rows is
+	// a sequence of its own, whose rows attend inside it and count their
+	// positions from its start, and seqTypes is each one's question type (a
+	// decision head's type row). nil is one sequence over every row.
+	// rowSeq is each row's sequence and qseq, qpos the attention's queries'
+	// sequence and row, kept between calls.
+	seqs               []nn.KeyRun
+	seqTypes           []jlm.QuestionType
+	rowSeq, qseq, qpos []int32
+
 	// afterBlock, when set, sees the residual after every encoder block --
 	// the per-layer bisection hook the correctness gates use.
 	afterBlock func(li int, x []float32)
