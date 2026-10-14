@@ -17,6 +17,13 @@ engine/model's TestBitNetRealMatchesReference reads.
 
 The prompts carry the tokenizer's BOS (<|begin_of_text|>), as the release's
 own examples do.
+
+microsoft/bitnet-b1.58-2B-4T-bf16 is the latent weights, ternarized every call
+(autobitlinear, online) in the checkpoint's torch_dtype: BITNET_TERNARIZE_IN=
+bfloat16 runs that ternarization in bf16 -- each op computed in f32 and stored
+in bf16, as torch runs it on a bf16 tensor -- with everything else float32. Its
+codes are not the release's (98-99% of each projection agrees), so it is its
+own golden.
 """
 import json
 import os
@@ -35,6 +42,16 @@ def main():
     d = sys.argv[1]
     name = sys.argv[2] if len(sys.argv) > 2 else os.path.basename(os.path.normpath(d))
     torch.manual_seed(0)
+    if tdt := os.environ.get("BITNET_TERNARIZE_IN"):
+        from transformers.integrations import bitnet as B
+        dt = getattr(torch, tdt)
+
+        def fwd(ctx, weight):
+            w = weight.to(dt)
+            scale = 1.0 / w.abs().mean().clamp_(min=1e-5)
+            return ((w * scale).round().clamp(-1, 1) / scale).to(weight.dtype)
+
+        B.WeightQuant.forward = staticmethod(fwd)
     m = AutoModelForCausalLM.from_pretrained(d, dtype=torch.float32)
     m.config._attn_implementation = "eager"
     m.eval()

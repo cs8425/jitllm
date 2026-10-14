@@ -36,7 +36,7 @@ func GetRowsPacked(q Quant, nrows, k, ntok int, scale float32) (*ir.Kernel, erro
 		return nil, fmt.Errorf("kernels: GetRowsPacked: k=%d is not a multiple of %v's %d", k, q, qi.blockE)
 	case nrows <= 0 || ntok <= 0:
 		return nil, fmt.Errorf("kernels: GetRowsPacked: nrows=%d ntok=%d", nrows, ntok)
-	case qi.bits != 4 && qi.bits != 8:
+	case qi.bits != 2 && qi.bits != 4 && qi.bits != 8:
 		return nil, fmt.Errorf("kernels: GetRowsPacked: %v is %d bits", q, qi.bits)
 	}
 	nsub := k / qi.sub
@@ -138,6 +138,20 @@ func GetRowsPacked(q Quant, nrows, k, ntok int, scale float32) (*ir.Kernel, erro
 					qv = b.Sub(ir.F32, qv, b.Mul(ir.F32, f(256), b.CvtF32(b.Shr(ir.U32, by, c(7)))))
 				}
 				put(w*4+bb, qv)
+			}
+		}
+		return b.Done(), nil
+	}
+	if qi.bits == 2 {
+		// TQ2: byte p's field fi is element p + fi*run (packSub).
+		run := qi.sub / 4
+		for w := 0; w < pw; w++ {
+			v := b.Load(ir.U32, pQS, base, int64(w*nrows))
+			for bb := 0; bb < 4; bb++ {
+				for fi := 0; fi < 4; fi++ {
+					q := b.And(ir.U32, b.Shr(ir.U32, v, c(int64(8*bb+2*fi))), c(3))
+					put(w*4+bb+fi*run, b.CvtF32(q))
+				}
 			}
 		}
 		return b.Done(), nil

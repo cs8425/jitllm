@@ -37,10 +37,11 @@ const (
 	// carries both halves the way a k-quant's does; see MinInD.
 	Q5_1
 	// TQ2 is a ternary weight, llama.cpp's TQ2_0: codes q+1 in {0, 1, 2} for
-	// weights {-1, 0, 1}, one f16 scale per 256 weights repeated on each
-	// 32-wide sub-block, so it is Q4_0's planes with a bias of one. Ternary x
-	// int8 is the ordinary unsigned 4-bit dot with the activation sum
-	// subtracted. Its activations are always int8 (see qinfo.intAct).
+	// weights {-1, 0, 1} in a 2-bit plane (four fields a byte, Fields), one f16
+	// scale per 256 weights repeated on each 32-wide sub-block, and a bias of
+	// one. Ternary x int8 is an unsigned dot of the codes with the activation
+	// sum subtracted, the activation sum taken once per token by the
+	// quantizer. Its activations are always int8 (see qinfo.intAct).
 	TQ2
 	// TQ2F is TQ2 with its scale an f32 (quant.TQ2_F32): the d word is the
 	// scale's bits, one row a word (DSlots 1). See qinfo.d32.
@@ -83,7 +84,7 @@ func IsFloat(q Quant) bool { return q.info().float > 0 }
 //	Q5_K  4+1,    /32   q 0..31   scale d*sc[s]    bias dmin*m[s]   (array)
 //	Q6_K  4+2,    /16   q 0..63   scale d*sc[g]    bias 32*scale
 type qinfo struct {
-	bits int // PRIMARY plane width per weight: 4 or 8
+	bits int // PRIMARY plane width per weight: 2, 4 or 8 (Fields codes a byte)
 	// hi is the secondary plane's width: 0 when the quants fit the primary
 	// plane, 2 for Q6_K and 1 for Q5_K. The planes keep the payload at its
 	// native width; decode is bandwidth-bound, so a byte per weight was a pure
@@ -152,12 +153,12 @@ var qtab = [...]qinfo{
 	// plane m is one, and the packer stores the minimum negated as dmin, so
 	// d*q + m = d*q - (-m)*1. See MinInD.
 	Q5_1: {bits: 4, hi: 1, sub: 32, biasArray: true, blockB: 24, blockE: 32, perSuper: 1},
-	// TQ2 is Q4_0's planes with a bias of one: q in {0, 1, 2} (3 is the
+	// TQ2 is a 2-bit plane with a bias of one: q in {0, 1, 2} (3 is the
 	// format's own unused code, read as 2), and the source block's one d
 	// written on each of its eight sub-blocks.
-	TQ2: {bits: 4, sub: 32, biasK: 1, blockB: 66, blockE: 256, perSuper: 1, intAct: true},
+	TQ2: {bits: 2, sub: 32, biasK: 1, blockB: 66, blockE: 256, perSuper: 1, intAct: true},
 	// TQ2F is TQ2 with an f32 scale, a row to each d word.
-	TQ2F: {bits: 4, sub: 32, biasK: 1, blockB: 68, blockE: 256, perSuper: 1, intAct: true, d32: true},
+	TQ2F: {bits: 2, sub: 32, biasK: 1, blockB: 68, blockE: 256, perSuper: 1, intAct: true, d32: true},
 	// A "block" of a float format is one 32-element activation block.
 	Float32:  {sub: 32, blockB: 128, blockE: 32, perSuper: 1, float: 4},
 	Float16:  {sub: 32, blockB: 64, blockE: 32, perSuper: 1, float: 2},
@@ -924,6 +925,21 @@ func matVec(s MatVecShape, into *segCtx) (*ir.Kernel, error) {
 					n := j*s.Tok + t
 					iaccs[n] = dot4(lo, aload(int64(u)+o), iaccs[n])
 					iaccs[n] = dot4(hi, aload(int64(u+awords/2)+o), iaccs[n])
+				}
+			} else if qi.bits == 2 {
+				// TQ2's four 2-bit fields: field fi of word u is the elements
+				// a field-run on, activation word u + fi*pw (packSub).
+				m3 := b.Const(ir.U32, 0x03030303)
+				for fi := 0; fi < 4; fi++ {
+					q := x
+					if fi > 0 {
+						q = b.Shr(ir.U32, x, b.Const(ir.U32, int64(2*fi)))
+					}
+					qc := center(b.And(ir.U32, q, m3))
+					for t := 0; t < s.Tok; t++ {
+						n := j*s.Tok + t
+						iaccs[n] = dot4(qc, aload(int64(u+fi*pw)+int64(t*aTok)), iaccs[n])
+					}
 				}
 			} else {
 				xc := center(x)

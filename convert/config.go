@@ -136,9 +136,10 @@ var archOf = map[string]jlm.Arch{
 	"dots1":       jlm.ArchDots1,
 	"phimoe":      jlm.ArchPhiMoE,
 	"apertus":     jlm.ArchApertus,
-	// BitNet b1.58: llama.cpp's converter names it "bitnet", bitnet.cpp's
-	// "bitnet-b1.58"; one graph (convert/bitnet.go, jlm.ArchBitNet).
-	"bitnet":       jlm.ArchBitNet,
+	// BitNet b1.58 2B-4T as bitnet.cpp's converter names it (convert/bitnet.go,
+	// jlm.ArchBitNet). llama.cpp's own "bitnet" is 1bitLLM's reproduction, a
+	// SiLU gate, and its converter cannot write transformers' BitNetForCausalLM
+	// at all (it maps none of its inner-norm names); it is not this graph.
 	"bitnet-b1.58": jlm.ArchBitNet,
 	// DeepSeek V4 (text): hyper-connected residual streams, single-key MQA
 	// over a sliding window and a compressed history. See jlm.ArchDeepseek4.

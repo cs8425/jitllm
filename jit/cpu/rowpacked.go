@@ -31,7 +31,7 @@ func EmitPackedRow(q kernels.Quant) ([]byte, error) {
 	perSuper, _ := kernels.ScaleLayout(q)
 	signed := kernels.SignedPayload(q)
 	codes := kernels.Codes(q) != nil
-	if sub%8 != 0 || (bits != 4 && bits != 8) || perSuper < 1 {
+	if sub%8 != 0 || (bits != 2 && bits != 4 && bits != 8) || perSuper < 1 || bits == 2 && (sub != 32 || hi != 0 || codes) {
 		return nil, fmt.Errorf("jit: EmitPackedRow: %v has no row kernel shape", q)
 	}
 	pw, hw := sub*bits/32, sub*hi/32
@@ -150,10 +150,23 @@ func EmitPackedRow(q kernels.Quant) ([]byte, error) {
 		if bits == 4 {
 			base = 32
 		}
+		if bits == 2 {
+			// TQ2: a 32-wide sub-block is two words, and its eight-element
+			// group g is field g of all eight bytes (packSub), so each group
+			// widens the same eight bytes and shifts its own field down.
+			a.VPSRLD(Y5, Y9, 6) // 3 in every dword
+		}
 		for g := 0; g < sub/8; g++ {
-			if signed {
+			switch {
+			case bits == 2:
+				a.VPMOVZXBD(Y1, At(src, 0))
+				if g > 0 {
+					a.VPSRLD(Y1, Y1, byte(2*g))
+				}
+				a.VPAND(Y1, Y1, Y5)
+			case signed:
 				a.VPMOVSXBD(Y1, At(src, base+int32(8*g)))
-			} else {
+			default:
 				a.VPMOVZXBD(Y1, At(src, base+int32(8*g)))
 			}
 			if hi > 0 {

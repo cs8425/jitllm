@@ -72,10 +72,11 @@ const (
 	TypeIQ4NL Type = 13
 
 	// TypeTQ2 is a ternary weight (GGUF's TQ2_0, into which TQ1_0 and
-	// bitnet.cpp's I2_S convert): Q4's planes with a constant bias of one, so
-	// the payload is q in {0, 1, 2} for {-1, 0, 1}, and one f16 scale per
-	// 32-wide sub-block (the source block's, repeated). Its arithmetic is over
-	// int8 activations (kernels.TQ2).
+	// bitnet.cpp's I2_S convert): a 2-bit plane, four codes a byte a quarter
+	// sub-block apart (kernels.Fields), with a constant bias of one, so the
+	// payload is q in {0, 1, 2} for {-1, 0, 1}, and one f16 scale per 32-wide
+	// sub-block (the source block's, repeated): 2.5 bits a weight. Its
+	// arithmetic is over int8 activations (kernels.TQ2).
 	TypeTQ2 Type = 14
 
 	// TypeTQ2F is TypeTQ2 with its scale an f32: one word a row a sub-block
@@ -174,9 +175,9 @@ func Layout(t Type) (TypeLayout, bool) {
 		// the minimum is the d word's high half, stored negated.
 		return TypeLayout{Sub: 32, Planes: [2]int{4, 1}, SuperSub: 1, HasMin: true}, true
 	case TypeTQ2:
-		return TypeLayout{Sub: 32, Planes: [2]int{4, 0}, SuperSub: 1, Bias: 1}, true
+		return TypeLayout{Sub: 32, Planes: [2]int{2, 0}, SuperSub: 1, Bias: 1}, true
 	case TypeTQ2F:
-		return TypeLayout{Sub: 32, Planes: [2]int{4, 0}, SuperSub: 1, Bias: 1, D32: true}, true
+		return TypeLayout{Sub: 32, Planes: [2]int{2, 0}, SuperSub: 1, Bias: 1, D32: true}, true
 	}
 	return TypeLayout{}, false
 }
