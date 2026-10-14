@@ -15,7 +15,9 @@ import (
 // asserts nothing (RULE 4), and it runs only when JITLLM_DECIDE_AB names the
 // arms, so a plain `go test` never takes a timing.
 //
-//	JITLLM_DECIDE_AB    comma list of arms: aa-host, aa-dev, host-dev, pick
+//	JITLLM_DECIDE_AB    comma list of arms: aa-host, aa-dev, host-dev, pick,
+//	                    batch-host and batch-dev (each request alone against
+//	                    both requests as one DecideBatch, the server's path)
 //	JITLLM_AB_MODELS    comma list of name=path (a .gguf or .jlm); a name
 //	                    starting "embed" is an embedder, embedding JITLLM_AB_TEXT
 //	JITLLM_AB_DEVICE    the device spec (default cuda:0)
@@ -74,6 +76,13 @@ func TestDecisionDeviceAB(t *testing.T) {
 						a, b = newABArm(t, m, embed, nil, ""), newABArm(t, m, embed, g, "")
 					case "pick":
 						a, b = newABArm(t, m, embed, g, "no-pick"), newABArm(t, m, embed, g, "")
+					case "batch-host", "batch-dev":
+						var dev *tier.GPU
+						if arm == "batch-dev" {
+							dev = g
+						}
+						a, b = newABArm(t, m, embed, dev, ""), newABArm(t, m, embed, dev, "")
+						b.batch = true
 					default:
 						t.Fatalf("arm %q", arm)
 					}
@@ -108,6 +117,9 @@ func TestDecisionDeviceAB(t *testing.T) {
 					}
 					t.Logf("RESULT %s %s %s: B/A time ratio median %.4f IQR/median %.4f n=%d %s; per question A %.3f ms (%.1f q/s), B %.3f ms (%.1f q/s)",
 						name, arm, spec, med, iqr/med, len(ratios), verdict, ma*1e3, 1/ma, mb*1e3, 1/mb)
+					if b.batch {
+						t.Logf("RESULT %s %s batch session: %+v, %d device blocks", name, arm, b.d.BatchStats(), b.d.BatchDeviceBlocks())
+					}
 					if arm == "pick" {
 						vocab := m.Cfg.NVocab
 						t.Logf("RESULT %s pick readback: %d prompts picked, %d labels a prompt, %d B a prompt picked against %d B for the %d-wide logit row; per question %.0f B against %.0f B",
@@ -127,6 +139,8 @@ type abArm struct {
 	m       *Model
 	n       int // questions (or texts) answered, measured rounds and soak alike
 	prompts int // prompts run, so a per-question byte count can be made
+	// batch answers both requests as one DecideBatch, the server's path.
+	batch bool
 }
 
 func newABArm(t *testing.T, m *Model, embed bool, g *tier.GPU, violation string) abArm {
@@ -190,6 +204,26 @@ func (a *abArm) sample(t *testing.T, text string) time.Duration {
 		return time.Since(t0)
 	}
 	var total time.Duration
+	if a.batch {
+		var reqs []DecisionRequest
+		for _, req := range decisionRequests {
+			state, qs := decisionRequest(t, filepath.Join("testdata", "decision", req+".json"))
+			reqs = append(reqs, DecisionRequest{State: state, Questions: qs})
+			a.n += len(qs)
+			a.prompts += a.d.promptsRun(qs)
+		}
+		t0 := time.Now()
+		out, err := a.d.DecideBatch(reqs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range out {
+			if r.Err != nil {
+				t.Fatal(r.Err)
+			}
+		}
+		return time.Since(t0)
+	}
 	for _, req := range decisionRequests {
 		state, qs := decisionRequest(t, filepath.Join("testdata", "decision", req+".json"))
 		t0 := time.Now()
