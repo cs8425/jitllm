@@ -631,6 +631,29 @@ type Config struct {
 	KDALowerBound              float32
 	LatentNormEps              float32
 
+	// Qwen3.8-Flash-Next (ArchQwen4Exp), an eleventh optional tail; see
+	// encodeConfig. HCMult (above) streams mixed through a HCLowRank gate.
+	// QSARatio is the QSA block size (zero: the attention blocks attend every
+	// position), with IdxHeads/IdxHeadDim/IdxTopK the indexer's heads, width
+	// and token budget. NGramBlock is the one-based block that adds the
+	// n-gram embedding (zero for none): NGram-grams for n = 2..NGram,
+	// NGramHeadsPer heads each, so (NGram-1)*NGramHeadsPer heads of
+	// NGramRowDim; head h of a token reads table row
+	//
+	//	(t0*NGramMul[0] ^ ... ^ t(n-1)*NGramMul[n-1]) mod NGramVocab[h] + NGramOff[h]
+	//
+	// over the token and its predecessors, unsigned 64-bit, where a
+	// predecessor at or before an NGramEOS (or before the sequence) reads as
+	// NGramEOS. NGramImage stands in for a picture's rows. NGramConv is the
+	// convolution's taps, at a dilation of NGram.
+	HCLowRank                    uint32
+	QSARatio                     uint32
+	NGramBlock, NGram            uint32
+	NGramHeadsPer, NGramRowDim   uint32
+	NGramConv                    uint32
+	NGramEOS, NGramImage         uint32
+	NGramMul, NGramOff, NGramVoc []uint64
+
 	// A decision model (decision.go): its readout, the head blocks that end
 	// the stack and the token budget of the question and options, and its
 	// fitted temperatures. A tenth optional tail; see encodeConfig.
@@ -641,6 +664,12 @@ type Config struct {
 	// DecisionHeads is the head blocks' attention head count, which Laya's
 	// reference sets as max(1, n_embd/64) whatever the encoder's is.
 	DecisionHeads uint32
+	// DecisionRouting is Clef's routing blocks, before its DecisionBlocks
+	// joint ones, and DecisionEps the head's LayerNorm epsilon (torch's
+	// default, which the reference never sets). An eleventh optional tail;
+	// see encodeConfig.
+	DecisionRouting uint32
+	DecisionEps     float32
 
 	Flags Flags
 }
@@ -688,6 +717,10 @@ const (
 	// over each expert (DeepSeek V4's scoring_func), in place of the softmax
 	// or FlagExpertSigmoid's sigmoid.
 	Flag2ExpertSqrtSoftplus Flags2 = 1 << 4
+	// Flag2DeltaSigmoidGate gates the delta rule's output norm by sigmoid(z)
+	// where qwen3next's gate is silu(z) (Qwen3.8-Flash-Next's
+	// output_gate_type).
+	Flag2DeltaSigmoidGate Flags2 = 1 << 5
 )
 
 // Has reports whether every bit of f2 is set.

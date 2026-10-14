@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,6 +100,31 @@ type Decider struct {
 	// encoder (Laya); st is nil then.
 	emb *Embedder
 
+	// vscores is each variant's scores (variantScores): a question's
+	// variants are answered together, so each keeps its own.
+	vscores [][]float32
+
+	// batch is the session DecideBatch runs a decoder readout's prompts in,
+	// placed where dev and devMax (SetDevice's) say.
+	batch  *Scheduler
+	dev    nn.Device
+	devMax int
+	// jobs is DecideBatch's prompts, kept from batch to batch (batchJob).
+	jobs []*batchJob
+	// batchN is how many of jobs the last batch ran.
+	batchN int
+
+	// clef is Clef's head and its working memory (decideclef.go), and
+	// clefEmb the prefill mode its prompt runs under: the residual of every
+	// row, no output projection.
+	clefH   *clefHead
+	clef    *clefRun
+	clefEmb embedMode
+	// clefIn is the device head's input, kept; clefDevRuns counts the
+	// requests whose head ran on a device.
+	clefIn      nn.ClefHeadInput
+	clefDevRuns int
+
 	// violation names one feature of the readout a test removes, to show the
 	// gate sees it (RULE 10). Empty in every caller but those tests.
 	violation string
@@ -146,6 +172,13 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 		}
 		d.maxOptions = len(d.labels)
 	case jlm.DecisionLFM2D1:
+	case jlm.DecisionClef:
+		d.st = m.NewState(maxSeq)
+		if err := d.clefInit(); err != nil {
+			d.st.Close()
+			return nil, err
+		}
+		return d, nil
 	case jlm.DecisionLaya:
 		if m.encMB() == nil || m.encMB().head == nil {
 			return nil, fmt.Errorf("model: a laya readout wants a ModernBERT encoder with its head")
@@ -169,6 +202,9 @@ func (d *Decider) Close() error {
 		d.emb.Close()
 		return nil
 	}
+	if d.batch != nil {
+		d.batch.Close()
+	}
 	return d.st.Close()
 }
 
@@ -182,7 +218,10 @@ func (d *Decider) SetDevice(dev nn.Device, max int) error {
 	if d.emb != nil {
 		return d.emb.SetDeviceLayers(dev, max)
 	}
-	return d.st.SetDeviceLayers(dev, max)
+	if err := d.st.SetDeviceLayers(dev, max); err != nil {
+		return err
+	}
+	return d.setBatchDevice(dev, max)
 }
 
 // DeviceBlocks is how many of the readout's blocks run on a device.
@@ -251,6 +290,18 @@ func (d *Decider) Decide(state jinja.Value, qs []DecisionQuestion) ([]DecisionAn
 	}
 	d.input = 0
 	out := make([]DecisionAnswer, len(qs))
+	if d.kind == jlm.DecisionClef {
+		// One pass answers every question jointly.
+		p, err := d.clefPrompt(state, qs)
+		if err != nil {
+			return nil, err
+		}
+		s := d.variantScores(0, len(p.opts))
+		if err := d.clefForward(p, s); err != nil {
+			return nil, err
+		}
+		return d.clefAnswers(qs, s)
+	}
 	for i := range qs {
 		q := &qs[i]
 		nv := d.variants(q)
@@ -283,7 +334,7 @@ func (d *Decider) variants(q *DecisionQuestion) int {
 // order is the question's options in the order the prompt shows them: d1
 // shows a noul true first.
 func (d *Decider) order(q *DecisionQuestion) []DecisionOption {
-	if d.kind == jlm.DecisionLFM2D1 && q.Type == jlm.QuestionNoul && d.violation != "false-first" {
+	if (d.kind == jlm.DecisionLFM2D1 || d.kind == jlm.DecisionClef) && q.Type == jlm.QuestionNoul && d.violation != "false-first" {
 		return []DecisionOption{q.Options[1], q.Options[0]}
 	}
 	return q.Options
@@ -291,15 +342,37 @@ func (d *Decider) order(q *DecisionQuestion) []DecisionOption {
 
 // run renders variant v of q, runs it, and returns one score per output: per
 // option in the shown order (reversed for variant 1), or lev's nine ratings
-// for a noul.
+// for a noul. The scores are the Decider's, good until the next run of the
+// same variant.
 func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32, error) {
+	if d.kind == jlm.DecisionClef {
+		// A request of this one question, its scores in the prompt's order.
+		p, err := d.clefPrompt(state, []DecisionQuestion{*q})
+		if err != nil {
+			return nil, err
+		}
+		out := d.variantScores(v, len(p.opts))
+		return out, d.clefForward(p, out)
+	}
 	if d.kind == jlm.DecisionLaya {
-		return d.layaRun(state, q)
+		ids, markers, err := d.layaSequence(state, q)
+		if err != nil {
+			return nil, err
+		}
+		return d.layaForward(ids, q.Type, markers, v)
 	}
 	ids, groups, err := d.prompt(state, q, v)
 	if err != nil {
 		return nil, err
 	}
+	return d.forward(ids, groups, v)
+}
+
+// forward runs a decoder readout's prompt ids and reads its label groups'
+// scores into variant v's scratch: the engine's half of a question, which
+// makes no heap allocation once warm (TestDecisionDoesNotAllocate). Writing
+// the prompt is text work before it.
+func (d *Decider) forward(ids []int32, groups [][]int32, v int) ([]float32, error) {
 	d.st.Reset()
 	// The labels' logits: where the head is on a device, gathered there and
 	// those alone read back (nn.Head.Pick) -- not under a head bias or a
@@ -309,11 +382,11 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 		flat = append(flat, g...)
 	}
 	d.pick = flat
+	if cap(d.pickVals) < len(flat) {
+		d.pickVals = make([]float32, len(flat))
+	}
 	h := d.st.head
 	if h != nil && d.m.outB == nil && d.st.c.LogitScale == 1 && d.violation != "no-pick" {
-		if cap(d.pickVals) < len(flat) {
-			d.pickVals = make([]float32, len(flat))
-		}
 		h.Pick, h.PickVals, h.Picked = flat, d.pickVals[:len(flat)], false
 		if d.violation == "pick-off-by-one" {
 			h.Pick = make([]int32, len(flat))
@@ -345,11 +418,11 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 	d.input += len(ids)
 	if h != nil && h.Picked {
 		d.picked++
-		return d.labelScoresOf(h.PickVals, groups)
+		return d.labelScoresOf(h.PickVals, groups, v)
 	}
 	if d.st.HostPicked {
 		d.picked++
-		return d.labelScoresOf(d.st.HostPickVals, groups)
+		return d.labelScoresOf(d.st.HostPickVals, groups, v)
 	}
 	vals := d.pickVals[:0]
 	for _, id := range flat {
@@ -359,7 +432,18 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 		vals = append(vals, lg[id])
 	}
 	d.pickVals = vals
-	return d.labelScoresOf(vals, groups)
+	return d.labelScoresOf(vals, groups, v)
+}
+
+// variantScores is variant v's score scratch, n wide.
+func (d *Decider) variantScores(v, n int) []float32 {
+	for len(d.vscores) <= v {
+		d.vscores = append(d.vscores, nil)
+	}
+	if cap(d.vscores[v]) < n {
+		d.vscores[v] = make([]float32, n)
+	}
+	return d.vscores[v][:n]
 }
 
 // prompt is variant v of q as a decoder readout asks it: the prompt's ids,
@@ -409,14 +493,15 @@ func (d *Decider) labelScores(lg []float32, groups [][]int32) ([]float32, error)
 			vals = append(vals, lg[id])
 		}
 	}
-	return d.labelScoresOf(vals, groups)
+	s, err := d.labelScoresOf(vals, groups, 0)
+	return slices.Clone(s), err
 }
 
 // labelScoresOf is one score per label group from the groups' logits, vals,
 // in the groups' order: a group scores by its largest logit (d1's code and
 // " "+code), which the generated argmax picks.
-func (d *Decider) labelScoresOf(vals []float32, groups [][]int32) ([]float32, error) {
-	s := make([]float32, len(groups))
+func (d *Decider) labelScoresOf(vals []float32, groups [][]int32, v int) ([]float32, error) {
+	s := d.variantScores(v, len(groups))
 	at := 0
 	for i, g := range groups {
 		gv := vals[at : at+len(g)]
@@ -718,6 +803,11 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 			uni = float64(n*n-1) / float64(4*n)
 		}
 		a.Confidence = confidenceScore(float64(dist), uni, n)
+	}
+	if d.kind == jlm.DecisionClef && d.violation != "typesafe-confidence" {
+		// Clef's own (systemone_answer): the chosen option's probability, and
+		// a score's largest; llama.cpp gives TypeSafe's formula.
+		a.Confidence = top
 	}
 	if d.kind == jlm.DecisionLaya {
 		// One minus the entropy over log n: -sum p log p, with log p the
