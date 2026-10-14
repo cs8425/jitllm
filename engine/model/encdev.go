@@ -97,12 +97,6 @@ func (e *Embedder) SetDeviceLayers(d nn.Device, max int) error {
 		}
 		return e.st.SetDeviceLayers(d, max)
 	}
-	if e.m.enc.lf != nil && d != nil {
-		// An LFM2 encoder's centred convolution and prefix mask have no
-		// device plan yet; declined by name until they do (RULE 8a).
-		return fmt.Errorf("model: an LFM2 encoder's blocks (centred convolution, prefix mask) " +
-			"are not planned on a device yet")
-	}
 	if e.seg == nil {
 		if d == nil {
 			return nil
@@ -165,8 +159,10 @@ func (e *Embedder) devRun(li, stop, n int, x, cs, csSWA []float32) (int, error) 
 // blocks run there: the non-causal set sized for the rows (nn.RowsReserver),
 // a placement it cannot hold sending blocks home, highest first, as a tower's
 // picture does; and a local block's windows, one a row (nn.RowWindowDevice).
-// window is the keys either side a local row sees, 0 for none.
-func (e *Embedder) devPrepare(n, window int) error {
+// window is the keys either side a local row sees, 0 for none; prefix,
+// when window is negative, is a media prefix's row count: its rows' window
+// is the prefix, every other row's the whole call (an LFM2 encoder's).
+func (e *Embedder) devPrepare(n, window, prefix int) error {
 	s := e.seg
 	if s == nil || s.ld == nil || s.devCount() == 0 {
 		return nil
@@ -185,7 +181,7 @@ func (e *Embedder) devPrepare(n, window int) error {
 			s.SetGPULayers(hi)
 		}
 	}
-	if window <= 0 || s.devCount() == 0 {
+	if window == 0 || s.devCount() == 0 {
 		return nil
 	}
 	rw, ok := s.ld.(nn.RowWindowDevice)
@@ -194,7 +190,14 @@ func (e *Embedder) devPrepare(n, window int) error {
 	}
 	wins := e.wins[:0]
 	for i := 0; i < n; i++ {
-		wins = append(wins, nn.KeyRun{Lo: max(0, i-window), Hi: min(n, i+window+1)})
+		switch {
+		case window < 0 && i < prefix && e.violation != "prefix-reads-text":
+			wins = append(wins, nn.KeyRun{Lo: 0, Hi: prefix})
+		case window < 0:
+			wins = append(wins, nn.KeyRun{Lo: 0, Hi: n})
+		default:
+			wins = append(wins, nn.KeyRun{Lo: max(0, i-window), Hi: min(n, i+window+1)})
+		}
 	}
 	e.wins = wins
 	if !rw.SetRowWindows(wins) {
@@ -230,6 +233,24 @@ func (s *State) encPlan(li int) *nn.LayerPlan {
 		LayerNorm: true,
 	}
 	enc := m.enc
+	if lf := enc.lf; lf != nil && li < len(lf.blocks) {
+		// LFM2's encoder (lfm2enc.go): RMSNorm, SwiGLU, and on an attention
+		// block GQA with the per-head q/k norm and NEOX rotary, each row in
+		// its window (the prefix's rows in the prefix); on a convolution
+		// block the centred short convolution, its taps cut by the same
+		// windows.
+		p.LayerNorm = false
+		p.Act = nn.ActSiLU
+		p.NKVHead = c.NKVHead
+		p.Windowed = true
+		// Every trunk block states the attention's rotary and q/k norm, so
+		// the set they share builds both whichever block comes first.
+		p.NRot, p.RopeNeox, p.QKNorm = c.HeadDim, true, true
+		if !lf.blocks[li].attn {
+			p.Recurrent = nn.RecurrentPlan{Conv: 3, Chans: c.NEmbd, ShortConv: true, Centred: true}
+		}
+		return p
+	}
 	if mb := enc.mb; mb != nil {
 		v := s.enc.violation
 		if li >= mb.trunk {
@@ -242,6 +263,7 @@ func (s *State) encPlan(li int) *nn.LayerPlan {
 			p.HeadDim = c.NEmbd / p.NHead
 			p.NFFN, p.UngatedFFN, p.Act = mb.headFFN, true, nn.ActReLU
 			p.NoPosEnc = true
+			p.HeadSet = enc.lf != nil
 			return p
 		}
 		p.Act = nn.ActGELUErf
@@ -279,6 +301,23 @@ func (s *State) encPlan(li int) *nn.LayerPlan {
 func (s *State) encWeights(li int) nn.LayerWeights {
 	m, d := s.m, s.c.NEmbd
 	enc := m.enc
+	if lf := enc.lf; lf != nil && li < len(lf.blocks) {
+		b := &lf.blocks[li]
+		w := nn.LayerWeights{
+			AttnNorm: b.norm, FFNNorm: b.ffnNorm,
+			Gate: wt(b.gate), Up: wt(b.up), Down: wt(b.down),
+		}
+		if b.attn {
+			w.Wq, w.Wk, w.Wv, w.Wo = wt(b.wq), wt(b.wk), wt(b.wv), wt(b.wo)
+			w.QNorm, w.KNorm = b.qNorm, b.kNorm
+		} else {
+			// x convolves in the mixed projection's place, B and C gate it
+			// before and after, as the decoder's short convolution.
+			w.Wq = wt(b.x)
+			w.SSM = nn.SSMWeights{Gate: wt(b.b), BA: wt(b.c), Out: wt(b.out), Conv1d: b.taps}
+		}
+		return w
+	}
 	if mb := enc.mb; mb != nil {
 		if li >= mb.trunk {
 			b := &mb.head[li-mb.trunk]

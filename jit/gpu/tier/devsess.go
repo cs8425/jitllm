@@ -558,7 +558,7 @@ func (g *devTier) cloneLane() (*lane, bool) {
 		sets[k] = s
 	}
 	for k, s := range sets {
-		if s.bs == nil || k == geoNonCausal {
+		if s.bs == nil || k&geoNonCausal != 0 {
 			continue
 		}
 		v.useGeom(k)

@@ -318,7 +318,7 @@ func (e *Embedder) encode(ids []int32) error {
 		}
 	}
 	scale := float32(1 / math.Sqrt(float64(c.HeadDim)))
-	if err := e.devPrepare(n, 0); err != nil {
+	if err := e.devPrepare(n, 0, 0); err != nil {
 		return err
 	}
 	var cs []float32

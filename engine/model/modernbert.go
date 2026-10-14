@@ -274,7 +274,7 @@ func (e *Embedder) mbEncode(ids []int32) error {
 		e.jit.RopeTable(mb.ropeL, e.csL[i*c.NRot:(i+1)*c.NRot], i)
 	}
 	scale := float32(1 / math.Sqrt(float64(c.HeadDim)))
-	if err := e.devPrepare(n, c.SWAWindow/2); err != nil {
+	if err := e.devPrepare(n, c.SWAWindow/2, 0); err != nil {
 		return err
 	}
 	for li := 0; li < len(mb.blocks); li++ {

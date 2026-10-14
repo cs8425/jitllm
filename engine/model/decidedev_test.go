@@ -32,7 +32,7 @@ import (
 // near-tie, a nine-way rating distribution whose top two sit 0.02 apart
 // (ambiguous question 3, p 0.47 against 0.49): the laptop's 0.058 on five
 // blocks is the same. Its violations move the answers 0.65-0.69.
-var decisionDevTol = map[string]float64{"d1-3B": 0.03, "lev": 0.08, "laya": 0.01, "clef": 0.05, "clef-fixture": 0.002}
+var decisionDevTol = map[string]float64{"d1-3B": 0.03, "lev": 0.08, "laya": 0.01, "clef": 0.05, "clef-fixture": 0.002, "d1-omni": 0.01}
 
 // decisionBlocks is how many blocks a Decider's readout runs: the decoder's,
 // or the encoder segment's (a decision head's blocks with it).

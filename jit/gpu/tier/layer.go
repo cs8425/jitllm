@@ -68,6 +68,9 @@ type layer struct {
 	// set from the plan, not inferred from a nil weight.
 	linear                 bool
 	ssmGate, ssmBA, ssmOut *resident
+	// centred is a short convolution with no state over a whole non-causal
+	// call (nn.RecurrentPlan.Centred).
+	centred bool
 	// KDA's two low-rank gates, nil on qwen3next.
 	ssmFA, ssmFB, ssmGA, ssmGB *resident
 	mvSG, mvBA, mvSO           mv
@@ -1774,6 +1777,11 @@ type blockScratch struct {
 	// (scMul, kernels.ActMul with the identity).
 	scB, scC, scBx, scY backend.Buf
 	scMul               backend.Kernel
+	// convCentred is an LFM2 encoder's convolution (kernels.Conv3Centred),
+	// and vwinAll every row's window in one buffer, the taps' bounds
+	// (setWindowsLocked writes it beside the per-pass vwins).
+	convCentred backend.Kernel
+	vwinAll     backend.Buf
 	// ragLin is a ragged step's linear block per row count (LayersRows): the
 	// convolution and the fused rule over the step's runs, each a sequence's
 	// rows at consecutive positions (kernels' run forms), built for the real
@@ -1934,7 +1942,13 @@ func declineReason(p *nn.LayerPlan) string {
 		return r
 	}
 	switch {
-	case p.NonCausal && (p.Parallel || p.Recurrent.Conv > 0 || p.MLA() || p.NExpert > 0 || p.AttnSinks):
+	case p.Recurrent.Centred && (!p.NonCausal || !p.Recurrent.ShortConv || p.Recurrent.Conv != 3 || !p.Windowed):
+		// The centred convolution reads its neighbours through the call's row
+		// windows (kernels.Conv3Centred): a non-causal call is the whole
+		// sequence, and the windows are where the taps stop.
+		return "a centred convolution outside a windowed non-causal short convolution of three taps"
+	case p.NonCausal && (p.Parallel || p.Recurrent.Conv > 0 && !p.Recurrent.Centred || p.MLA() || p.NExpert > 0 ||
+		p.AttnSinks):
 		// A non-causal call is one submission of the block body's plain
 		// attention over its runs; these features are built only on the causal
 		// paths, and no non-causal model has them.
@@ -2365,11 +2379,18 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 		if g.bs = g.initScratch(sp, 1); g.bs == nil {
 			return false
 		}
-	} else if want := g.bs.p; p.NonCausal && sp.NFFN > want.NFFN {
+	} else if want := g.bs.p; p.NonCausal && (sp.NFFN > want.NFFN || sp.Recurrent.Conv > 0 && want.Recurrent.Conv == 0 ||
+		sp.QKNorm && !want.QKNorm) {
 		// A non-causal block with a wider MLP than the set was built for (a
 		// decision head after its encoder): the set grows to it, and every
-		// block runs its own width inside it (layer.nffn).
-		want.NFFN, want.MaxSeq = sp.NFFN, g.visMax
+		// block runs its own width inside it (layer.nffn). An LFM2 encoder's
+		// convolution blocks and attention blocks share a set too: it carries
+		// the convolution's kernels and the q/k norm's, whichever came first.
+		want.NFFN, want.MaxSeq = max(want.NFFN, sp.NFFN), g.visMax
+		if want.Recurrent.Conv == 0 {
+			want.Recurrent = sp.Recurrent
+		}
+		want.QKNorm = want.QKNorm || sp.QKNorm
 		if !g.towerAt(&want, g.visCap) {
 			return false
 		}
@@ -3460,7 +3481,8 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 	l.linear = linear
 	l.withAttn = p.Recurrent.WithAttn
 	l.noFFN = p.NoFFN
-	if linear {
+	l.centred = p.Recurrent.Centred
+	if linear && !l.centred {
 		if !g.addSessionRec(sid, l, p) {
 			return false
 		}
@@ -3603,7 +3625,7 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 	// to the backend goroutine that is blocked running the session -- a
 	// deadlock. prepBatch walks the causal layers eagerly for the same reason.
 	if p.NonCausal && g.bs != nil {
-		for _, m := range []*mv{&l.mvq, &l.mvk, &l.mvv, &l.mvo, &l.mvg, &l.mvu, &l.mvd} {
+		for _, m := range []*mv{&l.mvq, &l.mvk, &l.mvv, &l.mvo, &l.mvg, &l.mvu, &l.mvd, &l.mvSG, &l.mvBA, &l.mvSO} {
 			if m.kern == nil {
 				continue
 			}
@@ -5028,6 +5050,12 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 				return nil, nil
 			}
 			return kernels.ActMul(rows*r.Chans, kernels.ActIdentity)
+		}},
+		{&bs.convCentred, func() (*ir.Kernel, error) {
+			if !r.Centred {
+				return nil, nil
+			}
+			return kernels.Conv3Centred(r.Chans, rows)
 		}},
 		{&bs.convShift, func() (*ir.Kernel, error) {
 			if r.Conv == 0 {
@@ -10408,6 +10436,10 @@ func (g *devTier) emitLinear(sid uint64, s backend.Session, bs *blockScratch, l 
 	mvrun func(mv, *resident, backend.Buf),
 	mvrunAct func(mv, *resident, backend.Buf, backend.Buf, backend.Buf, backend.Buf)) {
 	r := bs.rec
+	if l.centred {
+		g.emitCentred(bs, l, li, R, p, errp, lc, mvrun)
+		return
+	}
 	// The real row count (bs.dRows) matters here where attention would mask:
 	// a zero padding column shifted into the state stays there. layersOnce
 	// stages it with the other per-call writes, outside emit, through the
@@ -10746,6 +10778,36 @@ func (g *devTier) emitSSD(sid uint64, bs *blockScratch, l *layer, li, R int, rag
 		g.stepFlip(sid, l)
 		g.recSteps++
 	}
+}
+
+// emitCentred issues one LFM2 encoder convolution block (d1-omni's trunk):
+// the pre-norm and its quantization, x, B and C, B*x through the centred
+// convolution over the call's rows -- each tap inside the row's window,
+// bs.vwinAll -- C times that, and out_proj into bs.mvOut. No state: the call
+// is the whole sequence.
+func (g *devTier) emitCentred(bs *blockScratch, l *layer, li, R int, p *nn.LayerPlan, errp *error,
+	lc *launcher, mvrun func(mv, *resident, backend.Buf)) {
+	r := bs.rec
+	// The windows cover this call's rows: a windowed block's submission is
+	// refused otherwise (layersOnce), and the padded rows past them read the
+	// whole call's window, whose output nothing copies out.
+	if bs.convCentred == nil || bs.vwinAll == nil {
+		if *errp == nil {
+			*errp = fmt.Errorf("tier: block %d convolves inside row windows and the device holds none", li)
+		}
+		return
+	}
+	lc.la(bs.normPart, R*bs.parts, bs.x, bs.part)
+	lc.la(bs.normApply, R*p.NEmbd, bs.x, l.nAttn, bs.part, bs.h)
+	lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+	mvrun(l.mvq, l.wq, bs.dMixed)
+	mvrun(l.mvSG, l.ssmGate, bs.scB)
+	mvrun(l.mvBA, l.ssmBA, bs.scC)
+	lc.la(bs.scMul, R*r.Chans, bs.scB, bs.dMixed, bs.scBx)
+	lc.la(bs.convCentred, R*r.Chans, bs.scBx, l.ssmConv1d, bs.vwinAll, bs.dConv)
+	lc.la(bs.scMul, R*r.Chans, bs.scC, bs.dConv, bs.scY)
+	lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.scY, bs.a, bs.ax)
+	mvrun(l.mvSO, l.ssmOut, bs.mvOut)
 }
 
 // emitShortConv issues one LFM2 short-convolution block, from the quantized

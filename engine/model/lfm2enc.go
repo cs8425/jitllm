@@ -204,7 +204,22 @@ func (e *Embedder) lfm2Encode(ids []int32, pre []float32) error {
 	}
 	scale := float32(1 / math.Sqrt(float64(hd)))
 	h, t := e.xb[:n*d], e.t[:n*d]
-	for li := range lf.blocks {
+	if err := e.devPrepare(n, -1, p); err != nil {
+		return err
+	}
+	for li := 0; li < len(lf.blocks); li++ {
+		// A run of placed blocks is one device call over the sequence.
+		if e.onDevice(li) {
+			hi, err := e.devRun(li, len(lf.blocks), n, x, e.cs[:n*c.NRot], nil)
+			if err != nil {
+				return err
+			}
+			li = hi - 1
+			if e.afterBlock != nil {
+				e.afterBlock(li, x)
+			}
+			continue
+		}
 		if err := m.encBlockPageIn(li); err != nil {
 			return err
 		}
