@@ -1436,8 +1436,9 @@ func (g *GPU) PerSequenceKV() bool {
 	// On the stack for any machine's count of devices.
 	var arr [16]*devTier
 	ds := arr[:0]
+	// g.own is by block: each device once.
 	for _, d := range g.own {
-		if d != nil {
+		if d != nil && !slices.Contains(ds, d) {
 			ds = append(ds, d)
 		}
 	}
