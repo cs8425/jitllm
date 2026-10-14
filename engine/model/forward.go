@@ -547,7 +547,10 @@ type State struct {
 	ldSpill nn.Spiller
 	ldStep  nn.SessionStepper
 	ldRows  nn.RowsDevice
-	ldNamed nn.NamedDevice
+	// roomHome counts batch steps whose device had no room for them, so the
+	// blocks came home first (forwardRows).
+	roomHome int
+	ldNamed  nn.NamedDevice
 	// The lists a step this State leads reuses (step.go): Step's runs, the
 	// rows' sessions and positions, the wanted rows' logits and the result.
 	stepRuns   []Run
@@ -3227,7 +3230,11 @@ func (s *State) Reset() {
 			}
 		}
 		if rr, ok := s.ld.(nn.RecRowsDevice); !ok || !rr.ResetRecRows(s.allRows) {
-			s.retireErr = fmt.Errorf("model: the recurrent state on the device could not be reset")
+			why := ""
+			if er, ok := s.ld.(nn.ErrReporter); ok && er.Err() != "" {
+				why = ": " + er.Err()
+			}
+			s.retireErr = fmt.Errorf("model: the recurrent state on the device could not be reset%s", why)
 		}
 	}
 	s.kv.reset()
