@@ -333,20 +333,39 @@ func (s *State) rowsHost(tokens []int32, seq, pos []int, nlogit, seqs int) ([]fl
 		// in bhf and runs attention from the same bh.
 		kind := c.LayerKind(li)
 		if kind.Recurrent() {
+			outRows := s.bh
+			if kind.Attends() {
+				outRows = s.bhf
+			}
+			// The projections as GEMMs over the step's rows around the row
+			// loop, as a prefill chunk's (linrows.go): only the recurrence is
+			// sequential, and a matvec per row reads the block's weights once
+			// a row. Rows owned by other sessions (stepHost) keep the matvec,
+			// the projections being this State's scratch.
+			batched := s.linearBatched() && len(s.rowOwn) == 0
+			if batched {
+				if err := s.linearPre(l, s.bh, n); err != nil {
+					return nil, err
+				}
+			}
 			t0 = s.tick()
 			for _, r := range causal {
 				h := s.bh[r*c.NEmbd : (r+1)*c.NEmbd]
-				out := h
-				if kind.Attends() {
-					out = s.bhf[r*c.NEmbd : (r+1)*c.NEmbd]
-				}
+				out := outRows[r*c.NEmbd : (r+1)*c.NEmbd]
 				o, slot := s.rowOwner(r, seq)
+				o.lin.r = r
 				o.jit.NewInput()
 				if err := o.linearAttn(li, l, slot, h, out); err != nil {
+					s.lin.on = false
 					return nil, err
 				}
 			}
 			s.tock(opAttn, t0)
+			if batched {
+				if err := s.linearPost(li, l, outRows, n); err != nil {
+					return nil, err
+				}
+			}
 		}
 		if kind.Attends() {
 			if c.MLA() {
