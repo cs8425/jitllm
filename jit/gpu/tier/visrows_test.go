@@ -82,6 +82,24 @@ func TestATowerIsBuiltForItsPicture(t *testing.T) {
 	if g.TowerChunk() != 0 {
 		t.Fatalf("a 3000-row picture after the chunked one kept %d-row chunks: a whole set fits it", g.TowerChunk())
 	}
+	// Sizes that alternate keep the set: the shrink waits for visShrinkCalls
+	// calls in a row that need half of it or less.
+	bufs = d.bufs
+	for range visShrinkCalls - 1 {
+		run(3000)
+		run(500)
+	}
+	if d.bufs != bufs || dt.visCap != visRowsFor(3000, p.MaxSeq) {
+		t.Fatalf("pictures of 3000 and 500 rows in turn rebuilt the set: %d buffers allocated, %d rows",
+			d.bufs-bufs, dt.visCap)
+	}
+	run(3000)
+	for range visShrinkCalls - 1 {
+		run(500)
+	}
+	if dt.visCap != visRowsFor(3000, p.MaxSeq) {
+		t.Fatalf("%d pictures of 500 rows in a row shrank the set to %d rows", visShrinkCalls-1, dt.visCap)
+	}
 	run(500)
 	small := g.Stats().ScratchBytes
 	if dt.visCap != visRowsFor(500, p.MaxSeq) || small >= placed {
