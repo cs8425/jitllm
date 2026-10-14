@@ -7827,6 +7827,101 @@ int8 activations of the two hosts' kernels round differently, and 16% apart at
 the output norm. Every other position of the prompt agrees with llama.cpp or
 ties within the gate's 0.5 on both hosts (18 of 20 teacher-forced on each).
 
+## BitNet b1.58: ternary weights, int8 activations per token
+
+BitNet b1.58 2B-4T (transformers' `BitNetForCausalLM`) is llama's block with
+two more RMSNorms -- one over the attention output before wo
+(`attn_sub_norm`), one over the gated product before down (`ffn_sub_norm`) --
+squared ReLU on the gate, NEOX rotary and a tied embedding. Every projection
+is `AutoBitLinear`: the activation is quantized to int8 by its absmax over the
+whole row, per token, and the weight is ternary, {-1, 0, 1} times one scale per
+tensor. The arch is `jlm.ArchBitNet` (56); the inner norms are
+`jlm.RoleAttnSubNorm` and `RoleFFNSubNorm`, uploaded with the block on every
+device and moved with it.
+
+**The weight type.** One ternary type on TQ2_0's block (256 codes, one scale):
+the codes sit in a 2-bit plane, four a byte a quarter sub-block apart
+(`kernels.Fields`), with a bias of one, and the dot is ternary x int8 -- an
+unsigned dot of the codes with the activation sum subtracted -- on AVX2, VNNI,
+SSE, NEON and the device IR, never dequantized to f32. The scale's precision is
+a parameter of the type, not a rounding: `TQ2_0` carries an f16 scale,
+`TQ2_F32` (an engine type, `quant.EngineTypes`) an f32 one. TQ1_0 and
+bitnet.cpp's I2_S (type 36: 2-bit codes in 128-element groups, one f32 scale in
+a 32-byte tail) re-pack into it exactly; the decoders are held to gguf-py's
+(`quant.TestTernaryMatchesGGUFPy`).
+
+Why the f32 form exists: Microsoft's I2_S file stores each tensor's scale as an
+f32 mean that is not f16-exact (worst relative error 4.6e-4). Rounding it to
+f16 moved the fixture's logits by 4e-4..3.6e-3 in NMSE against the f32 golden,
+and transformers fed the same rounded scales reproduced exactly that number. So
+a scale that is f16-exact (the release's bf16 `weight_scale`, the F16 GGUF's)
+converts to TQ2_0 and any other to TQ2_F32.
+
+**Three inputs, one graph.** The release (uint8 codes packed four a byte plus a
+bf16 `weight_scale` the output is multiplied by) converts byte for byte; the
+bf16 master checkpoint is ternarized at conversion as the class does (absmean,
+in bf16 under its torch_dtype: 98-99% of each projection agrees with the
+release's codes, so it has its own golden); a GGUF from bitnet.cpp's converter
+(I2_S, F16 or F32) folds each tensor's scale in. llama.cpp's converter cannot
+write this class at all: it maps neither inner norm.
+
+**Activations per token.** transformers quantizes each row by its own absmax.
+The engine's int8 activation quantizer took its scale per 32 elements; a
+session of a TokenAct arch widens the window to the widest row
+(`nn.WithActWindow`), the host clamps it to the row, and the device quantizes a
+window wider than one 128-thread group in a loop (`kernels.quantizeWide`).
+llama.cpp's TQ2_0 dot reads its activations as q8_K, one scale per 256.
+
+**Rounding-boundary flips are the gate's noise floor.** An activation within a
+few ulps of an int8 rounding boundary rounds the other way under another
+summation order, and the logits after that one step move: synth-bitnet-i2s
+(F16 embedding) reads 9.4e-5 at its worst position with 17 of 44 positions
+exact. The fixture gates take NMSE 2e-3 with exact positions at 1e-9, and every
+violation must read at least ten times the bound.
+
+Fixtures (scripts/bitnetgold.py: transformers' own BitNetForCausalLM with every
+parameter and buffer drawn, the packed release form and the online latent
+form, plus bitnet.cpp's converter's I2_S and F16 GGUFs of the latter), laptop,
+host, decode and prefill at every length and the batch:
+
+    synth-bitnet-hf (TQ2_0)            2.9e-13
+    synth-bitnet-online-hf (TQ2_F32)   4.1e-13
+    synth-bitnet-f16.gguf (TQ2_0)      7.0e-13
+    synth-bitnet-i2s.gguf (TQ2_F32)    9.4e-5 (an int8 boundary flip)
+
+Violations, host: no attention inner norm 0.92, no FFN inner norm 1.29, SiLU
+for squared ReLU 0.51, NORM rotary 2.22, activations per 32 rather than per
+token 3.5e-2, every weight's scale one 1.13, wo's scale inverted 1.74. On CUDA
+and Vulkan with every block placed: decode ~1e-13; prefill with f32 attention
+~1e-13; the default CUDA prefill, whose QK^T tiles are binary16, 5e-3 to
+9.5e-3 (pinned to f32 attention it reads 5e-14, so the gap is the tiles, not
+the ternary path); violations 0.38 to 2.2, and per-32 4e-2 to 6.7e-2.
+
+**Not llama.cpp's graph.** llama.cpp's `bitnet` architecture is 1bitLLM's
+reproduction -- a SiLU gate, NORM rotary -- and bitnet.cpp's `bitnet-b1.58`
+runs SiLU too. transformers on the release reads NLL 1.70 with squared ReLU and
+2.51 with SiLU, so the class is the oracle and `bitnet` is not converted. The
+real checkpoints are held to transformers on their own weights
+(`scripts/bitnetreal.py`), teacher-forced through three prompts of 32 greedy
+tokens.
+
+Teacher-forced on the 2B-4T, three prompts of 32 tokens (214 positions),
+laptop (CUDA and Vulkan on the RTX 3050 Ti, every block placed unless said):
+
+    the release (TQ2_0)       host 212/214, 0 confident flips, NMSE 1.5e-2
+                              cuda 212/214 (5.5e-2), vulkan 214/214 (8.2e-2)
+    the bf16 master (TQ2_0)   host 206/214, cuda 208/214, vulkan 205/214;
+                              0 confident flips, every parting position a tie
+    I2_S GGUF (TQ2_F32)       host 212/214 (2.1e-2), cuda 213/214 with one
+                              block placed, 214/214 with three
+
+The free-running continuations match the reference's token for token on two of
+the three prompts; the third parts at a tie and stays fluent ("Paris. Paris is
+a city in the Île-de-France region..."). Microsoft's GGUF states no
+`tokenizer.ggml.pre`, so its tokenizer splits "def fibonacci(n):\n" as
+llama.cpp's default does and not as the release's tokenizer.json; the gate
+logs that and runs the golden's ids.
+
 ## Gemma 4 vision: clamped matrices, a pooling head, and image rows bidirectional on half the layers
 
 Gemma 4's tower is an RMSNorm ViT at the picture's own size, and it is the

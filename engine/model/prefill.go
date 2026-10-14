@@ -1465,6 +1465,13 @@ attend:
 				s.jit.NewInput()
 				asrc = s.ogate
 			}
+			// BitNet's norm over the attention output, before wo.
+			if l.attnSubNorm != nil {
+				tn := s.tick()
+				s.batchNorm(asrc, asrc, l.attnSubNorm, qDim, n)
+				s.jit.NewInput()
+				s.tock(opRMSNorm, tn)
+			}
 			if err := s.mm(s.bh, l.wo, s.clampIn(l, clampO, asrc[:n*qDim]), n); err != nil {
 				return err
 			}
@@ -1574,6 +1581,13 @@ attend:
 			s.gaussTopK(li, gate, c.NFFNAt(li))
 			s.actmulAll(gate, up, act)
 			s.tock(opAct, tac)
+			// BitNet's norm over the product, before down.
+			if l.ffnSubNorm != nil {
+				tn := s.tick()
+				s.batchNorm(gate, gate, l.ffnSubNorm, c.NFFNAt(li), n)
+				s.jit.NewInput()
+				s.tock(opRMSNorm, tn)
+			}
 			if err := s.mm(s.bh, l.down, s.clampIn(l, clampDown, gate), n); err != nil {
 				return err
 			}

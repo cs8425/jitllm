@@ -77,6 +77,10 @@ var roleOf = map[string]jlm.Role{
 	"ffn_gate.weight":            jlm.RoleFFNGate,
 	"ffn_up.weight":              jlm.RoleFFNUp,
 	"ffn_down.weight":            jlm.RoleFFNDown,
+	// BitNet's inner norms, over the attention output and over the gated FFN's
+	// product.
+	"attn_sub_norm.weight": jlm.RoleAttnSubNorm,
+	"ffn_sub_norm.weight":  jlm.RoleFFNSubNorm,
 	// A post-norm encoder block's two LayerNorms and its MLP biases.
 	"attn_output_norm.weight":  jlm.RoleAttnOutNorm,
 	"attn_output_norm.bias":    jlm.RoleAttnOutNormBias,
