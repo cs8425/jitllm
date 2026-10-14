@@ -83,7 +83,7 @@ func (d *Decider) checkImages(n int) error {
 	if n > MaxDecisionImages {
 		return fmt.Errorf("too many images, the maximum is %d", MaxDecisionImages)
 	}
-	if d.kind != jlm.DecisionLFM2D1 {
+	if d.kind != jlm.DecisionLFM2D1 && d.kind != jlm.DecisionClef {
 		return fmt.Errorf("this model reads text only; a request with images needs a vision decision model")
 	}
 	if d.m.Tower() == nil {
@@ -93,7 +93,10 @@ func (d *Decider) checkImages(n int) error {
 	return nil
 }
 
-// cutPictures is each picture's run of the prompt, d1's bound applied first.
+// cutPictures is each picture's run of the prompt: a tower that cuts a
+// picture into pieces lays them out (pictureRun, d1's bound applied first);
+// any other is one Picture between the markers its processor writes
+// (imageMarkersOf), preprocessed on the Decider's vision segment.
 func (d *Decider) cutPictures(imgs []image.Image) ([][]Span, error) {
 	tw := d.m.Tower()
 	out := make([][]Span, len(imgs))
@@ -101,13 +104,53 @@ func (d *Decider) cutPictures(imgs []image.Image) ([][]Span, error) {
 		if img == nil {
 			return nil, fmt.Errorf("images[%d] is empty", i)
 		}
-		sp, err := tw.pictureRun(d.m, i, d1Cap(img))
+		if tw.Cfg.Kind == jlm.ProjLFM2 || tw.Cfg.Kind == jlm.ProjLlama4 || tw.Cfg.PosBuckets > 0 {
+			sp, err := tw.pictureRun(d.m, i, d1Cap(img))
+			if err != nil {
+				return nil, fmt.Errorf("images[%d]: %w", i, err)
+			}
+			out[i] = sp
+			continue
+		}
+		pc, err := d.st.Picture(img)
+		if err != nil {
+			return nil, fmt.Errorf("images[%d]: %w", i, err)
+		}
+		sp, err := d.m.markedPicture(pc)
 		if err != nil {
 			return nil, fmt.Errorf("images[%d]: %w", i, err)
 		}
 		out[i] = sp
 	}
 	return out, nil
+}
+
+// markedPicture is one Picture between its tower's marker pieces.
+func (m *Model) markedPicture(pc *Picture) ([]Span, error) {
+	tw := m.Tower()
+	mk, ok := imageMarkersOf[tw.Cfg.Projector]
+	if !ok || mk.preText != "" || mk.postText != "" {
+		return nil, fmt.Errorf("model: projector %q has no marker pieces a decision prompt can carry", tw.Cfg.Projector)
+	}
+	var out []Span
+	piece := func(names []string) error {
+		for _, s := range names {
+			id, ok := m.Vocab.ID(s)
+			if !ok {
+				return fmt.Errorf("model: the vocabulary has no %q, so the image markers cannot be built", s)
+			}
+			out = append(out, Span{Tokens: []int32{id}})
+		}
+		return nil
+	}
+	if err := piece(mk.pre); err != nil {
+		return nil, err
+	}
+	out = append(out, Span{Picture: pc})
+	if err := piece(mk.post); err != nil {
+		return nil, err
+	}
+	return mergeTokenSpans(out), nil
 }
 
 // pictureSpans is the rendered prompt as spans: the text between the
