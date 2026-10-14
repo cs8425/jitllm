@@ -3,6 +3,7 @@ package model
 import (
 	"math"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -340,6 +341,30 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 						}
 						alone = append(alone, ans)
 						tokens = append(tokens, d.InputTokens())
+					}
+					if g != nil && !m.IsEncoder() && c.kind != jlm.DecisionClef {
+						// On a device each request runs alone (batchAlone): the
+						// same answers bit for bit, and no batch step.
+						got, err := d.DecideBatch(reqs)
+						if err != nil {
+							t.Fatal(err)
+						}
+						for i, r := range got {
+							if (r.Err != nil) != (len(reqs[i].Questions) == 0) {
+								t.Fatalf("request %d: error %v", i, r.Err)
+							}
+							for qi, a := range r.Answers {
+								if !slices.Equal(a.Probs, alone[i][qi].Probs) {
+									t.Fatalf("request %d question %d: %v in the batch, %v alone", i, qi, a.Probs, alone[i][qi].Probs)
+								}
+							}
+						}
+						if st := d.BatchStats(); st.Steps != 0 {
+							t.Fatalf("a batch on the device ran %d batch steps: its requests were to run alone", st.Steps)
+						}
+						// The batch session itself stays held to the answers alone.
+						d.violation = "device-batch"
+						defer func() { d.violation = "" }()
 					}
 					packs0 := d.packs
 					got, err := d.DecideBatch(reqs)
