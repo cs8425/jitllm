@@ -81,6 +81,9 @@ type devSess struct {
 	// the set is the device's, and another session's picture may have been
 	// staged in it since.
 	winRuns []nn.KeyRun
+	// seqRuns is the packed sequences SetSeqRuns gave this session, staged
+	// with the windows at each of its non-causal calls.
+	seqRuns []nn.KeyRun
 	// winPerRow says winRuns is one window a row (SetRowWindows: a symmetric
 	// sliding window, whose rows' windows overlap) rather than runs
 	// partitioning the rows.

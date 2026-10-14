@@ -44,7 +44,8 @@ func newConfig(opts []Option) config {
 }
 
 // WithCoreSet picks which cores the pool may use: "" or "p" for P-cores, "pe"
-// to add the E-cores, "smt" for hyperthread siblings, "all" for everything.
+// to add the E-cores, "e" for the E-cores alone, "smt" for hyperthread
+// siblings, "all" for everything.
 func WithCoreSet(name string) Option { return func(c *config) { c.coreset = name } }
 
 // WithCores caps how many of them to take. It exists to measure scaling, not to
@@ -92,6 +93,8 @@ func CoreSet(name string) []int {
 	switch name {
 	case "pe":
 		return append(PCores(), ECores()...)
+	case "e":
+		return ECores()
 	case "smt":
 		return SMTSiblings()
 	case "all":
@@ -244,9 +247,20 @@ func New(cpus []int, opts ...Option) *Pool {
 		}
 	}
 	p.spin.Store(int64(p.spinDef))
+	// A pool wholly on the E-cores asks for them: macOS has no affinity, and
+	// its scheduler keeps a background-QoS thread on the efficiency cluster
+	// (EQoS). That keeps such a pool off the P-cores another session decodes
+	// on, and its cores do not overlap theirs, so it takes turns on a lock of
+	// its own (Shared).
+	e := allE(cpus)
 	for i := range p.start {
 		p.start[i] = make(chan struct{}, 1)
-		go p.worker(i)
+		go func() {
+			if e {
+				EQoS()
+			}
+			p.worker(i)
+		}()
 	}
 	return p
 }

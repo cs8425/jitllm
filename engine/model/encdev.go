@@ -181,7 +181,27 @@ func (e *Embedder) devPrepare(n, window, prefix int) error {
 			s.SetGPULayers(hi)
 		}
 	}
-	if window == 0 || s.devCount() == 0 {
+	if s.devCount() == 0 {
+		return nil
+	}
+	// The sequences, every time: a pass of one sequence clears the last
+	// pass's runs.
+	if sr, ok := s.ld.(nn.SeqRunsDevice); ok {
+		runs := e.seqs
+		if e.violation == "sequences-attend-across" {
+			runs = nil
+		}
+		if !sr.SetSeqRuns(runs) {
+			why := ""
+			if er, ok := s.ld.(nn.ErrReporter); ok {
+				why = er.Err()
+			}
+			return fmt.Errorf("model: the device refused the %d packed sequences: %s", len(e.seqs), why)
+		}
+	} else if len(e.seqs) > 1 {
+		return fmt.Errorf("model: the device takes no sequence runs, and %d sequences are packed", len(e.seqs))
+	}
+	if window == 0 {
 		return nil
 	}
 	rw, ok := s.ld.(nn.RowWindowDevice)
@@ -190,13 +210,18 @@ func (e *Embedder) devPrepare(n, window, prefix int) error {
 	}
 	wins := e.wins[:0]
 	for i := 0; i < n; i++ {
+		lo, hi := 0, n
+		if len(e.seqs) > 0 {
+			sq := e.seqs[e.rowSeq[i]]
+			lo, hi = sq.Lo, sq.Hi
+		}
 		switch {
 		case window < 0 && i < prefix && e.violation != "prefix-reads-text":
 			wins = append(wins, nn.KeyRun{Lo: 0, Hi: prefix})
 		case window < 0:
-			wins = append(wins, nn.KeyRun{Lo: 0, Hi: n})
+			wins = append(wins, nn.KeyRun{Lo: lo, Hi: hi})
 		default:
-			wins = append(wins, nn.KeyRun{Lo: max(0, i-window), Hi: min(n, i+window+1)})
+			wins = append(wins, nn.KeyRun{Lo: max(lo, i-window), Hi: min(hi, i+window+1)})
 		}
 	}
 	e.wins = wins

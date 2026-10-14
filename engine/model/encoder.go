@@ -500,7 +500,11 @@ type encAttnRegion struct {
 	out, q, k, v   []float32
 	n, keys, w, hd int
 	scale          float32
-	fn             func(lo, hi int)
+	// qseq and qpos, where sequences are packed, are each query's sequence
+	// (an index of Embedder.seqs) and its row: its keys are its sequence's,
+	// inside the window about the row. nil is one sequence, query i at row i.
+	qseq, qpos []int32
+	fn         func(lo, hi int)
 }
 
 // rowsLN is y[r] = LayerNorm(x[r]) for n rows, on the pool.

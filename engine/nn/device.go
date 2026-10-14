@@ -1268,6 +1268,18 @@ type RowWindowDevice interface {
 	SetRowWindows(wins []KeyRun) bool
 }
 
+// SeqRunsDevice is an optional LayerDevice that takes several sequences
+// packed into the rows of the NonCausal calls that follow, until replaced:
+// runs partition the rows, and every row of every non-causal block attends
+// inside its run -- an encoder answering several questions in one pass. A
+// windowed block's row windows (RowWindowDevice) are the caller's, inside
+// the runs. nil or empty is one sequence over the call's rows. It is kept
+// apart from SetRowWindows and SetKeyRuns, which it does not replace; false is
+// a device that cannot take them.
+type SeqRunsDevice interface {
+	SetSeqRuns(runs []KeyRun) bool
+}
+
 // RowsReserver is an optional LayerDevice whose NonCausal blocks are built for
 // the rows of the calls they run rather than for their plan's MaxSeq (the
 // tower's largest grid): ReserveRows makes them able to take a call of n rows,
