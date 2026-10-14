@@ -993,6 +993,8 @@ type visRun struct {
 	// index in the segment (-1 is the entry's rows): the tower's tracer, for
 	// localising a device/host disagreement per block.
 	afterBlock func(li int, x []float32)
+	// chunkX is a row-chunked tower call's phase-1 scratch (towerLayers).
+	chunkX []float32
 	// atStage, when set, sees the rows at the named points llama.cpp's graph
 	// dump names too: "pos_embed" (block 0's input), "post_ln", "proj_in"
 	// (the projector's first matrix's input) and "out". The tracer's other
@@ -1461,7 +1463,7 @@ func (s *State) encodeBlocks(max int) (bool, error) {
 			// The image's rows and no more: the scratch may hold more rows
 			// than the picture (reserveTowerRows rounds them up), and a row
 			// past the image is a key every row would attend to.
-			if !s.ld.Layers(li, hi, 0, p.n, x, cs, nil, nil) {
+			if !s.towerLayers(li, hi, p.n, x, cs) {
 				// A device that fails mid-image has left the residual in an
 				// unknown state, so this is an error rather than a fallback.
 				why := "no reason given"
@@ -2074,4 +2076,56 @@ func (s *State) Vision() (*State, error) {
 		s.visState = v
 	}
 	return s.visState, nil
+}
+
+// towerLayers runs tower blocks [li, hi) over the picture's n rows on the
+// device: one Layers call, or -- where the device built the non-causal set
+// row-chunked because the whole picture's did not fit (nn.RowChunker) --
+// block by block, every chunk's phase 1 before any chunk's phase 2. x and cs
+// are the picture's rows; cs may be nil (a tower with no rotary).
+func (s *State) towerLayers(li, hi, n int, x, cs []float32) bool {
+	rc, ok := s.ld.(nn.RowChunker)
+	c := 0
+	if ok {
+		c = rc.TowerChunk()
+	}
+	if c <= 0 || c >= n {
+		return s.ld.Layers(li, hi, 0, n, x, cs, nil, nil)
+	}
+	e := len(x) / n
+	rw := 0
+	if cs != nil {
+		rw = len(cs) / n
+	}
+	tmp := s.towerChunkX(c * e)
+	for b := li; b < hi; b++ {
+		for phase := 1; phase <= 2; phase++ {
+			for at := 0; at < n; at += c {
+				m := min(c, n-at)
+				xs := x[at*e : (at+m)*e]
+				if phase == 1 {
+					// Phase 1 leaves the rows as they were; the device's
+					// copy goes to scratch so nothing can touch x.
+					xs = append(tmp[:0], xs...)
+				}
+				var cr []float32
+				if cs != nil {
+					cr = cs[at*rw : (at+m)*rw]
+				}
+				if !rc.LayersPhase(b, b+1, at, m, n, phase, xs, cr, nil) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// towerChunkX is phase 1's scratch for one chunk's rows, kept on the vision
+// segment so a warm encode allocates nothing.
+func (s *State) towerChunkX(n int) []float32 {
+	if cap(s.vis.chunkX) < n {
+		s.vis.chunkX = make([]float32, n)
+	}
+	return s.vis.chunkX[:n]
 }

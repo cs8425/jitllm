@@ -182,10 +182,13 @@ func TestGemma3TowerPagesThroughTheDevice(t *testing.T) {
 			continue
 		}
 		ran++
-		if placed != tw0.Cfg.NLayer || ins != 0 {
-			t.Fatalf("%s: the unbounded arm placed %d of %d blocks with %d page-ins: it is not the resident tower",
-				spec, placed, tw0.Cfg.NLayer, ins)
+		// The reference arm takes what the card has: on one with room, the
+		// resident tower; on a smaller one it pages too, and a page-in
+		// uploads the same bytes, so it is still the answer to hold to.
+		if placed != tw0.Cfg.NLayer {
+			t.Fatalf("%s: the unbounded arm placed %d of %d blocks", spec, placed, tw0.Cfg.NLayer)
 		}
+		t.Logf("%s: the unbounded arm held %d bytes with %d page-ins", spec, used, ins)
 		paged := 0
 		for _, frac := range []float64{0.75, 0.6} {
 			b := uint64(float64(used) * frac)
@@ -195,8 +198,12 @@ func TestGemma3TowerPagesThroughTheDevice(t *testing.T) {
 				continue
 			}
 			paged++
-			if nm, worst := nmseOf(got, ref); worst != 0 {
-				t.Fatalf("%s under %d bytes: paging the tower changed its output (NMSE %.3e)", spec, b, nm)
+			// A page-in uploads the same bytes, but a budget this tight also
+			// narrows the attention's score planes (more query passes,
+			// resizeTower), which moves the reduction order on some
+			// backends: Vulkan reads 2.9e-4 on a V100 at 0.6, CUDA 0.
+			if nm, _ := nmseOf(got, ref); math.IsNaN(nm) || nm > towerPagedNMSE {
+				t.Fatalf("%s under %d bytes: paging the tower moved its output NMSE %.3e", spec, b, nm)
 			}
 		}
 		if paged == 0 {
@@ -207,3 +214,87 @@ func TestGemma3TowerPagesThroughTheDevice(t *testing.T) {
 		t.Skip("no GPU backend on this host")
 	}
 }
+
+// TestTowerChunksUnderABudget runs the Gemma 3 tower on the device under
+// budgets that cannot hold a picture's whole non-causal set beside the tower
+// (streamed, so its blocks page through what is left): the device builds the
+// set row-chunked (tier chunkTower) and the tower runs each block in two
+// phases a chunk at a time (State.towerLayers). Every block must run on the
+// device, the set must be chunked and its phases run, and the projector
+// output must be the whole set's within the GEMMs' row-count band -- a
+// chunk's queries over its own chunk's keys alone, or a key written at the
+// wrong rows, misses it by far more.
+func TestTowerChunksUnderABudget(t *testing.T) {
+	m0, tw0 := openGemma3(t)
+	px := rainbow(tw0.Cfg.ImageSz)
+	m0.Close()
+	ran := 0
+	for _, spec := range stepDevices() {
+		run := func(budget uint64) (out []float32, placed, chunked, phases int, used uint64, ok bool) {
+			opts := []tier.Option{tier.WithDevices(spec), tier.WithDeviceTune(tier.TuneOff)}
+			if budget > 0 {
+				opts = append(opts, tier.WithBudget(budget))
+			}
+			g, err := tier.OpenWith(opts...)
+			if err != nil || g == nil {
+				return
+			}
+			defer g.Close()
+			m, tw := openGemma3(t, WithPlacement(Placement{Rest: &Place{On: spec, Stream: true}}))
+			defer m.Close()
+			s := tw.testState()
+			defer s.Close()
+			if err := s.SetDevice(g); err != nil {
+				t.Fatal(err)
+			}
+			used = g.Budgets()[0].Used
+			s0 := g.Stats().Submits
+			e, err := s.Encode(px)
+			if err != nil {
+				t.Fatalf("%s under %d bytes: %v", spec, budget, err)
+			}
+			st := g.Stats()
+			if st.Submits == s0 {
+				t.Fatalf("%s under %d bytes: the encode submitted nothing to the device", spec, budget)
+			}
+			return append([]float32(nil), e...), s.GPUBlocks(), st.TowerChunked, st.TowerPhases, used, true
+		}
+		ref, placed, _, _, used, ok := run(0)
+		if !ok {
+			t.Logf("%s: not present", spec)
+			continue
+		}
+		ran++
+		if placed != tw0.Cfg.NLayer {
+			t.Fatalf("%s: the unbounded arm placed %d of %d blocks", spec, placed, tw0.Cfg.NLayer)
+		}
+		chunkedRuns := 0
+		for _, frac := range []float64{0.5, 0.4} {
+			b := uint64(float64(used) * frac)
+			got, p, ch, ph, _, _ := run(b)
+			nm, worst := nmseOf(got, ref)
+			t.Logf("%s, %d of %d bytes: %d of %d blocks, chunked sets %d, phase calls %d; NMSE %.3e, max|d| %.3f",
+				spec, b, used, p, tw0.Cfg.NLayer, ch, ph, nm, worst)
+			if p != tw0.Cfg.NLayer || ch == 0 || ph == 0 {
+				continue
+			}
+			chunkedRuns++
+			if math.IsNaN(nm) || nm > towerPagedNMSE {
+				t.Fatalf("%s under %d bytes: the row-chunked tower reads NMSE %.3e against the whole set's", spec, b, nm)
+			}
+		}
+		if chunkedRuns == 0 {
+			t.Fatalf("%s: no budget ran the tower row-chunked on the device", spec)
+		}
+	}
+	if ran == 0 {
+		t.Skip("no GPU backend on this host")
+	}
+}
+
+// towerPagedNMSE bounds a paged or row-chunked tower's projector output
+// against the whole resident one: the reduction-order band of narrower
+// attention passes (2.9e-4 measured on Vulkan, 0 on CUDA), well under what a
+// key read from the wrong rows does (0.53, TestTowerChunksUnderABudget's
+// mutation) and ten times under the device-against-host bound (1e-2).
+const towerPagedNMSE = 1e-3

@@ -1268,6 +1268,17 @@ type RowsReserver interface {
 	ReserveRows(n int) bool
 }
 
+// RowChunker is an optional RowsReserver whose non-causal set may take a
+// picture in row chunks when the whole does not fit (paging is the design):
+// TowerChunk, read after ReserveRows, is the rows a call takes (0: the
+// picture goes whole). Such a picture runs block by block, every chunk's
+// phase 1 (its k and v written at its rows of keys) before any chunk's phase
+// 2 (its queries over every key, and the rest of the block on its rows).
+type RowChunker interface {
+	TowerChunk() int
+	LayersPhase(lo, hi, pos, n, keys, phase int, x, cs, csSWA []float32) bool
+}
+
 // LayerInputDevice is an optional LayerDevice that takes a per-layer input
 // for every row beside the residual: Gemma 4's per-layer embeddings
 // (LayerPlan.PLEDim), NLayer*PLEDim floats a row, row-major, which block li

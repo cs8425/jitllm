@@ -43,6 +43,11 @@ type devSess struct {
 	cur, last *lane
 	depth     int
 	view, v0  *devTier
+	// ncPhase and ncKeys run the session's non-causal call as one phase of a row-chunked
+	// block (LayersPhase): 1 writes the chunk's k and v at its rows and runs
+	// nothing after them, 2 runs the chunk's queries over the ncKeys keys
+	// phase 1 wrote and the rest of the block. 0 is a whole call.
+	ncPhase, ncKeys int
 	// inSub says the session's submission is running outside g.mu: what it
 	// builds on the way (a kernel, a grown staging buffer) takes g.mu for the
 	// build (subLock; subHeld while it does), and nothing it calls may

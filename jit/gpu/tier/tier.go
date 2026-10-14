@@ -494,6 +494,9 @@ type Config struct {
 	// replaying a captured graph: the other arm of that comparison, a field so
 	// both arms can be live in one process.
 	NoGraph bool
+	// NoTowerChunks refuses a picture whose whole non-causal set does not fit
+	// rather than running it row-chunked (chunkTower, LayersPhase).
+	NoTowerChunks bool
 	// NoPickMV runs the label pick as the head's whole matvec and a gather
 	// (the arm before kernels.MatVec's PickOf), for the A/B.
 	NoPickMV bool
@@ -978,6 +981,9 @@ type Stats struct {
 	// HeadFolds counts batched chunks that ran the output projection on
 	// their last row inside their own submission.
 	HeadFolds int
+	// TowerChunked counts non-causal sets built row-chunked (chunkTower), and
+	// TowerPhases the phase calls run over them (LayersPhase).
+	TowerChunked, TowerPhases int
 	// PickRows counts label picks the head ran as the picked rows' own
 	// projection (pickMV) instead of the whole head and a gather.
 	PickRows int
@@ -1270,6 +1276,8 @@ func (s *Stats) add(o Stats) {
 	s.PagedPrefillPasses += o.PagedPrefillPasses
 	s.EmbedLaunches += o.EmbedLaunches
 	s.HeadFolds += o.HeadFolds
+	s.TowerChunked += o.TowerChunked
+	s.TowerPhases += o.TowerPhases
 	s.PickRows += o.PickRows
 	s.FlashPrefills += o.FlashPrefills
 	s.VisionAttnChunks += o.VisionAttnChunks
@@ -1554,6 +1562,10 @@ type devShared struct {
 	// visCap is the rows the non-causal set is built for and visMax the
 	// largest grid a tower placed here takes (visrows.go). Guarded by mu.
 	visCap, visMax int
+	// visKeys is the keys the set's k/v pairs and score rows hold when it is
+	// row-chunked (LayersPhase): a picture of visKeys rows runs visCap rows a
+	// call. 0 when the set takes a picture whole (visKeys is visCap).
+	visKeys int
 	// visSmall counts the calls in a row the set was more than twice what
 	// they needed (ReserveRows), which shrinks it at visShrinkCalls.
 	visSmall int
