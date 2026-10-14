@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"image"
 	"time"
 
 	"github.com/jitllm/jitllm/engine/model"
@@ -31,6 +32,9 @@ type DecideOptions struct {
 	State jinja.Value
 	// Questions are the request's questions in its order.
 	Questions []model.DecisionQuestion
+	// Images are the request's pictures in its order, at most
+	// model.MaxDecisionImages; only a vision decision model (d1) reads them.
+	Images []image.Image
 }
 
 // DecideResult is one answer per question, in question order.
@@ -71,7 +75,7 @@ func (e *Engine) Decide(ctx context.Context, o DecideOptions) (*DecideResult, er
 			"decision readout, so no score of its forward pass is an answer the weights were trained for",
 			ErrInvalid, lm.id, lm.m.Cfg.Arch)
 	}
-	job := &decJob{ctx: ctx, req: model.DecisionRequest{State: o.State, Questions: o.Questions},
+	job := &decJob{ctx: ctx, req: model.DecisionRequest{State: o.State, Questions: o.Questions, Images: o.Images},
 		t0: time.Now(), done: make(chan struct{})}
 	lm.decQMu.Lock()
 	lm.decQ = append(lm.decQ, job)

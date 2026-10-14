@@ -125,6 +125,7 @@ var projectorModels = map[string]string{
 	"internvl":         "InternVL 2.5 and 3 (InternViT-300M; the 6B tower is refused)",
 	"janus_pro":        "Janus-Pro",
 	"kimivl":           "Kimi-VL (MoonViT)",
+	"lfm2":             "LFM2-VL, LFM2.5-VL and d1-3B (SigLIP2 NaFlex, tiles and a thumbnail)",
 	"llama4":           "Llama 4 Scout, Maverick",
 	"mlp":              "LLaVA and LLaVA-style models (a CLIP tower and a two-matrix MLP), llava-phi-3",
 	"phi4":             "Phi-4-reasoning-vision-15B",
