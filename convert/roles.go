@@ -281,6 +281,11 @@ func retarget(arch jlm.Arch, role jlm.Role) jlm.Role {
 	if arch == jlm.ArchLFM2 && role == jlm.RoleTokenEmbdNorm {
 		return jlm.RoleOutputNorm
 	}
+	// Qwen3.8-Flash-Next's n-gram table carries Gemma's per-layer table name
+	// and is another object: a row table of hashed n-grams.
+	if arch == jlm.ArchQwen4Exp && role == jlm.RolePLETokEmbd {
+		return jlm.RoleNGramTable
+	}
 	return role
 }
 

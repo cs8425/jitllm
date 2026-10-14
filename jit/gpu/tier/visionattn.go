@@ -27,11 +27,19 @@ const visionPlaneBudget = 128 << 20
 // planeBudget is the score-plane budget this device chunks vision attention
 // at: Config.VisionPlaneBudget, or visionPlaneBudget.
 func (g *devTier) planeBudget() int {
+	b := visionPlaneBudget
 	if g.VisionPlaneBudget > 0 {
-		return g.VisionPlaneBudget
+		b = g.VisionPlaneBudget
 	}
-	return visionPlaneBudget
+	if g.planeCap > 0 {
+		b = min(b, g.planeCap)
+	}
+	return b
 }
+
+// minPlaneBudget is the least a tight budget narrows the score planes to
+// (resizeTower): below it the passes are too many for what they save.
+const minPlaneBudget = 4 << 20
 
 // visionChunk is how a vision block's attention takes its query rows: all of
 // them when the two score planes fit budget, else passes of arows -- a

@@ -22,7 +22,17 @@ import (
 // logit on a 20-wide scale; RULE 11c) seen through the readout's softmax at a
 // near-tie (d1 measured 0.008-0.025 on the laptop's CUDA and Vulkan). The
 // violation arm must move an answer past it.
-var decisionDevTol = map[string]float64{"d1-3B": 0.03, "lev": 0.05, "laya": 0.01, "clef": 0.05, "clef-fixture": 0.002}
+//
+// lev's is 0.08, measured by moving the seam (RULE 11c) on a V100 over 2, 4,
+// 8, 12, 16, 20, 24, 28 and 32 device blocks: CUDA 0.041, 0.036, 0.020,
+// 0.045, 0.043, 0.048, 0.046, 0.047, 0.046 and Vulkan 0.071, 0.028, 0.014,
+// 0.017, 0.015, 0.014, 0.016, 0.017, 0.018. The error does not grow with the
+// blocks below the seam -- two blocks already show it, and every block no
+// more -- so it is not a device bug amplified by depth but the band at one
+// near-tie, a nine-way rating distribution whose top two sit 0.02 apart
+// (ambiguous question 3, p 0.47 against 0.49): the laptop's 0.058 on five
+// blocks is the same. Its violations move the answers 0.65-0.69.
+var decisionDevTol = map[string]float64{"d1-3B": 0.03, "lev": 0.08, "laya": 0.01, "clef": 0.05, "clef-fixture": 0.002}
 
 // decisionBlocks is how many blocks a Decider's readout runs: the decoder's,
 // or the encoder segment's (a decision head's blocks with it).
