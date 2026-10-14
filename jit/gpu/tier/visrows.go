@@ -196,13 +196,38 @@ func (g *devTier) resizeTower(n, want int) bool {
 		g.LastErr = "a tower block with no scratch set"
 		return false
 	}
+	// A streamed tower swaps its blocks through the device's slots, so
+	// the set may take the room the resident ones hold but must leave
+	// minSlots of the widest block to swap through; a set that leaves
+	// fewer is refused as before, and the blocks run at home.
+	keep := int64(0)
+	for li, l := range g.layers {
+		if l != nil && l.geo == geoNonCausal && g.stream[li] {
+			keep = int64(minSlots) * int64(g.widest)
+			break
+		}
+	}
 	if want > g.visCap {
 		// Asked before anything is allocated. The step may not fit where the
 		// picture's own rows would.
-		need := g.towerGrowth(old, want)
+		need := g.towerGrowth(old, want) + keep
+		// A set that does not fit takes its attention in narrower passes
+		// first: the score planes are the part of it that does not scale
+		// with the rows' activations, and a pass more is cheap beside a
+		// picture the device refuses.
+		for need > 0 && !g.room(uint64(need)) && g.planeBudget()/2 >= minPlaneBudget {
+			g.planeCap = g.planeBudget() / 2
+			need = g.towerGrowth(old, want) + keep
+		}
+		// A streamed block resident in a slot is room: it pages out, and in
+		// again when its turn in the call comes (paging is the design). A
+		// resident placement's blocks are not victims (victim, streamed).
+		if need > 0 && !g.room(uint64(need)) {
+			g.reclaim(uint64(need), -1, 0, 0)
+		}
 		if !g.room(uint64(max(need, 0))) {
 			exact := min(roundUp(n, visGrain), g.visMax)
-			if exact >= want || !g.room(uint64(max(g.towerGrowth(old, exact), 0))) {
+			if exact >= want || !g.room(uint64(max(g.towerGrowth(old, exact)+keep, 0))) {
 				g.LastErr = fmt.Sprintf("a picture of %d rows: the tower's set at %d rows needs about %d bytes "+
 					"more than it holds, and %d of %d are used", n, want, need, g.used, g.limit)
 				return false
@@ -215,7 +240,14 @@ func (g *devTier) resizeTower(n, want int) bool {
 	prev := g.visCap
 	g.dropGraph()
 	if g.towerAt(&plan, want) {
-		return true
+		// The estimate is an estimate: what the set really charged must
+		// still leave a streamed tower its slot, or the first page-in of
+		// the call fails the device mid-picture.
+		if keep == 0 || g.slots() >= minSlots {
+			return true
+		}
+		g.LastErr = fmt.Sprintf("a picture of %d rows: the tower's set at %d rows leaves %d block slot(s), "+
+			"below the %d a swap needs", n, want, g.slots(), minSlots)
 	}
 	why := g.LastErr
 	// What fitted before fits again: the old rows, or nothing at all, and the

@@ -154,6 +154,10 @@ var archOf = map[string]jlm.Arch{
 	// Kimi-K3 (text): Kimi-Linear's KDA + MLA hybrid with residual attention,
 	// a latent mixture and the situ activation. See jlm.ArchKimiK3.
 	"kimi-k3": jlm.ArchKimiK3,
+	// Qwen3.8-Flash-Next (text): qwen3next's hybrid inside low-rank gated
+	// hyper-connections, with QSA block selection and an n-gram embedding.
+	// See jlm.ArchQwen4Exp.
+	"qwen4exp": jlm.ArchQwen4Exp,
 }
 
 // Supported reports whether the converter implements a GGUF architecture
@@ -377,7 +381,7 @@ func configOf(f *meta.File) (*jlm.Config, error) {
 		// gemma3 removed gemma2's attention softcap; its final softcap is optional.
 		c.FinalSoftcap = float32(f.FloatKey("final_logit_softcapping", 0))
 		gemmaAttnScale(c)
-	case jlm.ArchQwen3Next:
+	case jlm.ArchQwen3Next, jlm.ArchQwen4Exp:
 		// A hybrid: most layers run a gated delta rule over a recurrent state
 		// and every fourth runs ordinary attention. NEOX rope on the attention
 		// layers, per-head q/k norms, an output gate folded into the q
@@ -395,6 +399,11 @@ func configOf(f *meta.File) (*jlm.Config, error) {
 		}
 		if err := qwen35Of(f, name, c); err != nil {
 			return nil, fmt.Errorf("convert: %s: %w", name, err)
+		}
+		if arch == jlm.ArchQwen4Exp {
+			if err := qwen4expConfig(f, c); err != nil {
+				return nil, fmt.Errorf("convert: %s: %w", name, err)
+			}
 		}
 	case jlm.ArchQwen2VL:
 		// qwen2's graph with multimodal rope: the sections split each head's rotary
@@ -660,7 +669,7 @@ func configOf(f *meta.File) (*jlm.Config, error) {
 
 	// The per-layer kinds are read off the tensors (a layer with a recurrent
 	// block is linear), not off an "every fourth layer" rule keyed on the name.
-	if (c.Arch == jlm.ArchQwen3Next || ssdArch(c.Arch) || c.Arch == jlm.ArchLFM2) && c.LayerKinds == nil {
+	if (c.Arch == jlm.ArchQwen3Next || c.Arch == jlm.ArchQwen4Exp || ssdArch(c.Arch) || c.Arch == jlm.ArchLFM2) && c.LayerKinds == nil {
 		rec := jlm.LayerLinearAttn
 		if ssdArch(c.Arch) {
 			rec = jlm.LayerSSD

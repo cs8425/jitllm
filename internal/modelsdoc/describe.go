@@ -70,6 +70,7 @@ var ggufModels = map[string]string{
 	"qwen3next":      "Qwen3-Next 80B-A3B",
 	"qwen3vl":        "Qwen3-VL dense text models",
 	"qwen3vlmoe":     "Qwen3-VL mixtures",
+	"qwen4exp":       "Qwen3.8-Flash-Next (text)",
 	"seed_oss":       "Seed-OSS 36B",
 	"smollm3":        "SmolLM3",
 	"stablelm":       "StableLM 2, StableLM 3B",

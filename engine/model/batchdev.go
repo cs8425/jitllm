@@ -313,7 +313,7 @@ func (s *State) rowsStep(tokens []int32, pos, slot []int, logits []float32, nlog
 	s.layerInputs(s.bple[:n*c.pleWidth()])
 	s.tokenIDs(tokens)
 	if c.streamHead() {
-		return s.altRowsStep(rd, pos, slot, n, logits, nlogit)
+		return s.altRowsStep(rd, pos, slot, tokens, n, logits, nlogit)
 	}
 	// The head's Logits is the single-sequence destination (s.logits); a step
 	// borrows it for the rows and hands it back.
