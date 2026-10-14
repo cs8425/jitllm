@@ -8,8 +8,10 @@
 #
 # The sources: LiquidAI/d1-3B-GGUF d1-3B-Q8_0.gguf into $JITLLM_MODELS/d1/,
 # ggml-org/lev-GGUF lev-Q8_0.gguf into $JITLLM_MODELS/lev/, ggml-org/Laya-GGUF
-# Laya-BF16.gguf into $JITLLM_MODELS/laya/gguf/. llama.cpp b11514
-# (ggml-org/llama.cpp releases, llama-b11514-bin-ubuntu-x64) or newer.
+# Laya-BF16.gguf into $JITLLM_MODELS/laya/gguf/, and d1's
+# mmproj-d1-3B-F16.gguf into $JITLLM_MODELS/d1/ for the picture requests
+# (pictures.json, chatpicture.json). llama.cpp b11514 (ggml-org/llama.cpp
+# releases, llama-b11514-bin-ubuntu-x64) or newer.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 out=$here/engine/model/testdata/decision
@@ -17,9 +19,19 @@ out=$here/engine/model/testdata/decision
 : "${JITLLM_MODELS:?JITLLM_MODELS names the model directory}"
 port=${PORT:-18089}
 
-gold() { # gold <gguf> <name>
+gold() { # gold <gguf> <name> [<mmproj> <request>...]
+	gguf=$1 name=$2
+	shift 2
+	proj=
+	reqs="support ambiguous"
+	if [ $# -gt 0 ]; then
+		proj="--mmproj $JITLLM_MODELS/$1"
+		shift
+		reqs=$*
+	fi
+	# shellcheck disable=SC2086 # $proj is two words or none
 	"$here/scripts/cap" 12G -- taskset -c 0,2,4,6,8,10 "$JITLLM_LCPP/llama-server" \
-		-m "$JITLLM_MODELS/$1" --port "$port" -t 6 -c 8192 >"$out/.srv.log" 2>&1 &
+		-m "$JITLLM_MODELS/$gguf" $proj --port "$port" -t 6 -c 8192 >"$out/.srv.log" 2>&1 &
 	pid=$!
 	i=0
 	until curl -s "localhost:$port/health" | grep -q ok; do
@@ -31,17 +43,18 @@ gold() { # gold <gguf> <name>
 		fi
 		sleep 1
 	done
-	for req in support ambiguous; do
+	for req in $reqs; do
 		curl -s "localhost:$port/v1/systemone" -H 'Content-Type: application/json' \
-			-d @"$out/$req.json" >"$out/$2.$req.llamacpp.json"
-		echo "$2 $req: $(head -c 200 "$out/$2.$req.llamacpp.json")"
+			-d @"$out/$req.json" >"$out/$name.$req.llamacpp.json"
+		echo "$name $req: $(head -c 200 "$out/$name.$req.llamacpp.json")"
 	done
 	# The cap wrapper may not pass a signal on; the server is named by its model.
-	pkill -f "llama-server -m $JITLLM_MODELS/$1" || true
+	pkill -f "llama-server -m $JITLLM_MODELS/$gguf" || true
 	wait $pid || true
 	rm -f "$out/.srv.log"
 }
 
 gold d1/d1-3B-Q8_0.gguf d1-3B-Q8_0
+gold d1/d1-3B-Q8_0.gguf d1-3B-Q8_0 d1/mmproj-d1-3B-F16.gguf pictures chatpicture
 gold lev/lev-Q8_0.gguf lev-Q8_0
 gold laya/gguf/Laya-BF16.gguf Laya-BF16

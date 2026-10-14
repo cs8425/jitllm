@@ -161,3 +161,50 @@ func TestD1DecidesOverPicturesAsItsReference(t *testing.T) {
 		})
 	}
 }
+
+// TestD1PicturesMatchLlamaCpp holds the two picture requests -- two pictures
+// over a null state, and a chat-message state carrying its picture as an
+// image_url part -- to llama-server's answers on the same GGUF and mmproj
+// (scripts/decisiongold.sh). llama.cpp runs the projector's GELU in its tanh
+// form and jitllm in the reference's erf form (RULE 7m); both pictures are
+// under d1's pixel bound, so the runner's resize is in neither.
+func TestD1PicturesMatchLlamaCpp(t *testing.T) {
+	m := openD1VL(t)
+	defer m.Close()
+	for _, req := range []string{"pictures", "chatpicture"} {
+		t.Run(req, func(t *testing.T) {
+			body, err := os.ReadFile(filepath.Join("testdata", "decision", req+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, state, qs, urls, err := ParseDecisionRequest(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(urls) == 0 {
+				t.Fatal("the request carries no picture, so this gate proves nothing")
+			}
+			imgs := make([]image.Image, len(urls))
+			for i, u := range urls {
+				if imgs[i], err = DecodeImageDataURL(u); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gold := readDecisionGold(t, "d1-3B-Q8_0."+req+".llamacpp.json")
+			d, err := m.NewDecider(4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			ans, err := d.Decide(state, qs, imgs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("%d picture(s), %d positions; llama.cpp read %d", len(imgs), d.InputTokens(), gold.Usage.InputTokens)
+			if d.InputTokens() != gold.Usage.InputTokens {
+				t.Errorf("ran %d positions, llama.cpp %d: the prompts differ", d.InputTokens(), gold.Usage.InputTokens)
+			}
+			checkDecisions(t, qs, ans, gold, 0.05, true)
+		})
+	}
+}
