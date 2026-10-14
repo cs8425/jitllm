@@ -6718,6 +6718,12 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	persistOn := R == 1 && rag == nil && !(bs.pkv != nil && bs.pkv.st != nil) && g.ensurePersist()
 	key := graphKey{lo, hi, nCap, R, head != nil, g.TableSplit, g.ScalarSoftmax, g.flashOn(), g.KVF16,
 		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, persistOn, persistOn && g.PersistDeps, g.GateUpFuse, sid, g.NoFuse, g.NoActFuse}
+	if lo == hi {
+		// The head alone reads no history, so the capacity is not part of
+		// what it records: keyed by it, prompts on either side of a growth
+		// would retire each other's recording on every call.
+		key.scoreN = 0
+	}
 	if _, live := g.recs[key]; !live {
 		for k, r := range g.recs {
 			older := k
