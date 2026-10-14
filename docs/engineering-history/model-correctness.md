@@ -9368,11 +9368,28 @@ CUDA and Vulkan; M4 mini, arm64 host and Metal):
 | `TestWarmImageEncodeDoesNotAllocate/lfm2` | 0 allocations |
 | `TestEveryTowerRunsSSE/lfm2` | pixels bit-identical, encode NMSE 9.6e-4 against AVX2 |
 
-Not yet run: the decision gate with every text block on a card (the 4 GB
-laptop card holds 7 of 30 under CUDA and 2 under Vulkan beside the tower;
-the V100s were busy with another agent's measurement), and a randomised
-LFM2-VL fixture through llama.cpp's own converter (the gates above run the
-real checkpoint).
+The fixture (`scripts/lfm2visiongold.py --fixture`, `synth-lfm2vl`):
+transformers' Lfm2VlForConditionalGeneration at toy size, every parameter and
+buffer randomised, with the projector LayerNorm d1 lacks, both GGUFs from
+llama.cpp's converter (the text model as the Lfm2ForCausalLM it is, the tower
+renamed to the published checkpoints' `vision_tower.vision_model.*`, three
+tower blocks because the converter names `linear_2` by a block index), and a
+1100x700 picture cut into 3x2 tiles and a thumbnail. Against transformers at
+the engine's arithmetic (Q8 weights and q8 activations in the reference): the
+tower 3.8e-5, the projector 1.3e-4, the projector alone 5.7e-8; every prompt
+position the processor's (markers, picture rows, text); logits from the pixels
+7.8e-7 with no argmax flip; every text and tower block on CUDA 7.0e-10 and
+Vulkan 2.0e-12 against the host. Each feature removed is seen by the projector
+alone: no LayerNorm 0.23, the tanh GELU 1.5e-6 (26x the clean arm, the fixture
+being where the erf form is visible), the transposed unshuffle 2.9e-2; the
+transposed position table 1.9e-3 from the pixels.
+
+Relocation and paging: `TestTowerEncodeResumesAcrossARelocation/lfm2` (the
+tower's first blocks on the card, then home mid-encode, under a two-page
+budget) is bit-identical on CUDA and Vulkan, and `TestD1PicturesMatchLlamaCpp`
+answers both picture requests to the bit under a budget of four text pages
+and two tower pages.
+
 ### Clef-Flash
 
 Clef-Flash is qwen35 with a joint schema head (`jlm.DecisionClef`): one prompt

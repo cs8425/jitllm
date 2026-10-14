@@ -1746,7 +1746,7 @@ func (s *State) project(patches []float32) ([]float32, error) {
 		src = v.grp
 		// InternVL's LayerNorm over the grouped row, before the MLP, and
 		// LFM2-VL's where its file carries one.
-		if c.Kind == jlm.ProjInternVL || c.Kind == jlm.ProjLFM2 && t.projNorm != nil {
+		if c.Kind == jlm.ProjInternVL || c.Kind == jlm.ProjLFM2 && t.projNorm != nil && !lfm2NoProjNorm {
 			w := c.projK()
 			s.normRows(v.grp, v.grp, t.projNorm, t.projNormB, w, c.Tokens(), true, c.projEps(),
 				s.rowChunk(c.Tokens(), w))
