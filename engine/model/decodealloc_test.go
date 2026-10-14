@@ -49,6 +49,14 @@ func TestDecodeDoesNotAllocate(t *testing.T) {
 	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
 		specs = strings.Split(v, ",")
 	}
+	// Every block resident whatever the host has free: the gate measures a
+	// resident model's decode, and the default page budget is eight tenths of
+	// MemAvailable when the model opens. With other jobs holding the laptop's
+	// memory that once fell below olmoe's 4 GiB, and its windows read 300-400
+	// pages and allocated a read goroutine for each. A budget the model fits
+	// is a choice of this gate, not a second path: paging is gated elsewhere
+	// (TestPagingDoesNotChangeTheAnswer), and scripts/cap bounds what it holds.
+	resident := WithPageBudget(1 << 40)
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			// jlmOf skips naming the model when neither it nor its container
@@ -69,7 +77,7 @@ func TestDecodeDoesNotAllocate(t *testing.T) {
 			// there and nowhere this gate ran. Pinned here, it runs on every
 			// fused matrix of every host.
 			t.Run("host-ksliced", func(t *testing.T) {
-				mk, err := Open(jlmOf(t, p), noTune, WithJITOptions(nn.WithFusedKSlices(2)))
+				mk, err := Open(jlmOf(t, p), noTune, resident, WithJITOptions(nn.WithFusedKSlices(2)))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -91,7 +99,7 @@ func TestDecodeDoesNotAllocate(t *testing.T) {
 				if len(sched.NUMANodes()) < 2 {
 					t.Skip("one NUMA node: DoNodes is the plain region here, which the host arm measured")
 				}
-				mn, err := Open(jlmOf(t, p), noTune, WithJITOptions(nn.WithSched(sched.WithNUMA(true))))
+				mn, err := Open(jlmOf(t, p), noTune, resident, WithJITOptions(nn.WithSched(sched.WithNUMA(true))))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -115,7 +123,7 @@ func TestDecodeDoesNotAllocate(t *testing.T) {
 			})
 			// The stream trial pinned off with the tuners: it migrates blocks
 			// between its runs, and a migration's page-ins are not a decode.
-			m, err := Open(jlmOf(t, p), noTune, WithStreamTrial(false))
+			m, err := Open(jlmOf(t, p), noTune, resident, WithStreamTrial(false))
 			if err != nil {
 				t.Fatal(err)
 			}
