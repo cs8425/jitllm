@@ -109,8 +109,10 @@ func audioOf(f *meta.File, nVis uint32) (*jlm.Audio, []jlm.Tensor, error) {
 		case strings.HasPrefix(name, "a.blk."):
 			rest := name[len("a.blk."):]
 			dot := strings.IndexByte(rest, '.')
-			n, err := strconv.Atoi(rest[:max(dot, 0)])
-			if dot <= 0 || err != nil || n < 0 || uint32(n) >= a.NLayer {
+			// A block index the file states, parsed to 31 bits so every
+			// conversion below holds it (RULE 9).
+			n, err := strconv.ParseInt(rest[:max(dot, 0)], 10, 31)
+			if dot <= 0 || err != nil || n < 0 || uint64(n) >= uint64(a.NLayer) {
 				return nil, nil, fmt.Errorf("convert: %q: an audio block index outside %d", name, a.NLayer)
 			}
 			role, ok := d1OmniAudioNames[rest[dot+1:]]
@@ -130,7 +132,11 @@ func audioOf(f *meta.File, nVis uint32) (*jlm.Audio, []jlm.Tensor, error) {
 		case strings.HasPrefix(name, "a.conv1d."):
 			rest := strings.TrimPrefix(name, "a.conv1d.")
 			dot := strings.IndexByte(rest, '.')
-			n, err := strconv.Atoi(rest[:max(dot, 0)])
+			n64, err := strconv.ParseInt(rest[:max(dot, 0)], 10, 31)
+			if err == nil && n64 < 0 {
+				err = fmt.Errorf("a negative index")
+			}
+			n := int(n64)
 			role := jlm.RoleAConv
 			if dot > 0 && rest[dot+1:] == "bias" {
 				role = jlm.RoleAConvBias
