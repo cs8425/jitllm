@@ -148,3 +148,27 @@ func TestD1OmniDecidesOverPicturesAsItsReference(t *testing.T) {
 		t.Errorf("swapping the pictures moved no logit past three times the clean %.3g and the bound", l)
 	}
 }
+
+// TestD1OmniPicturesMatchLlamaCpp answers the pictures request as llama.cpp's
+// d1-omni server does (scripts/decisiongold.sh): the same prefix rows, the
+// same prompt and the same uncalibrated answers, within the towers' Q8_0
+// and int8 band (llama.cpp reads the mmproj's F16).
+func TestD1OmniPicturesMatchLlamaCpp(t *testing.T) {
+	m := openD1Omni(t)
+	defer m.Close()
+	d, err := m.NewDecider(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	req, imgs := d1OmniPictures(t)
+	gold := readDecisionGold(t, "d1-omni-600M-F16.pictures.llamacpp.json")
+	ans, err := d.Decide(req.State, req.Questions, imgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.InputTokens() != gold.Usage.InputTokens {
+		t.Errorf("ran %d input tokens, llama.cpp %d: the prefix or the prompts differ", d.InputTokens(), gold.Usage.InputTokens)
+	}
+	checkDecisions(t, req.Questions, ans, gold, 0.02, false)
+}

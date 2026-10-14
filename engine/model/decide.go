@@ -279,9 +279,11 @@ func (d *Decider) Prepare(state jinja.Value, qs []DecisionQuestion, images int) 
 	if len(qs) == 0 {
 		return fmt.Errorf("questions must be a non-empty object")
 	}
-	// d1 and Clef read a null state (pictures alone): d1's runner and
+	// d1, d1-omni and Clef read a null state (pictures alone): d1's runner,
+	// d1-omni's system_one ("" for None) and
 	// llama.cpp allow it, and Clef's systemone renders it as JSON null.
-	if (state.IsNone() || state.IsUndefined()) && d.kind != jlm.DecisionLFM2D1 && d.kind != jlm.DecisionClef {
+	if (state.IsNone() || state.IsUndefined()) && d.kind != jlm.DecisionLFM2D1 && d.kind != jlm.DecisionClef &&
+		d.kind != jlm.DecisionD1Omni {
 		return fmt.Errorf("state must be provided")
 	}
 	for i := range qs {
