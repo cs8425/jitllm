@@ -289,8 +289,8 @@ func checkDecisions(t *testing.T, qs []DecisionQuestion, ans []DecisionAnswer, g
 // label moves them -- the answers are what the pick read.
 func TestDecisionPicksOnTheHost(t *testing.T) {
 	for _, c := range decisionCases {
-		if c.kind == jlm.DecisionLaya {
-			continue // the encoder's scorer reads no vocabulary head
+		if c.kind == jlm.DecisionLaya || c.kind == jlm.DecisionClef {
+			continue // an encoder's scorer and Clef's span head read no label logits
 		}
 		t.Run(c.name, func(t *testing.T) {
 			m := openDecision(t, c.gguf, c.kind)
