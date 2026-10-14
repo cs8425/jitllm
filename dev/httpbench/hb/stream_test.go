@@ -27,7 +27,7 @@ data: [DONE]
 	// inside one tick of a coarse clock (Windows), and TTFT must still count
 	// from the request's start, not read 0.
 	var s Sample
-	if err := readStream(strings.NewReader(body), time.Now().Add(-time.Millisecond), &s); err != nil {
+	if err := readStream(strings.NewReader(body), time.Now().Add(-time.Millisecond), &s, nil); err != nil {
 		t.Fatal(err)
 	}
 	if s.Chunks != 2 || len(s.ITL) != 1 || s.CompletionTokens != 3 || s.PromptTokens != 5 ||
@@ -46,14 +46,14 @@ func TestReadStreamRefusesABrokenStream(t *testing.T) {
 		"data: {not json\n\ndata: [DONE]\n\n",
 	} {
 		var s Sample
-		if err := readStream(strings.NewReader(body), time.Now(), &s); err == nil {
+		if err := readStream(strings.NewReader(body), time.Now(), &s, nil); err == nil {
 			t.Errorf("%q parsed as %+v", body, s)
 		}
 	}
 	// Without usage the count falls back to chunks, and the sample says so.
 	var s Sample
 	two := "data: {\"choices\":[{\"text\":\"a\"}]}\n\ndata: {\"choices\":[{\"text\":\"b\"}]}\n\ndata: [DONE]\n\n"
-	if err := readStream(strings.NewReader(two), time.Now(), &s); err != nil {
+	if err := readStream(strings.NewReader(two), time.Now(), &s, nil); err != nil {
 		t.Fatal(err)
 	}
 	if s.UsageSeen || s.CompletionTokens != 2 {

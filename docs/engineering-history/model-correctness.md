@@ -7827,6 +7827,101 @@ int8 activations of the two hosts' kernels round differently, and 16% apart at
 the output norm. Every other position of the prompt agrees with llama.cpp or
 ties within the gate's 0.5 on both hosts (18 of 20 teacher-forced on each).
 
+## BitNet b1.58: ternary weights, int8 activations per token
+
+BitNet b1.58 2B-4T (transformers' `BitNetForCausalLM`) is llama's block with
+two more RMSNorms -- one over the attention output before wo
+(`attn_sub_norm`), one over the gated product before down (`ffn_sub_norm`) --
+squared ReLU on the gate, NEOX rotary and a tied embedding. Every projection
+is `AutoBitLinear`: the activation is quantized to int8 by its absmax over the
+whole row, per token, and the weight is ternary, {-1, 0, 1} times one scale per
+tensor. The arch is `jlm.ArchBitNet` (56); the inner norms are
+`jlm.RoleAttnSubNorm` and `RoleFFNSubNorm`, uploaded with the block on every
+device and moved with it.
+
+**The weight type.** One ternary type on TQ2_0's block (256 codes, one scale):
+the codes sit in a 2-bit plane, four a byte a quarter sub-block apart
+(`kernels.Fields`), with a bias of one, and the dot is ternary x int8 -- an
+unsigned dot of the codes with the activation sum subtracted -- on AVX2, VNNI,
+SSE, NEON and the device IR, never dequantized to f32. The scale's precision is
+a parameter of the type, not a rounding: `TQ2_0` carries an f16 scale,
+`TQ2_F32` (an engine type, `quant.EngineTypes`) an f32 one. TQ1_0 and
+bitnet.cpp's I2_S (type 36: 2-bit codes in 128-element groups, one f32 scale in
+a 32-byte tail) re-pack into it exactly; the decoders are held to gguf-py's
+(`quant.TestTernaryMatchesGGUFPy`).
+
+Why the f32 form exists: Microsoft's I2_S file stores each tensor's scale as an
+f32 mean that is not f16-exact (worst relative error 4.6e-4). Rounding it to
+f16 moved the fixture's logits by 4e-4..3.6e-3 in NMSE against the f32 golden,
+and transformers fed the same rounded scales reproduced exactly that number. So
+a scale that is f16-exact (the release's bf16 `weight_scale`, the F16 GGUF's)
+converts to TQ2_0 and any other to TQ2_F32.
+
+**Three inputs, one graph.** The release (uint8 codes packed four a byte plus a
+bf16 `weight_scale` the output is multiplied by) converts byte for byte; the
+bf16 master checkpoint is ternarized at conversion as the class does (absmean,
+in bf16 under its torch_dtype: 98-99% of each projection agrees with the
+release's codes, so it has its own golden); a GGUF from bitnet.cpp's converter
+(I2_S, F16 or F32) folds each tensor's scale in. llama.cpp's converter cannot
+write this class at all: it maps neither inner norm.
+
+**Activations per token.** transformers quantizes each row by its own absmax.
+The engine's int8 activation quantizer took its scale per 32 elements; a
+session of a TokenAct arch widens the window to the widest row
+(`nn.WithActWindow`), the host clamps it to the row, and the device quantizes a
+window wider than one 128-thread group in a loop (`kernels.quantizeWide`).
+llama.cpp's TQ2_0 dot reads its activations as q8_K, one scale per 256.
+
+**Rounding-boundary flips are the gate's noise floor.** An activation within a
+few ulps of an int8 rounding boundary rounds the other way under another
+summation order, and the logits after that one step move: synth-bitnet-i2s
+(F16 embedding) reads 9.4e-5 at its worst position with 17 of 44 positions
+exact. The fixture gates take NMSE 2e-3 with exact positions at 1e-9, and every
+violation must read at least ten times the bound.
+
+Fixtures (scripts/bitnetgold.py: transformers' own BitNetForCausalLM with every
+parameter and buffer drawn, the packed release form and the online latent
+form, plus bitnet.cpp's converter's I2_S and F16 GGUFs of the latter), laptop,
+host, decode and prefill at every length and the batch:
+
+    synth-bitnet-hf (TQ2_0)            2.9e-13
+    synth-bitnet-online-hf (TQ2_F32)   4.1e-13
+    synth-bitnet-f16.gguf (TQ2_0)      7.0e-13
+    synth-bitnet-i2s.gguf (TQ2_F32)    9.4e-5 (an int8 boundary flip)
+
+Violations, host: no attention inner norm 0.92, no FFN inner norm 1.29, SiLU
+for squared ReLU 0.51, NORM rotary 2.22, activations per 32 rather than per
+token 3.5e-2, every weight's scale one 1.13, wo's scale inverted 1.74. On CUDA
+and Vulkan with every block placed: decode ~1e-13; prefill with f32 attention
+~1e-13; the default CUDA prefill, whose QK^T tiles are binary16, 5e-3 to
+9.5e-3 (pinned to f32 attention it reads 5e-14, so the gap is the tiles, not
+the ternary path); violations 0.38 to 2.2, and per-32 4e-2 to 6.7e-2.
+
+**Not llama.cpp's graph.** llama.cpp's `bitnet` architecture is 1bitLLM's
+reproduction -- a SiLU gate, NORM rotary -- and bitnet.cpp's `bitnet-b1.58`
+runs SiLU too. transformers on the release reads NLL 1.70 with squared ReLU and
+2.51 with SiLU, so the class is the oracle and `bitnet` is not converted. The
+real checkpoints are held to transformers on their own weights
+(`scripts/bitnetreal.py`), teacher-forced through three prompts of 32 greedy
+tokens.
+
+Teacher-forced on the 2B-4T, three prompts of 32 tokens (214 positions),
+laptop (CUDA and Vulkan on the RTX 3050 Ti, every block placed unless said):
+
+    the release (TQ2_0)       host 212/214, 0 confident flips, NMSE 1.5e-2
+                              cuda 212/214 (5.5e-2), vulkan 214/214 (8.2e-2)
+    the bf16 master (TQ2_0)   host 206/214, cuda 208/214, vulkan 205/214;
+                              0 confident flips, every parting position a tie
+    I2_S GGUF (TQ2_F32)       host 212/214 (2.1e-2), cuda 213/214 with one
+                              block placed, 214/214 with three
+
+The free-running continuations match the reference's token for token on two of
+the three prompts; the third parts at a tie and stays fluent ("Paris. Paris is
+a city in the Île-de-France region..."). Microsoft's GGUF states no
+`tokenizer.ggml.pre`, so its tokenizer splits "def fibonacci(n):\n" as
+llama.cpp's default does and not as the release's tokenizer.json; the gate
+logs that and runs the golden's ids.
+
 ## Gemma 4 vision: clamped matrices, a pooling head, and image rows bidirectional on half the layers
 
 Gemma 4's tower is an RMSNorm ViT at the picture's own size, and it is the
@@ -9315,6 +9410,145 @@ layer attended at the wrong width (layer 0 off from its first block); the
 encoder and the head now each hold the set for their own geometry
 (`JIT.AttnSetFor`). The real checkpoint could not have shown it: 1024 wide at
 16 heads, both widths are 64.
+
+## LFM2-VL and d1's pictures
+
+d1-3B (LiquidAI/d1-3B, its GGUF and `mmproj-d1-3B-F16.gguf`) reads
+pictures: llama.cpp's projector type `lfm2`, `jlm.ProjLFM2`. The tower is
+Phi-4-reasoning-vision's SigLIP2 NaFlex with the post-LayerNorm kept
+(transformers' `last_hidden_state`; all 27 blocks, `vision_feature_layer`
+absent), the projector InternVL's shape: the 2x2 unshuffle, a LayerNorm
+when the file has one (d1's has none), linear, GELU, linear.
+
+What the file does not state is the class's: Lfm2VlImageProcessor's 64 to
+256 tokens a piece, 2 to 10 tiles of 512 pixels past twice the budget, a
+thumbnail at the smart-resized size. The converter writes them into the
+container (`Vision.MinPixels/MaxPixels/MinTiles/MaxTiles` and a new tail,
+`TileSize`, `Tolerance`), and the file's `image_resize_algo` as
+`FlagVisionBicubic` (the class default is bilinear; d1's file says bicubic).
+The tile choice is InternVL's `gridOf` unchanged; the resize is torchvision's
+8-bit one (`rgb8.resize`), which differs from Pillow's in a few dozen samples
+a picture (its int16 weights against Pillow's 22-bit ones).
+
+Two places jitllm follows the model's own code and not llama.cpp
+(RULE 7m): the projector's GELU is transformers' erf form (llama.cpp's lfm2
+graph runs the tanh form; d1-omni's runs erf), and a picture over 1024x1024
+is first resized to that many pixels with Pillow BICUBIC, as d1's
+`runner.cap_pixels` does before its processor; llama.cpp hands mtmd the
+picture as it came. The GELU form is under the int8 activations' noise
+(projector alone, 2.443e-3 erf against 2.443e-3 tanh on quad-and-disc).
+
+A decision request carries pictures as llama.cpp's server reads them
+(`model.DecisionMedia`): `files` then `images` data URLs, then every
+`image_url` part of a chat-message state, taken out of its message; at most
+8; `videos` refused. The systemone template writes one marker per picture
+and each becomes its LFM2 run (`<|image_start|>`, `<|img_row_R_col_C|>` and
+the tile, `<|img_thumbnail|>` and the thumbnail, `<|image_end|>`). Every
+question re-prefills the picture's rows from the model's image cache; the
+tower runs once per request.
+
+What the gates measured (laptop i7-12700H, AVX2 host, RTX 3050 Ti 4 GB under
+CUDA and Vulkan; M4 mini, arm64 host and Metal):
+
+| gate | result |
+|---|---|
+| `TestLFM2LayoutMatchesProcessor` | 21 sizes, 11 tiled, every plan the processor's |
+| `TestLFM2RealMatchesTransformers`, pixels | 0 differing values on 4 pictures (1, 1, 5 and 4 pieces) |
+| tower rows against transformers f32 | NMSE 4.4e-5 to 1.3e-4 |
+| projector alone on the reference rows | 2.4e-3 to 5.9e-3; transformers' own projector with int8 inputs reads 2.7e-3 against itself on the photo |
+| violations | bilinear resize moves 2e5-2e6 samples; no thumbnail fails by shape; transposed table NMSE 0.33-1.12; transposed unshuffle 0.10-0.37 |
+| tower, all 27 blocks on CUDA / Vulkan / Metal | 1.6e-3 / 6.6e-4 to 1.9e-3 / 1.7e-3 to 3.7e-3 against the host |
+| `TestD1DecidesOverPicturesAsItsReference` (d1's runner.py, f32, 8 requests of 3 questions) | worst probability 0.0263 (laptop host), 0.0183 (M4 host), 0.0160 (Metal, every text block); another picture's rows read 0.97 |
+| `TestD1PicturesMatchLlamaCpp` (llama-server, same GGUF and mmproj) | positions 978 and 702, llama.cpp's exactly; worst probability 0.0083 and 0.0091 |
+| `TestWarmImageEncodeDoesNotAllocate/lfm2` | 0 allocations |
+| `TestEveryTowerRunsSSE/lfm2` | pixels bit-identical, encode NMSE 9.6e-4 against AVX2 |
+
+The fixture (`scripts/lfm2visiongold.py --fixture`, `synth-lfm2vl`):
+transformers' Lfm2VlForConditionalGeneration at toy size, every parameter and
+buffer randomised, with the projector LayerNorm d1 lacks, both GGUFs from
+llama.cpp's converter (the text model as the Lfm2ForCausalLM it is, the tower
+renamed to the published checkpoints' `vision_tower.vision_model.*`, three
+tower blocks because the converter names `linear_2` by a block index), and a
+1100x700 picture cut into 3x2 tiles and a thumbnail. Against transformers at
+the engine's arithmetic (Q8 weights and q8 activations in the reference): the
+tower 3.8e-5, the projector 1.3e-4, the projector alone 5.7e-8; every prompt
+position the processor's (markers, picture rows, text); logits from the pixels
+7.8e-7 with no argmax flip; every text and tower block on CUDA 7.0e-10 and
+Vulkan 2.0e-12 against the host. Each feature removed is seen by the projector
+alone: no LayerNorm 0.23, the tanh GELU 1.5e-6 (26x the clean arm, the fixture
+being where the erf form is visible), the transposed unshuffle 2.9e-2; the
+transposed position table 1.9e-3 from the pixels.
+
+Relocation and paging: `TestTowerEncodeResumesAcrossARelocation/lfm2` (the
+tower's first blocks on the card, then home mid-encode, under a two-page
+budget) is bit-identical on CUDA and Vulkan, and `TestD1PicturesMatchLlamaCpp`
+answers both picture requests to the bit under a budget of four text pages
+and two tower pages.
+
+### Clef-Flash
+
+Clef-Flash is qwen35 with a joint schema head (`jlm.DecisionClef`): one prompt
+per request, every row's final residual kept through the prefill
+(`State.rowTap`, under an embedding mode that pools nothing so no output
+projection runs), and the head over them -- on the host's generated kernels,
+or on the device holding the output projection as a program of
+`kernels.DH*` launches (`jit/gpu/tier/dechead.go`). The random fixture
+(`scripts/clefgold.py fixture`: the release's classes, every parameter and
+persistent buffer random) is held to Clef's own code to 1.7e-6 on a logit,
+and llama.cpp agrees with both to the reference's rounding.
+
+The one bug on the way was in the fixture, not the engine: randomising
+`named_buffers()` included the rotary's `inv_freq`, which is not persistent,
+so the in-memory model the first goldens came from was one no checkpoint can
+hold (0.16 of a logit off, every row but the first matching the reloaded
+backbone to 2e-5). The goldens now come from the checkpoint as written, read
+back as the release is read, and only persistent tensors are randomised.
+
+### Clef's pictures and videos
+
+A Clef request may carry `images` and `videos` (the request shape d1's
+takes; a video is Clef's "frame array", here an array of frame data URLs or
+`{"frames": [...], "fps": rate}`). Clef's own code (`encode_record`) puts
+the processor's expansion of `"<|vision_start|><|image_pad|><|vision_end|>"`
+per picture and `"<|vision_start|><|video_pad|><|vision_end|>"` per video,
+then a newline, between `STATE:\n` and the state; the head's spans are row
+indexes, so a picture's rows count as the processor's pads do
+(`clefPrompt`). A picture is the Qwen3.5 tower's one Picture between its
+markers. A video is Qwen3VLVideoProcessor's: frames sampled at 2 a second
+(`np.linspace`, rounded half to even) -- at the 24 frames a second the
+reference assumes when frames come with no rate --, every frame resized to
+one size by the video smart_resize over all frames (torchvision's 8-bit
+bicubic), paired by temporal_patch_size 2 with the last repeated, each pair
+one Picture whose patches attend only to each other (the reference's
+per-frame cu_seqlens), laid out as `<t seconds>` (the pair's two frames'
+mean time, `%.1f`) and its rows between markers, all inside the
+placeholder's own markers.
+
+A pair is two different frames, which a container whose patch embedding was
+folded to the planes' sum cannot read; `convert.foldPatchPlanes` now keeps
+the second plane beside the sum (`RoleVPatchEmbd` index 1), and a pair's
+row is x0*(W0+W1) + (x1-x0)*W1 (`State.patchPair`, generated gather,
+difference and add). A container converted before carries no second plane
+and refuses a video by name.
+
+Gates (`TestClefMediaMatchesReference`, laptop host, RTX 3050 Ti under CUDA
+and Vulkan): a fixture like Clef's random one but with the release's 48x48
+position table (`clefgold.py fixture-vl`; the 8x8 table of the text
+fixture reads a picture at 128 pixels where the processor reads 384), its
+goldens with the reference's tower inputs and matrices rounded as the
+container's are (`logits_a8`). Every row and span is the reference's. Two
+pictures: 5.5e-4 from the reference's logits (8.1e-3 against its f32 tower),
+5.2e-4 on CUDA and 5.5e-4 on Vulkan with every block; the pictures left out
+move 0.126. A video of ten frames (four sampled, two pairs): 1.4e-4 (2.3e-3
+against the f32 tower), 2.0e-4 on CUDA; the media left out move 0.066, and
+each pair's second frame read as its first 0.081.
+
+Two places Clef's processor and this engine's tower part, recorded rather
+than built: Clef's image bounds are 65536 to 16777216 pixels where every
+Qwen-VL tower here is bounded by the mmproj's image_size squared (768 for
+Clef, llama.cpp's convention), so a picture over 768x768 pixels is read
+smaller than Clef reads it; and a video frame larger than the tower's
+bound is refused by name rather than shrunk.
 
 ## qwen4exp: Qwen3.8-Flash-Next (plan, before the code)
 

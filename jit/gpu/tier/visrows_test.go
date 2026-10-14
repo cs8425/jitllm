@@ -56,14 +56,31 @@ func TestATowerIsBuiltForItsPicture(t *testing.T) {
 	if dt.visCap != visRowsFor(3000, p.MaxSeq) || grown <= placed {
 		t.Fatalf("a 3000-row picture: the set is %d rows and %d bytes (placed at %d)", dt.visCap, grown, placed)
 	}
-	// The grid itself: asked of the budget, not of the card.
+	// The grid itself: asked of the budget, not of the card. Whole, it does
+	// not fit; with the row-chunked set refused (NoTowerChunks), so is the
+	// picture, and nothing is allocated for it.
 	bufs, held := d.bufs, live()
+	dt.NoTowerChunks = true
 	if g.ReserveRows(p.MaxSeq) {
 		t.Fatalf("a %d-row set fit a %d MB card", p.MaxSeq, budget>>20)
 	}
+	dt.NoTowerChunks = false
 	if d.bufs != bufs || live() != held || dt.visCap != visRowsFor(3000, p.MaxSeq) {
 		t.Fatalf("the refused picture allocated %d buffers (%d -> %d bytes live) and left the set at %d rows",
 			d.bufs-bufs, held, live(), dt.visCap)
+	}
+	// Row-chunked (chunkTower) it fits: k/v for every key, the rest for a
+	// chunk of rows narrower than the picture.
+	if !g.ReserveRows(p.MaxSeq) {
+		t.Fatalf("a %d-row picture refused row-chunked on a %d MB card: %s", p.MaxSeq, budget>>20, g.Err())
+	}
+	if c := g.TowerChunk(); c <= 0 || c >= p.MaxSeq || g.Stats().TowerChunked == 0 {
+		t.Fatalf("a %d-row picture took a set of %d-row chunks (%d chunked sets)", p.MaxSeq, c, g.Stats().TowerChunked)
+	}
+	t.Logf("a %d-row picture: a row-chunked set of %d-row chunks", p.MaxSeq, g.TowerChunk())
+	run(3000)
+	if g.TowerChunk() != 0 {
+		t.Fatalf("a 3000-row picture after the chunked one kept %d-row chunks: a whole set fits it", g.TowerChunk())
 	}
 	// Sizes that alternate keep the set: the shrink waits for visShrinkCalls
 	// calls in a row that need half of it or less.

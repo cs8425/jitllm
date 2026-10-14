@@ -105,6 +105,10 @@ type LayerWeights struct {
 	// the same op as AttnNorm with a different weight. LayerPlan.PostNorm says
 	// the model has them so a tier can decline before uploading anything.
 	PostAttnNorm, PostFFNNorm []float32
+	// AttnSubNorm and FFNSubNorm are BitNet's inner RMSNorms (LayerPlan.SubNorm):
+	// over the attention output (QDim wide) before wo, and over act(gate)*up
+	// (NFFN wide) before down. nil elsewhere.
+	AttnSubNorm, FFNSubNorm []float32
 	// ResidNorm and ResidNormB are a post-norm block's last LayerNorm, over x
 	// + mlp(x) (LayerPlan.PostResidNorm): BERT's output norm. nil elsewhere.
 	ResidNorm, ResidNormB []float32
@@ -760,6 +764,10 @@ type LayerPlan struct {
 	// PostNorm says the block RMSNorms the attention output and the FFN output
 	// before each residual add -- gemma2 and gemma3's two extra norms.
 	PostNorm bool
+	// SubNorm says the block RMSNorms the attention output before wo and the
+	// gated FFN's product before down (LayerWeights.AttnSubNorm/FFNSubNorm) --
+	// BitNet's two inner norms. A tier runs both or declines the block.
+	SubNorm bool
 	// PostResidNorm says the block's norms come after its residual adds, on
 	// the residual itself (BERT's post-norm order): x = LN(x + attn(x)) with
 	// FFNNorm, whose output is both the FFN's input and the residual, then
@@ -1272,6 +1280,17 @@ type RowsReserver interface {
 	ReserveRows(n int) bool
 }
 
+// RowChunker is an optional RowsReserver whose non-causal set may take a
+// picture in row chunks when the whole does not fit (paging is the design):
+// TowerChunk, read after ReserveRows, is the rows a call takes (0: the
+// picture goes whole). Such a picture runs block by block, every chunk's
+// phase 1 (its k and v written at its rows of keys) before any chunk's phase
+// 2 (its queries over every key, and the rest of the block on its rows).
+type RowChunker interface {
+	TowerChunk() int
+	LayersPhase(lo, hi, pos, n, keys, phase int, x, cs, csSWA []float32) bool
+}
+
 // LayerInputDevice is an optional LayerDevice that takes a per-layer input
 // for every row beside the residual: Gemma 4's per-layer embeddings
 // (LayerPlan.PLEDim), NLayer*PLEDim floats a row, row-major, which block li
@@ -1410,9 +1429,6 @@ type NamedDevice interface {
 	// DeviceOf is the name of the device holding block li, and whether one does.
 	DeviceOf(li int) (string, bool)
 	HeadDeviceName() (string, bool)
-	// HeadWith is the head on the device holding block li: the one place a
-	// rows step takes it.
-	HeadWith(li int) bool
 	// Pin keeps block li on its device through seam moves, budget shrinks
 	// and eviction; it reports false when no device holds the block.
 	Pin(li int, on bool) bool
