@@ -30,6 +30,14 @@ func PersistDepLaunchesForTest() int64 { return persistDepTotal.Load() }
 // launched, for a gate that must show the path ran.
 func PersistLaunchesForTest() int64 { return persistTotal.Load() }
 
+// SwapGateUpForTest makes every fused gate/up FFN (Config.GateUpFuse) hand
+// down the two rows the wrong way round, and returns the setting it replaced.
+func SwapGateUpForTest(on bool) bool {
+	old := gateUpSwapped
+	gateUpSwapped = on
+	return old
+}
+
 // SwapGateUp2ForTest makes every Gate2 FFN (Config.GateUp2) read the two
 // weights the wrong way round, and returns the setting it replaced.
 func SwapGateUp2ForTest(on bool) bool {

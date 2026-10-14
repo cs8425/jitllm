@@ -9592,8 +9592,30 @@ a logit, 5.5e-6 on a probability (`TestD1OmniMatchesReference`).
 
 A warm pass over every prompt makes no engine allocation, and half the
 blocks' pages give the same scores to the bit (`TestD1OmniKeepsThePrinciples`).
-The device tiers decline the trunk by name until its convolution and prefix
-mask are planned there.
+On a device the trunk is the encoder segment's non-causal blocks
+(`engine/model/encdev.go`): RMSNorm, SwiGLU, GQA with the per-head q/k norm
+and NEOX rotary on the attention blocks, and on the convolution blocks a
+short convolution with no state, `nn.RecurrentPlan.Centred`, run by
+`kernels.Conv3Centred` -- three taps on the row before, at and after, each
+read only where the row's window holds it. The windows are the ones the
+attention's mask reads (`nn.RowWindowDevice`, one a row: a prefix row's the
+prefix, a text row's the whole call), copied whole into one buffer for the
+convolution (`blockScratch.vwinAll`), so the prefix's last row's cut and the
+zeros past either end are the same fact on both. The convolution and
+attention blocks share one set, built from the union of their plans. The
+head attends at 16 key heads with LayerNorm after a trunk of 8 with RMSNorm,
+and every kernel of a set bakes those, so the head runs in a non-causal set
+of its own (`nn.LayerPlan.HeadSet`, the tier's `geoNCHead`), resized with the
+trunk's and never row-chunked.
+
+`TestD1OmniOnEveryDevice` places every block, three, and eight (a seam that
+leaves the trunk's rest home) and compares the text and the picture
+questions' scores with the host's: CUDA 8.6e-3, 2.8e-3 and 3.9e-3 on the
+laptop's RTX 3050 Ti, Vulkan 1.7e-5. With the prefix reading the text on the
+device the scores move 1.0. The kernel alone against its loop, the prefix
+windows included: `backend.TestConv3CentredMatchesTheLoop`, which fails when
+the right tap ignores the window. A warm question makes no allocation on
+either device at a seam or with every block placed.
 
 #### d1-omni's pictures
 
@@ -9628,6 +9650,82 @@ near -110 is 26 off), the head's logits 0.21 and the probabilities 5.2e-3
 away (`TestD1OmniDecidesOverPicturesAsItsReference`). The prefix length and
 the prompt after it are exact. Letting the prefix read the text moves a logit
 0.91, and swapping the two pictures 1.53.
+
+#### d1-omni's voice: the first audio tower
+
+The mmproj's audio half (`d1omni_a`) is audio.py's: NeMo's log-mel front
+end, an 8x convolutional subsampling, 17 FastConformer blocks and an adapter
+with a residual correction. It is carried as tower blocks after the vision
+blocks in the one tower page array (`jlm.Audio`, an optional tail of the
+Vision record, so a container with no audio is the bytes it was). The
+converter reads what the file states and writes what audio.py hardcodes
+(16 kHz, a 512-point transform of 400-sample windows every 160); it cuts
+pointwise_conv1 into the GLU's halves, makes the depthwise convolutions
+tap-major, and reorders the subsampling's output matrix to read its 4096
+inputs channel-last, the layout the engine's activations take.
+
+On the host every product is the generated matmul and every elementwise step
+a generated kernel:
+
+- the |STFT|^2 is two matmuls of the centred frames (one strided copy)
+  against the Hann-windowed cos and sin bases, built once at load; the mel
+  filterbank is librosa's Slaney one, transcribed; the log is a new
+  elementwise kernel (`nn.Ln32JIT`, the log-softmax's ln on every lane, on
+  AVX2, SSE and NEON); each feature's normalising scale is one scalar from
+  the generated sums;
+- the subsampling's first convolution is nine strided copies and a matmul,
+  its depthwise ones the tower's existing depthwise rows (`DWConvRow`), each
+  layer's input cut at the frames still valid, and only the valid rows go on:
+  the conformer's mask is exactly that cut, and a relative position does not
+  depend on the length;
+- the relative-position term of row i is the score kernel over the projected
+  position table read from row t-1-i, so the reference's rel-shift is an
+  offset, not a gather;
+- the convolution module's depthwise convolution is its taps' shifted
+  multiply-adds, BatchNorm folded into a scale and a shift by the converter.
+
+A voice clip arrives as a data:audio WAV in "files" (16 kHz mono 16-bit PCM;
+any other is refused, the engine does not resample), at most one and never
+beside a picture, as llama.cpp's server takes it. The prompt after it is
+written as the audio questions were trained (a choice's options as
+`option_000: <description>`, a noul as plain no and yes, a null state as
+{}), cut to audio_text_length (15360), with no temperature.
+
+Against audio.py with the F16-rounded weights (`TestD1OmniHearsAsItsReference`,
+on the repo's 3.3-second clip): the log-mel features 1.7e-6 off, the 41
+prefix rows at NMSE 1.2e-4 (the tower at Q8_0), the prompt token for token,
+the logits 0.039 and the probabilities 0.012 away. Removing the
+relative-position term moves the answers 0.32, the convolution module 0.63,
+writing the questions as text 0.11 (`TestD1OmniAudioFeaturesAreLoadBearing`);
+a warm clip's encoding allocates nothing. llama.cpp's d1-omni server reads
+the same 251 positions and answers within 0.012
+(`TestD1OmniVoiceMatchesLlamaCpp`).
+
+On a device each FastConformer block is a convolutional-tower block
+(`nn.ConvConformer`), a program of generated kernels as Gemma 3n's
+MobileNet blocks are (`jit/gpu/tier/conv.go`): LayerNorm in three passes,
+the matrices' batched twins with a bias launch after each, the macaron
+halves as `AddHalf`, the relative-position scores in one kernel
+(`kernels.RelPosScores`: both terms, the position table's row picked by the
+offset), the row softmax, the weighted sum (`AttnAccRows`), the GLU's
+`SigmoidMul`, the depthwise convolution (`DWConv1dRows`), the folded
+BatchNorm (`AffineRows`, the depthwise bias folded into its shift at load)
+and SiLU. The program is built for the 30 seconds' 375 rows and a call
+writes its own row count to a one-word buffer: the keys, the weighted sum
+and the convolution stop there by SELECTING, not by multiplying by zero, since
+the rows past it hold whatever the scratch held. The projected
+position table is a matmul of a constant sinusoid table, 2R-1 rows, per
+block per call. The audio blocks are placed through their own encoder
+segment State (`audState`), the one placement path; the front end, the
+subsampling, the adapter and the residual stay on the host.
+
+`TestD1OmniHearsOnEveryDevice` places every audio block: the prefix rows sit
+at NMSE 1.3e-4 against the host's on the laptop's RTX 3050 Ti under CUDA and
+Vulkan, the answers 0.008-0.012 from the reference, and a warm clip makes no
+allocation (the convolutional submission's closure and its run list were
+made per call; they are the devTier's now). Swapping the attention's u and v
+on the device moves the rows to NMSE 0.097. The kernels against their loops,
+rows past the call poisoned NaN: `backend.TestConformerKernelsMatchTheLoops`.
 
 ## qwen4exp: Qwen3.8-Flash-Next (plan, before the code)
 

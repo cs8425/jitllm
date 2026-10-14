@@ -1020,6 +1020,11 @@ type Vision struct {
 	// only when set.
 	TileSize  uint32
 	Tolerance float32
+
+	// Audio is the container's audio tower, nil for none: its blocks follow
+	// the vision blocks in the tower's page array (see Audio). The last
+	// optional tail of the record.
+	Audio *Audio
 }
 
 // Projector is how tower embeddings become language-model tokens.

@@ -199,12 +199,35 @@ func (e *Embedder) lfm2Encode(ids []int32, pre []float32) error {
 			return err
 		}
 	}
+	// Packed sequences (Embedder.seqs, a batch's prompts in one pass): each
+	// row's positions count from its sequence's start, its keys and its
+	// convolution's taps stay inside it.
+	qseq, _ := e.packRows(n)
 	for i := 0; i < n; i++ {
-		e.jit.RopeTable(lf.rope, e.cs[i*c.NRot:(i+1)*c.NRot], i)
+		pos := i
+		if qseq != nil {
+			pos = i - e.seqs[qseq[i]].Lo
+		}
+		e.jit.RopeTable(lf.rope, e.cs[i*c.NRot:(i+1)*c.NRot], pos)
 	}
 	scale := float32(1 / math.Sqrt(float64(hd)))
 	h, t := e.xb[:n*d], e.t[:n*d]
-	for li := range lf.blocks {
+	if err := e.devPrepare(n, -1, p); err != nil {
+		return err
+	}
+	for li := 0; li < len(lf.blocks); li++ {
+		// A run of placed blocks is one device call over the sequence.
+		if e.onDevice(li) {
+			hi, err := e.devRun(li, len(lf.blocks), n, x, e.cs[:n*c.NRot], nil)
+			if err != nil {
+				return err
+			}
+			li = hi - 1
+			if e.afterBlock != nil {
+				e.afterBlock(li, x)
+			}
+			continue
+		}
 		if err := m.encBlockPageIn(li); err != nil {
 			return err
 		}
@@ -276,8 +299,8 @@ func (e *Embedder) lfm2Encode(ids []int32, pre []float32) error {
 
 // lfConv writes the centred convolution of bx into y: the middle tap on
 // every row, the left tap read one row back, the right tap one row ahead --
-// except on the prefix's last row, which never reads the text (keep_right).
-// bx is overwritten.
+// except on the prefix's last row, which never reads the text (keep_right),
+// and across a packed sequence's edge. bx is overwritten.
 func (e *Embedder) lfConv(b *lfBlock, y, bx []float32, n, p int) {
 	d := e.m.Cfg.NEmbd
 	copy(y[:n*d], bx[:n*d])
@@ -289,6 +312,13 @@ func (e *Embedder) lfConv(b *lfBlock, y, bx []float32, n, p int) {
 	l := e.ff[:n*d]
 	copy(l, bx[:n*d])
 	e.actMul(l, e.lfTaps(b, 0, n), nn.ActIdentity)
+	// A sequence's first row reads nothing before it: the row l would
+	// carry into it is cleared (it carries into no other).
+	for _, sq := range e.seqs {
+		if sq.Lo > 0 {
+			nn.Scale32JIT(l[(sq.Lo-1)*d:sq.Lo*d], 0)
+		}
+	}
 	e.axpyRows(y[d:n*d], l[:(n-1)*d])
 	// The right tap: y[t] += w2 * bx[t+1], t <= n-2, not at t = p-1.
 	if e.violation == "causal-conv" {
@@ -297,6 +327,11 @@ func (e *Embedder) lfConv(b *lfBlock, y, bx []float32, n, p int) {
 	e.actMul(bx[:n*d], e.lfTaps(b, 2, n), nn.ActIdentity)
 	if p > 0 && p < n && e.violation != "prefix-reads-text" {
 		nn.Scale32JIT(bx[p*d:(p+1)*d], 0)
+	}
+	for _, sq := range e.seqs {
+		if sq.Hi < n {
+			nn.Scale32JIT(bx[sq.Hi*d:(sq.Hi+1)*d], 0)
+		}
 	}
 	e.axpyRows(y[:(n-1)*d], bx[d:n*d])
 }
@@ -323,18 +358,24 @@ func (e *Embedder) lfAttnHeads(h0, h1 int) {
 		off, koff := h*hd, (h/group)*hd
 		att := e.att[h*e.attStride:]
 		acc := e.acc[h*hd : (h+1)*hd]
+		kvw := c.NKVHead * hd
 		for i := 0; i < j.n; i++ {
-			keys := j.n
+			lo, hi := 0, j.n
+			if len(e.seqs) > 0 {
+				sq := e.seqs[e.rowSeq[i]]
+				lo, hi = sq.Lo, sq.Hi
+			}
 			if i < j.p && e.violation != "prefix-reads-text" {
-				keys = j.p
+				hi = j.p
 			}
 			if e.violation == "causal-attn" {
-				keys = i + 1
+				hi = i + 1
 			}
-			e.attnLF.AttnScores(att[:keys], j.k[koff:], j.q[i*d+off:], keys)
+			keys := hi - lo
+			e.attnLF.AttnScores(att[:keys], j.k[lo*kvw+koff:], j.q[i*d+off:], keys)
 			nn.Scale32JIT(att[:keys], j.scale)
 			nn.Softmax32JIT(att, keys)
-			e.attnLF.AttnAcc(acc, j.v[koff:], att[:keys], keys)
+			e.attnLF.AttnAcc(acc, j.v[lo*kvw+koff:], att[:keys], keys)
 			copy(j.out[i*d+off:i*d+off+hd], acc)
 		}
 	}

@@ -30,6 +30,9 @@ type DecisionRequest struct {
 	// Videos are the request's videos (Clef's); a request with one runs on
 	// its own too.
 	Videos []VideoFrames
+	// Audio is the request's voice clip, 16 kHz mono samples (d1-omni's);
+	// a request with one runs on its own (DecideAudio).
+	Audio []float32
 }
 
 // decisionBatchRows is the most prompts one batch session runs at once.
@@ -118,6 +121,11 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 		// both requests as one batch took 19.8x (d1) and 19.1x (lev) the
 		// requests alone. A batch on the host is faster than alone (0.64x d1,
 		// 0.84x lev) and stays one.
+		if len(rq.Audio) > 0 {
+			res.Answers, res.Err = d.DecideAudio(rq.State, rq.Questions, rq.Audio)
+			res.InputTokens = d.InputTokens()
+			continue
+		}
 		if len(rq.Images) > 0 || len(rq.Videos) > 0 || d.batchAlone() {
 			res.Answers, res.Err = d.DecideMedia(rq.State, rq.Questions, rq.Images, rq.Videos)
 			res.InputTokens = d.InputTokens()
@@ -226,20 +234,24 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 		}
 		return nil
 	}
-	if d.kind == jlm.DecisionLaya {
+	if d.kind == jlm.DecisionLaya || d.kind == jlm.DecisionD1Omni {
 		return d.layaPacked(jobs)
 	}
-	if d.kind == jlm.DecisionD1Omni {
-		for _, j := range jobs {
-			s, err := d.d1OmniForward(j.ids, j.qt, j.markers, 0)
-			if err != nil {
-				return err
-			}
-			j.scores = append(j.scores[:0], s...)
-		}
+	if len(jobs) == 0 {
 		return nil
 	}
-	if len(jobs) == 0 {
+	if len(jobs) == 1 && d.violation != "batch-alone" {
+		// One prompt has no rows to share a step with: it runs as Decide
+		// runs it, on the Decider's own State, where the head reads back
+		// the label logits alone (forwardSpans) rather than a row's every
+		// logit, and no batch session is stepped.
+		j := jobs[0]
+		s, err := d.forward(j.ids, j.groups, 0)
+		if err != nil {
+			return err
+		}
+		j.scores = append(j.scores[:0], s...)
+		d.input = len(j.ids)
 		return nil
 	}
 	sc, err := d.batchSession(min(len(jobs), decisionBatchRows))
@@ -311,7 +323,13 @@ func (d *Decider) layaPacked(jobs []*batchJob) error {
 		if len(pass) == 1 {
 			e.seqs, e.seqTypes = e.seqs[:0], e.seqTypes[:0]
 		}
-		if err := e.mbEncode(ids); err != nil {
+		var err error
+		if d.kind == jlm.DecisionD1Omni {
+			err = e.lfm2Encode(ids, nil)
+		} else {
+			err = e.mbEncode(ids)
+		}
+		if err != nil {
 			return err
 		}
 		out := d.variantScores(0, len(marks))
