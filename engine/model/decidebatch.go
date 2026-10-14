@@ -225,6 +225,20 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 	if len(jobs) == 0 {
 		return nil
 	}
+	if len(jobs) == 1 && d.violation != "batch-alone" {
+		// One prompt has no rows to share a step with: it runs as Decide
+		// runs it, on the Decider's own State, where the head reads back
+		// the label logits alone (forwardSpans) rather than a row's every
+		// logit, and no batch session is stepped.
+		j := jobs[0]
+		s, err := d.forward(j.ids, j.groups, 0)
+		if err != nil {
+			return err
+		}
+		j.scores = append(j.scores[:0], s...)
+		d.input = len(j.ids)
+		return nil
+	}
 	sc, err := d.batchSession(min(len(jobs), decisionBatchRows))
 	if err != nil {
 		return err
