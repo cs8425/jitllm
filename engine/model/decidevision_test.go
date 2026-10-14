@@ -205,6 +205,31 @@ func TestD1PicturesMatchLlamaCpp(t *testing.T) {
 				t.Errorf("ran %d positions, llama.cpp %d: the prompts differ", d.InputTokens(), gold.Usage.InputTokens)
 			}
 			checkDecisions(t, qs, ans, gold, 0.05, true)
+
+			// Paging: the same request under a budget of four text pages and
+			// two tower pages evicts and re-reads, and answers the same to
+			// the bit.
+			budget := uint64(4*m.container.PageBytes(0) + 2*m.container.PageBytes(int(m.container.H.NBlocks)))
+			mp := openD1VL(t, WithPageBudget(budget))
+			defer mp.Close()
+			dp, err := mp.NewDecider(4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dp.Close()
+			pans, err := dp.Decide(state, qs, imgs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ev := mp.container.Faults(); ev == 0 {
+				t.Fatal("the budget evicted nothing: paging was not exercised")
+			}
+			for i := range ans {
+				if ans[i].Noul != pans[i].Noul || fmt.Sprint(ans[i].Probs) != fmt.Sprint(pans[i].Probs) {
+					t.Fatalf("%s: paged %v/%v, resident %v/%v", qs[i].ID, pans[i].Noul, pans[i].Probs, ans[i].Noul, ans[i].Probs)
+				}
+			}
+			t.Logf("under a %d-byte budget: every answer bit-identical", budget)
 		})
 	}
 }

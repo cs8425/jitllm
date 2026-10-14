@@ -429,6 +429,10 @@ func TestTowerEncodeResumesAcrossARelocation(t *testing.T) {
 			m, _ := openGemma3nV(t, opts...)
 			return m, m.Tower()
 		}},
+		{"lfm2", func(t testing.TB, opts ...Option) (*Model, *Tower) {
+			m := openD1VL(t, opts...)
+			return m, m.Tower()
+		}},
 	} {
 		t.Run(f.name, func(t *testing.T) { towerResumesAcrossARelocation(t, f.open) })
 	}

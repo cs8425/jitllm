@@ -85,12 +85,12 @@ var (
 	d1Gold = testmodels.Path("d1/gold")
 )
 
-func openD1VL(t testing.TB) *Model {
+func openD1VL(t testing.TB, opts ...Option) *Model {
 	t.Helper()
 	if !vlmAvailable(d1Text, d1Proj) {
 		testmodels.Missing(t, "MODEL MISSING: %s and its mmproj (RULE 11)", d1Text)
 	}
-	m, err := Open(jlmOfPair(t, d1Text, d1Proj), noTune, WithKVF16(false))
+	m, err := Open(jlmOfPair(t, d1Text, d1Proj), append([]Option{noTune, WithKVF16(false)}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
