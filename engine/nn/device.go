@@ -1195,6 +1195,20 @@ const (
 	// stride-2 depthwise downsample of it with a norm, scores at
 	// 1/sqrt(KD), then the output projection.
 	ConvAttention
+	// ConvConformer is a FastConformer block (d1-omni's audio tower): half a
+	// SiLU feed-forward, Transformer-XL relative-position attention with
+	// per-head u and v biases, the convolution module (LayerNorm, a GLU, a
+	// depthwise convolution of KMid taps centred on the row, a folded
+	// BatchNorm, SiLU, pointwise), the other half feed-forward and a
+	// LayerNorm, every norm a LayerNorm with a bias and every matrix with a
+	// bias. Rows are positions: HIn is the most a call takes, and a call of
+	// fewer rows reads only its own (the keys and the convolution stop at the
+	// call's rows). CIn is the width, CExp the feed-forward's, Heads of KD.
+	// The matrices ride the slots: Wq, Wk, Wv, Wo, Gate (linear_pos), Up and
+	// Down (the first feed-forward), ShGate (the GLU's value), ShUp and
+	// ShDown (the second feed-forward), SSM.Gate (the GLU's gate) and SSM.BA
+	// (the pointwise convolution).
+	ConvConformer
 )
 
 // ConvPlan is one convolutional block's geometry at its picture's size. Rows
@@ -1234,6 +1248,33 @@ type ConvWeights struct {
 	DwMid, DwMidNorm     []float32
 	KDown, KDownNorm     []float32
 	VDown, VDownNorm     []float32
+	// Conformer is a ConvConformer block's vectors, nil for every other.
+	Conformer *ConformerVecs
+}
+
+// ConformerVecs is a FastConformer block's vectors: its norms and biases,
+// the attention's u and v (heads x head width), the depthwise taps
+// (tap-major), the BatchNorm folded into a scale and a shift (the depthwise
+// bias folded into the shift), and PE, the relative positions' sinusoids
+// from HIn-1 down to -(HIn-1): 2*HIn-1 rows of the width.
+type ConformerVecs struct {
+	FF1Norm, FF1NormB, FF1UpB, FF1DownB []float32
+	AttnNorm, AttnNormB                 []float32
+	QB, KB, VB, OB, U, V                []float32
+	ConvNorm, ConvNormB                 []float32
+	GLUValB, GLUGateB                   []float32
+	DW, BNScale, BNShift, PW2B          []float32
+	FF2Norm, FF2NormB, FF2UpB, FF2DownB []float32
+	OutNorm, OutNormB                   []float32
+	PE                                  []float32
+}
+
+// List is the vectors in a fixed order, the tier's.
+func (c *ConformerVecs) List() [27][]float32 {
+	return [27][]float32{c.FF1Norm, c.FF1NormB, c.FF1UpB, c.FF1DownB, c.AttnNorm, c.AttnNormB,
+		c.QB, c.KB, c.VB, c.OB, c.U, c.V, c.ConvNorm, c.ConvNormB, c.GLUValB, c.GLUGateB,
+		c.DW, c.BNScale, c.BNShift, c.PW2B, c.FF2Norm, c.FF2NormB, c.FF2UpB, c.FF2DownB,
+		c.OutNorm, c.OutNormB, c.PE}
 }
 
 // ConvDevice is a LayerDevice that runs a convolutional tower's blocks.

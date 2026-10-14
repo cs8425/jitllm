@@ -54,6 +54,9 @@ type Embedder struct {
 	// sees its stages' rows -- the gates' bisection hook.
 	aud      audioRun
 	audioTap func(stage string, rows []float32)
+	// audSeg is the audio tower's segment State, the one its blocks are
+	// placed on a device through (audiodev.go); nil until a device is.
+	audSeg *State
 
 	// rg is the pool regions the host's blocks run (encRegions).
 	rg encRegions
@@ -206,6 +209,10 @@ func (e *Embedder) Close() {
 	if e.seg != nil {
 		e.seg.Close()
 		e.seg = nil
+	}
+	if e.audSeg != nil {
+		e.audSeg.Close()
+		e.audSeg = nil
 	}
 	if e.jit != nil {
 		e.jit.Close()

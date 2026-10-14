@@ -1655,6 +1655,12 @@ func openContainer(path string, options ...Option) (*Model, error) {
 			c.Close()
 			return nil, err
 		}
+		// The audio blocks take their places in the block space after the
+		// vision blocks, as the container pages them; their weights are the
+		// tower's own (audioPageIn).
+		if m.audio != nil {
+			m.layers = append(m.layers, make([]layer, len(m.audio.blocks))...)
+		}
 		if tw.mn != nil && tw.mn.hard != nil {
 			m.hardEmbd = tw.mn.hardRows(m.Cfg.EmbdScale)
 		}
@@ -1951,7 +1957,11 @@ func (m *Model) pageIn(li int) error {
 		return nil
 	}
 	// An encoder's blocks are its own structs (encoder.go, modernbert.go);
-	// a tower's after them (d1-omni's) are layers like any model's.
+	// a tower's after them (d1-omni's) are layers like any model's, and an
+	// audio tower's its own (audio.go).
+	if m.audio != nil && li >= m.audioFirst() {
+		return m.audioPageIn(li - m.audioFirst())
+	}
 	if m.enc != nil && li < m.encBlocks() {
 		return m.encBlockPageIn(li)
 	}
