@@ -77,7 +77,9 @@ func ResetProfile() {
 // State is one generation session: the KV cache plus the scratch buffers the
 // forward pass reuses. One State is one conversation; it is not safe to share.
 type State struct {
-	m *Model
+	// rlBases and rlEnds are relocateRows' per-sequence spans.
+	rlBases, rlEnds []int
+	m               *Model
 	// pending is the move between devices PrepareMove started and no Commit
 	// or Cancel has ended (moveblocks.go).
 	pending *PendingMove
