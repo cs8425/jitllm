@@ -125,6 +125,11 @@ type Decider struct {
 	jobs []*batchJob
 	// batchN is how many of jobs the last batch ran.
 	batchN int
+	// packIDs and packMarks are a packed encoder pass's ids and marker rows
+	// (layaPacked), and packs counts the passes run.
+	packIDs   []int32
+	packMarks []int
+	packs     int
 
 	// clef is Clef's head and its working memory (decideclef.go), and
 	// clefEmb the prefill mode its prompt runs under: the residual of every
