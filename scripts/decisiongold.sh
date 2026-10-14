@@ -49,6 +49,8 @@ gold() { # gold <gguf> <name> [<mmproj> <request>...]
 	for req in $reqs; do
 		curl -s "localhost:$port/v1/systemone" -H 'Content-Type: application/json' \
 			-d @"$out/$req.json" >"$out/$name.$req.llamacpp.json"
+		# The model as its file name: a golden carries no path of this box.
+		sed -i 's#"model":"[^"]*/#"model":"#' "$out/$name.$req.llamacpp.json"
 		echo "$name $req: $(head -c 200 "$out/$name.$req.llamacpp.json")"
 	done
 	# The cap wrapper may not pass a signal on; the server is named by its model.
