@@ -10,7 +10,7 @@ by name. `internal/srcgate.TestModelsDocIsGenerated` fails when the page and the
 - **67** GGUF text architecture names (`general.architecture`, `convert.Architectures`) on **59** graphs
 - **30** Hugging Face safetensors classes (`architectures` in `config.json`, `convert.HFClasses`) on **23** graphs, **1** of them reached only from safetensors
 - **60** graphs in all (`jlm.Arch`)
-- **17** vision projectors (`clip.projector_type`, `convert.Projectors`)
+- **18** vision projectors (`clip.projector_type`, `convert.Projectors`)
 - **3** embedding encoders, and pooling on any decoder
 - **13** weight types read (`quant.Dequantable`), **9** of them packed quantizations (`quant.PackedTypes`)
 - **85** models in the download catalogue (`jitllm library`), **9** of them with a vision tower
@@ -138,6 +138,7 @@ convert together, the text model one of the architectures above. The projector i
 | `internvl` | InternVL 2.5 and 3 (InternViT-300M; the 6B tower is refused) |
 | `janus_pro` | Janus-Pro |
 | `kimivl` | Kimi-VL (MoonViT) |
+| `lfm2` | LFM2-VL, LFM2.5-VL and d1-3B (SigLIP2 NaFlex, tiles and a thumbnail) |
 | `llama4` | Llama 4 Scout, Maverick |
 | `mlp` | LLaVA and LLaVA-style models (a CLIP tower and a two-matrix MLP), llava-phi-3 |
 | `phi4` | Phi-4-reasoning-vision-15B |

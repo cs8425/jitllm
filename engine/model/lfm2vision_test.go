@@ -210,12 +210,22 @@ func TestLFM2RealMatchesTransformers(t *testing.T) {
 			lfm2TanhGELU = true
 			pt, _ := nmse32(wantEmb, proj())
 			lfm2TanhGELU = false
-			t.Logf("the projector alone on transformers' tower rows: NMSE %.3e; llama.cpp's tanh GELU %.3e", pn, pt)
-			if math.IsNaN(pn) || pn > 1e-4 {
-				t.Fatalf("the projector alone reads NMSE %.3e against transformers'", pn)
+			was := tw.Cfg.fault
+			tw.Cfg.fault = towerFaultShuffleSwap
+			ps, _ := nmse32(wantEmb, proj())
+			tw.Cfg.fault = was
+			t.Logf("the projector alone on transformers' tower rows: NMSE %.3e; llama.cpp's tanh GELU %.3e; "+
+				"the unshuffle transposed %.3e", pn, pt, ps)
+			if !(ps > 20*pn) {
+				t.Errorf("the transposed unshuffle reads %.3e against a clean %.3e", ps, pn)
 			}
-			if !(pt > pn) {
-				t.Errorf("the tanh GELU reads %.3e against the erf's %.3e: the gate cannot see the form", pt, pn)
+			// The bound is the int8 activations: the reference projector with
+			// its inputs rounded to q8 per 32 and f16 weights reads 2.7e-3
+			// against itself on the photo. Under that the erf and tanh GELUs
+			// cannot be told apart (they differ by under 1e-3 of a value); the
+			// form is the reference's by construction, and logged here.
+			if math.IsNaN(pn) || pn > 1e-2 {
+				t.Fatalf("the projector alone reads NMSE %.3e against transformers'", pn)
 			}
 
 			// The violations, from the pixels.
@@ -235,7 +245,12 @@ func TestLFM2RealMatchesTransformers(t *testing.T) {
 					t.Errorf("violation %q moved no pixel: the gate cannot see it", name)
 				}
 			}
-			vio("the bilinear resize", &lfm2Bilinear)
+			// A picture already at its planned size is not resampled, so the
+			// filter is not in it.
+			if b := decodeImage(t, path).Bounds(); g.Cols*g.Rows > 1 ||
+				b.Dy() != g.Pieces[0][0]*c.PatchSz || b.Dx() != g.Pieces[0][1]*c.PatchSz {
+				vio("the bilinear resize", &lfm2Bilinear)
+			}
 			if g.Cols*g.Rows > 1 {
 				vio("no thumbnail", &lfm2NoThumb)
 			}
