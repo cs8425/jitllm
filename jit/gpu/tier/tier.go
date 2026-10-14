@@ -487,6 +487,12 @@ type Config struct {
 	// it replaces inside a CUDA graph (gpu-kernels.md, "A persistent decode
 	// block"). CUDA only; elsewhere it is declined (Stats.PersistWhy).
 	Persist bool
+	// PersistDeps orders a persistent kernel's tasks with dependency
+	// counters (ir.PersistDeps): a task waits only for the tasks it reads or
+	// overwrites, a tile of an elementwise task only for the producer tiles
+	// whose elements it touches, and a workgroup with nothing to do in a task
+	// does not wait for it. A mode of Persist; off by default.
+	PersistDeps bool
 	// PersistGrid caps a persistent kernel's grid below the co-residency
 	// limit; zero takes the limit, or the widest launch's groups when fewer.
 	PersistGrid int
@@ -698,7 +704,10 @@ type Stats struct {
 	// grid-barrier-separated phases, PersistCompiles the compositions built
 	// and PersistFallbacks those that failed and ran per-op; PersistWhy is
 	// why the path is declined on this device.
+	// PersistDepLaunches counts those launched with dependency counters
+	// (Config.PersistDeps), PersistDepTiles their tile-wise edges.
 	PersistLaunches, PersistParts, PersistPhases, PersistCompiles, PersistFallbacks int
+	PersistDepLaunches, PersistDepTiles                                             int
 	PersistWhy                                                                      string
 	// RagHeadOne counts ragged steps whose head ran decode's own projection on
 	// the one row that wanted logits, rather than a batched twin over every
@@ -1153,6 +1162,8 @@ func (s *Stats) add(o Stats) {
 	s.PersistPhases += o.PersistPhases
 	s.PersistCompiles += o.PersistCompiles
 	s.PersistFallbacks += o.PersistFallbacks
+	s.PersistDepLaunches += o.PersistDepLaunches
+	s.PersistDepTiles += o.PersistDepTiles
 	if o.PersistWhy != "" {
 		s.PersistWhy = o.PersistWhy
 	}
@@ -2017,6 +2028,7 @@ func New(slots []Slot, options ...Option) (*GPU, error) {
 	// A jitllmtest build can make the persistent path every tier's default
 	// (PersistByDefaultForTest), so the regression gates run through it.
 	cfg.Persist = persistDefault
+	cfg.PersistDeps = persistDepsDefault
 	for _, f := range o.cfg {
 		f(cfg)
 	}

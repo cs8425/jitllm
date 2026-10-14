@@ -13,6 +13,19 @@ func PersistByDefaultForTest(on bool) bool {
 	return old
 }
 
+// PersistDepsByDefaultForTest is PersistByDefaultForTest for
+// Config.PersistDeps: every tier opened after it orders its persistent
+// kernels with dependency counters (Persist must be on as well).
+func PersistDepsByDefaultForTest(on bool) bool {
+	old := persistDepsDefault
+	persistDepsDefault = on
+	return old
+}
+
+// PersistDepLaunchesForTest is how many dependency-counter persistent kernels
+// this process has launched.
+func PersistDepLaunchesForTest() int64 { return persistDepTotal.Load() }
+
 // PersistLaunchesForTest is how many persistent kernels this process has
 // launched, for a gate that must show the path ran.
 func PersistLaunchesForTest() int64 { return persistTotal.Load() }
