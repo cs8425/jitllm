@@ -304,6 +304,9 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 // gated off (the residual gate's value zero), which the host's head does not
 // read.
 func clefDevGateOff(m *Model) func() {
+	if _, err := m.clefLoad(); err != nil {
+		panic(err)
+	}
 	h := m.clefDevHead()
 	cp := *h
 	cp.Scales[2] = 0

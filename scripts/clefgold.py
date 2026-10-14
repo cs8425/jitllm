@@ -21,6 +21,11 @@ the head's logits in the prompt's option order, and systemone's answer.
 Written as <out_dir>/clef-fixture.gguf and
 <out_dir>/clef-fixture.<request>.reference.json.
 
+real: the release itself (clef_dir the whole Cloudflare/clef-flash
+snapshot), read by the release's classes in float32, with the same goldens,
+written as <out_dir>/clef.<request>.reference.json. It needs some 40 GB of
+memory.
+
 The reference runs in float32 on the CPU. LCPP_SRC names the llama.cpp
 checkout whose converter knows the clef arch.
 """

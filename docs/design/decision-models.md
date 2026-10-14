@@ -284,7 +284,7 @@ Order, by what each unlocks (coordinator's priorities):
 |---|---|---|---|---|
 | d1-3B (Q8_0) | label logits, lfm2 | `TestDecisionMatchesLlamaCpp`, `TestDecisionReadoutIsLoadBearing` (noul shown true first) | not run: the reference is transformers remote code (>=5.14) and was not run here | worst probability 0.021 (f16 kv, llama.cpp's own), 0.020 (f32 kv); prompts token for token |
 | Lev (Q8_0 of the merged adapter) | label logits, qwen35 | same, plus two option orders, sorted keys and calibration load-bearing | the graph only: Qwen3.5-4B with the adapter merged, f32 in transformers, on jitllm's prompt ids: raw label logits within 0.3 on a scale of 20 (Q8_0 against BF16); `lev serve`'s own prompt code was not run | worst 0.029 (f16 kv), 0.090 (f32 kv, lev's tone near-tie; see decide_test.go) |
-| Clef-Flash (Q8_0) | joint span head, qwen35 | `TestClefMatchesReference`, `TestClefFeaturesAreLoadBearing` (noul true first, sorted choices, the hidden norm, the lexical projection, the type row, the self-attention, the prior, the cosine, the span mean, erf GELU) and every decision gate | the random fixture: prompts, spans and logits within 1.7e-6 of Clef's own code (f32); the release not run against the reference (9B in torch does not fit the laptop) | the release: worst probability 0.0095 and 0.0079 (f32 kv), 0.017 and 0.010 (f16 kv) on the two requests, prompts token for token (627 and 535); the fixture 2e-5 |
+| Clef-Flash (Q8_0) | joint span head, qwen35 | `TestClefMatchesReference`, `TestClefFeaturesAreLoadBearing` (noul true first, sorted choices, the hidden norm, the lexical projection, the type row, the self-attention, the prior, the cosine, the span mean, erf GELU) and every decision gate | the random fixture: prompts, spans and logits within 1.7e-6 of Clef's own code (f32); the release (`clefgold.py real`, f32 from the BF16 safetensors, run on the V100 server's CPU): prompts and spans token for token, logits within 0.076 and 0.156 on a range of -4.8 to 1.3 -- Q8_0 rounding: llama.cpp on the same file sits 0.017 and 0.038 from the reference in probability | the release: worst probability 0.0095 and 0.0079 (f32 kv), 0.017 and 0.010 (f16 kv) on the two requests, prompts token for token (627 and 535); the fixture 2e-5 |
 | Laya (BF16) | marker head, ModernBERT | `TestLayaMatchesReference`, `TestLayaFeaturesAreLoadBearing` (window, local base, GeGLU's gated half, type row, head count, erf GELU), `TestLayaPagesWithTheSameAnswer`, `TestDecisionMatchesLlamaCpp` | logits within 1e-6 (random fixture, f32) and 0.027 (checkpoint) of Laya's own code | worst probability 0.0039 |
 
 Features the gates could not show load-bearing, kept as the reference has them:
@@ -336,6 +336,26 @@ its sessions go, `jitllm decide` and `jitllm embed` take `-devices`).
   encoder, the set grown to the wider MLP). No kernel is new: each is a
   launch of an existing generated one (the window mask, the LayerNorm, the
   activations, the row copy).
+- **Clef**: its backbone's blocks are placed as lev's are, and its joint
+  head follows the output projection: with the projection on a device the
+  prompt's final residual rows go up whole, with the request's pooling rows
+  (a span's rows weighted 1/len, one row picking the last position), the
+  options' questions, the questions' type rows, the per-question mask and the
+  options' lexical means (the output embedding's rows for their tokens, a
+  gather the host's generated row decoders do, as the prompt's own token
+  embedding is), and one logit per option comes back. The head runs as one
+  submission of `kernels.DH*` launches (a batched matrix product either way
+  round, LayerNorm and RMSNorm rows, a gather-add, L2 rows, a gathered row
+  dot, the scorer's features and the final combination) -- plain f32 kernels,
+  one thread an output, the basic form RULE 8 asks for -- over the head's
+  matrices uploaded once in f32 (`jit/gpu/tier/dechead.go`). The program is
+  compiled and kept per request shape (rows, questions, options; the last
+  eight), so a warm request allocates nothing. Measured on the V100 (cards 6
+  and 7): the device's head against the host's over the same rows 0.0014
+  (CUDA) and 0.0009 (Vulkan) of a probability; every block and the head on
+  the card against the host 0.0197 (CUDA) and 0.0060 (Vulkan); the
+  violation, the device's copy of the head with its joint score gated off,
+  moves the answers 0.60. A seam leaves the head home with the projection.
 - **Declined by name**: a non-causal block whose heads or width differ from
   the set it would join (`tier.nonCausalConflict`), which before ran on the
   first block's kernels unasked. Laya's random fixture is the one case (its
@@ -363,7 +383,8 @@ its sessions go, `jitllm decide` and `jitllm embed` take `-devices`).
 
 ## 11. The five principles on the decision models
 
-Each principle has a gate that runs Laya, d1 and lev (section 10's table):
+Each principle has a gate that runs Laya, d1, lev and Clef (the release and
+its random fixture) (section 10's table):
 JIT and no Go compute through `TestEveryModelRunsGenerated`; relocation
 host to device mid-prompt and between questions (`TestDecisionRelocatesMidPrompt`,
 `TestDecisionRelocatesBetweenDevices`), card to card

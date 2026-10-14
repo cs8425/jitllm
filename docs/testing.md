@@ -245,7 +245,10 @@ variable it needs and did not find.
 | `L4_TOK` | the directory holding Llama 4's `tokenizer.json` | `llama4gold.py`, `llama4visiongold.py` |
 
 The decision models' goldens: `scripts/decisiongold.sh` (llama-server's
-`/v1/systemone` under `JITLLM_LCPP` on `$JITLLM_MODELS/{d1,lev,laya/gguf}`) and
+`/v1/systemone` under `JITLLM_LCPP` on `$JITLLM_MODELS/{d1,lev,laya/gguf,clef}`; a
+llama.cpp with the clef arch for Clef), `scripts/clefgold.py` (Clef's own code:
+`fixture` builds the random fixture into `$JITLLM_MODELS/clef/fixture` with
+llama.cpp's converter under `LCPP_SRC`, `real` runs the release's safetensors) and
 `scripts/layagold.py` (Laya's own code: `real` on the checkpoint, `fixture`
 builds the random fixture into `$JITLLM_MODELS/laya/fixture` with llama.cpp's
 converter); `docs/design/decision-models.md` names the files.

@@ -142,7 +142,12 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 		}
 	}
 	pass()
-	pass()
+	// Then until a pass allocates nothing, a few at most: the host JIT's
+	// prefill tuners may still be cycling after two short prompts (a small
+	// fixture on the Xeon took three), and a tile it settles on is emitted
+	// when it does. The window below is held to zero either way.
+	for i := 0; i < 6 && countAllocs(pass).engine > 0; i++ {
+	}
 	var s0 int
 	if g != nil {
 		s0 = g.Stats().Submits
