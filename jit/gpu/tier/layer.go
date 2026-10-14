@@ -1675,7 +1675,7 @@ type blockScratch struct {
 	// writing the normed rows to sub. nil elsewhere.
 	subQA, subQF backend.Kernel
 	sub          backend.Buf
-	qn, kn        backend.Buf
+	qn, kn       backend.Buf
 	// krot is XD-RoPE's k turned row-major, before its norm (RopeSplit): the
 	// whole head, since XD-RoPE turns every dimension (model.build refuses a
 	// partial one).

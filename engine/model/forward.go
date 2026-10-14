@@ -1108,10 +1108,10 @@ func (s *State) SetDeviceLayers(d nn.Device, max int) error {
 		DS4: ds4PlanOf(c),
 		// Read off the loaded weights, not the architecture name: the
 		// post-norms are optional per-layer roles.
-		PostNorm:    s.m.hasPostNorm(),
-		NoPreNorm:   s.m.hasNoPreNorm(),
+		PostNorm:  s.m.hasPostNorm(),
+		NoPreNorm: s.m.hasNoPreNorm(),
 		// BitNet's inner norms, which the arch carries on every block.
-		SubNorm: c.TokenAct,
+		SubNorm:     c.TokenAct,
 		AttnSoftcap: c.AttnSoftcap,
 		ActWin:      s.jit.ActWindow(),
 		// Zero for a dense model, which is what makes every existing plan
