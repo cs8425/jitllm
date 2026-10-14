@@ -300,7 +300,7 @@ func identify(name string) (role jlm.Role, block int32, index int32, err error) 
 	// with the head block in Index, so they never meet a backbone block.
 	if r, ok := strings.CutPrefix(rest, "dec.blk."); ok {
 		i := strings.IndexByte(r, '.')
-		n, e := strconv.Atoi(r[:max(i, 0)])
+		n, e := strconv.ParseInt(r[:max(i, 0)], 10, 32)
 		if i <= 0 || e != nil || n < 0 {
 			return 0, 0, 0, fmt.Errorf("convert: %q: no head block index", name)
 		}
