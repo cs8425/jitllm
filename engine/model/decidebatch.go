@@ -30,6 +30,9 @@ type DecisionRequest struct {
 	// Videos are the request's videos (Clef's); a request with one runs on
 	// its own too.
 	Videos []VideoFrames
+	// Audio is the request's voice clip, 16 kHz mono samples (d1-omni's);
+	// a request with one runs on its own (DecideAudio).
+	Audio []float32
 }
 
 // decisionBatchRows is the most prompts one batch session runs at once.
@@ -109,7 +112,9 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 		if res.Err = d.Prepare(rq.State, rq.Questions, len(rq.Images)); res.Err != nil {
 			continue
 		}
-		if len(rq.Images) > 0 || len(rq.Videos) > 0 {
+		if len(rq.Audio) > 0 {
+			res.Answers, res.Err = d.DecideAudio(rq.State, rq.Questions, rq.Audio)
+		} else if len(rq.Images) > 0 || len(rq.Videos) > 0 {
 			res.Answers, res.Err = d.DecideMedia(rq.State, rq.Questions, rq.Images, rq.Videos)
 			res.InputTokens = d.InputTokens()
 			continue

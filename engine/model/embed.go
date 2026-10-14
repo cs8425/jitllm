@@ -50,6 +50,10 @@ type Embedder struct {
 	// attnLF is an LFM2 encoder's: its head width, k and v rows of its GQA
 	// key heads.
 	attnLF *nn.AttnSet
+	// aud is the audio tower's scratch (audio.go), and audioTap, where set,
+	// sees its stages' rows -- the gates' bisection hook.
+	aud      audioRun
+	audioTap func(stage string, rows []float32)
 
 	// rg is the pool regions the host's blocks run (encRegions).
 	rg encRegions
@@ -178,6 +182,17 @@ func (e *Embedder) encoderJIT() error {
 	}
 	if m.enc.lf != nil {
 		e.attnLF = e.jit.AttnSetFor(c.HeadDim, c.HeadDim, c.NKVHead*c.HeadDim, cpu.KVF32)
+	}
+	// The audio tower's depthwise subsampling rows, at the frequencies its
+	// mel bins halve to.
+	if a := m.audio; a != nil {
+		f := int(a.cfg.MelBins)
+		f = (f-1)/2 + 1
+		for range 2 {
+			fo := (f-1)/2 + 1
+			e.jit.AddDWConv(cpu.DWShape{K: 3, Stride: 2, WP: f + 2, Chans: int(a.cfg.SubChannels), WOut: fo})
+			f = fo
+		}
 	}
 	return nil
 }
