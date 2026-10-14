@@ -1605,12 +1605,14 @@ func (g *devTier) resetRecRows(sid uint64, rows []int) bool {
 	if !seated || len(rows) == 0 {
 		return true
 	}
-	var ls []*layer
+	ls := g.recLs[:0]
 	for _, l := range g.layers {
 		if l != nil && l.linear && l.recOf(sid) != nil {
 			ls = append(ls, l)
 		}
 	}
+	g.recLs = ls
+	defer clear(g.recLs)
 	for _, row := range rows {
 		if row < 0 || row >= st.rows {
 			continue // a row the batch has not grown to holds nothing yet

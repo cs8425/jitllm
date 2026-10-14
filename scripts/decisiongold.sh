@@ -8,10 +8,12 @@
 #
 # The sources: LiquidAI/d1-3B-GGUF d1-3B-Q8_0.gguf into $JITLLM_MODELS/d1/,
 # ggml-org/lev-GGUF lev-Q8_0.gguf into $JITLLM_MODELS/lev/, ggml-org/Laya-GGUF
-# Laya-BF16.gguf into $JITLLM_MODELS/laya/gguf/, and d1's
-# mmproj-d1-3B-F16.gguf into $JITLLM_MODELS/d1/ for the picture requests
-# (pictures.json, chatpicture.json). llama.cpp b11514 (ggml-org/llama.cpp
-# releases, llama-b11514-bin-ubuntu-x64) or newer.
+# Laya-BF16.gguf into $JITLLM_MODELS/laya/gguf/, ggml-org/Clef-Flash-GGUF
+# Clef-Flash-Q8_0.gguf into $JITLLM_MODELS/clef/ and clefgold.py's fixture into
+# $JITLLM_MODELS/clef/fixture/, and d1's mmproj-d1-3B-F16.gguf into
+# $JITLLM_MODELS/d1/ for the picture requests (pictures.json,
+# chatpicture.json). llama.cpp b11514 (ggml-org/llama.cpp releases,
+# llama-b11514-bin-ubuntu-x64) or newer.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 out=$here/engine/model/testdata/decision
@@ -31,7 +33,7 @@ gold() { # gold <gguf> <name> [<mmproj> <request>...]
 	fi
 	# shellcheck disable=SC2086 # $proj is two words or none
 	"$here/scripts/cap" 12G -- taskset -c 0,2,4,6,8,10 "$JITLLM_LCPP/llama-server" \
-		-m "$JITLLM_MODELS/$gguf" $proj --port "$port" -t 6 -c 8192 >"$out/.srv.log" 2>&1 &
+		-m "$JITLLM_MODELS/$gguf" $proj --port "$port" -t 6 -c 8192 -b 4096 -ub 4096 >"$out/.srv.log" 2>&1 &
 	pid=$!
 	i=0
 	until curl -s "localhost:$port/health" | grep -q ok; do
@@ -53,8 +55,13 @@ gold() { # gold <gguf> <name> [<mmproj> <request>...]
 	wait $pid || true
 	rm -f "$out/.srv.log"
 }
-
-gold d1/d1-3B-Q8_0.gguf d1-3B-Q8_0
-gold d1/d1-3B-Q8_0.gguf d1-3B-Q8_0 d1/mmproj-d1-3B-F16.gguf pictures chatpicture
-gold lev/lev-Q8_0.gguf lev-Q8_0
-gold laya/gguf/Laya-BF16.gguf Laya-BF16
+# Every model, or those named: scripts/decisiongold.sh Clef-Flash-Q8_0
+want() { [ $# -eq 0 ] || [ -z "$only" ] || case " $only " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+only="$*"
+want d1-3B-Q8_0 && gold d1/d1-3B-Q8_0.gguf d1-3B-Q8_0
+want d1-3B-Q8_0 && gold d1/d1-3B-Q8_0.gguf d1-3B-Q8_0 d1/mmproj-d1-3B-F16.gguf pictures chatpicture
+want lev-Q8_0 && gold lev/lev-Q8_0.gguf lev-Q8_0
+want Laya-BF16 && gold laya/gguf/Laya-BF16.gguf Laya-BF16
+want Clef-Flash-Q8_0 && gold clef/Clef-Flash-Q8_0.gguf Clef-Flash-Q8_0
+want clef-fixture && gold clef/fixture/clef-fixture.gguf clef-fixture
+true
