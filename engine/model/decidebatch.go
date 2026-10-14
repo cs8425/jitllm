@@ -133,6 +133,8 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 				var err error
 				if d.kind == jlm.DecisionLaya {
 					j.ids, j.markers, err = d.layaSequence(rq.State, q)
+				} else if d.kind == jlm.DecisionD1Omni {
+					j.ids, j.markers, err = d.d1OmniSequence(rq.State, q, d.d1OmniMaxLen())
 				} else {
 					j.ids, j.groups, err = d.prompt(rq.State, q, v)
 				}
@@ -217,6 +219,16 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 	}
 	if d.kind == jlm.DecisionLaya {
 		return d.layaPacked(jobs)
+	}
+	if d.kind == jlm.DecisionD1Omni {
+		for _, j := range jobs {
+			s, err := d.d1OmniForward(j.ids, j.qt, j.markers, 0)
+			if err != nil {
+				return err
+			}
+			j.scores = append(j.scores[:0], s...)
+		}
+		return nil
 	}
 	if len(jobs) == 0 {
 		return nil
