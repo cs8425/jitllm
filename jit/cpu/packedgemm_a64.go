@@ -195,6 +195,8 @@ func EmitA64PackedMatMulStationary(t quant.Type, k, nrows, win int) ([]byte, err
 			case narrow:
 				a.LDRd(t0, X8, int32(h*8))
 				a.FCVTL(t0, t0)
+			case f.d32:
+				a.LDRq(t0, X8, int32(h*16)) // TQ2_F32: four rows' f32 scales
 			default:
 				a.LDRq(t1, X8, int32(h*16))
 				if biasArray {

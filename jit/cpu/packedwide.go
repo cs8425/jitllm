@@ -248,8 +248,12 @@ func EmitPackedMatVecWide(t quant.Type, dk DotKind) ([]byte, error) {
 			rowLoop(func() {
 				for g := 0; g < grp; g++ {
 					off := int32(g * vec)
-					a.VMOVDQULoad(wa, Idx(R8, R15, 1, off)) // the d word
-					f16x8(wb, wa, shuf)                     // d
+					if kernels.D32(q) {
+						a.VMOVDQULoad(wb, Idx(R8, R15, 1, off)) // the d word is the scale
+					} else {
+						a.VMOVDQULoad(wa, Idx(R8, R15, 1, off)) // the d word
+						f16x8(wb, wa, shuf)                     // d
+					}
 					// Container v27's SC stream (scstream.go): a straddling
 					// field's next word is a plane stride on, reached by
 					// stepping the cursor there and back.

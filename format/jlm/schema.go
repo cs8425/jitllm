@@ -78,7 +78,13 @@ const (
 	// int8 activations (kernels.TQ2).
 	TypeTQ2 Type = 14
 
-	typeMax = TypeTQ2
+	// TypeTQ2F is TypeTQ2 with its scale an f32: one word a row a sub-block
+	// in the d plane, the scale's bits (quant.TQ2_F32, kernels.TQ2F). A
+	// ternary weight whose scale no f16 holds is carried here rather than
+	// rounded.
+	TypeTQ2F Type = 15
+
+	typeMax = TypeTQ2F
 )
 
 // Valid reports whether t is a code this format defines. A file carrying
@@ -115,6 +121,8 @@ func (t Type) String() string {
 		return "iq4nl"
 	case TypeTQ2:
 		return "tq2"
+	case TypeTQ2F:
+		return "tq2f"
 	}
 	return "type(" + itoa(uint64(t)) + ")"
 }
@@ -135,6 +143,8 @@ type TypeLayout struct {
 	// Codes, when set, is what a primary code means: the weight is
 	// scale*(Codes[q] - Bias) rather than scale*(q - Bias).
 	Codes *[16]uint8
+	// D32: the d word is the scale as an f32, one row a word (TypeTQ2F).
+	D32 bool
 }
 
 // Layout returns the on-disk description of a packed type, and ok=false for a
@@ -165,6 +175,8 @@ func Layout(t Type) (TypeLayout, bool) {
 		return TypeLayout{Sub: 32, Planes: [2]int{4, 1}, SuperSub: 1, HasMin: true}, true
 	case TypeTQ2:
 		return TypeLayout{Sub: 32, Planes: [2]int{4, 0}, SuperSub: 1, Bias: 1}, true
+	case TypeTQ2F:
+		return TypeLayout{Sub: 32, Planes: [2]int{4, 0}, SuperSub: 1, Bias: 1, D32: true}, true
 	}
 	return TypeLayout{}, false
 }
@@ -590,6 +602,8 @@ func SourceType(t Type) (quant.Type, bool) {
 		return quant.IQ4_NL, true
 	case TypeTQ2:
 		return quant.TQ2_0, true
+	case TypeTQ2F:
+		return quant.TQ2_F32, true
 	}
 	return 0, false
 }
@@ -625,6 +639,8 @@ func TypeOf(t quant.Type) (Type, bool) {
 		return TypeIQ4NL, true
 	case quant.TQ2_0:
 		return TypeTQ2, true
+	case quant.TQ2_F32:
+		return TypeTQ2F, true
 	}
 	return 0, false
 }

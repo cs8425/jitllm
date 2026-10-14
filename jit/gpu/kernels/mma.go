@@ -423,6 +423,9 @@ func MatVecMMA(s MatVecShape) (*ir.Kernel, error) {
 		if qi.biasArray {
 			return b.CvtF16H(dw), b.CvtF16H(b.Shr(ir.U32, dw, b.Const(ir.U32, 16)))
 		}
+		if qi.d32 {
+			return b.Bitcast(ir.F32, dw), 0 // TQ2F: the word is the scale
+		}
 		return b.CvtF16H(dw), 0
 	}
 	// sumAt is the per-16 activation sum for the output column this lane owns in

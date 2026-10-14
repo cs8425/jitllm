@@ -71,6 +71,8 @@ func EmitPackedRow(q kernels.Quant) ([]byte, error) {
 			// eight bytes would run off the end on a tensor's last row.
 			a.VPINSRBLoad(Y6, Y6, At(R9, 0), 0)
 			a.VPSLLD(Y6, Y6, 23)
+		} else if kernels.D32(q) {
+			a.VMOVSSLoad(Y6, At(R9, 0)) // TQ2_F32: the word is the scale
 		} else {
 			a.VPINSRWLoad(Y6, Y6, At(R9, 0), 0)
 			a.VCVTPH2PSReg(Y6, Y6)

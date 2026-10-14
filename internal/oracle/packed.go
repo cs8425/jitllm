@@ -72,6 +72,9 @@ func dScale(t kernels.Quant, d []byte, super, nrows, r int) (scale, dmin float32
 	case 2:
 		return half(uint16(dw >> (16 * uint(slot)))), 0
 	}
+	if kernels.D32(t) {
+		return math.Float32frombits(dw), 0
+	}
 	return half(uint16(dw)), half(uint16(dw >> 16))
 }
 

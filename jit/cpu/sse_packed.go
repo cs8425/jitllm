@@ -65,6 +65,8 @@ type ssePackedFormat struct {
 	perWord, stride int
 	// stream: container v27's SC stream (kernels.ScStream, scstream.go).
 	stream bool
+	// d32: the d word is the scale as an f32 (TQ2_F32, kernels.D32).
+	d32 bool
 }
 
 func newSSEPackedFormat(t quant.Type, who string) (ssePackedFormat, error) {
@@ -81,7 +83,8 @@ func newSSEPackedFormat(t quant.Type, who string) (ssePackedFormat, error) {
 	if err != nil {
 		return ssePackedFormat{}, err
 	}
-	f := ssePackedFormat{t: t, codes: codes, narrow: NarrowD(t), e8m0: E8M0D(t), stream: kernels.ScStream(q)}
+	f := ssePackedFormat{t: t, codes: codes, narrow: NarrowD(t), e8m0: E8M0D(t), stream: kernels.ScStream(q),
+		d32: kernels.D32(q)}
 	f.sub, f.bits, f.biasK, f.biasArray = kernels.Layout(q)
 	f.perSuper, f.scOff = kernels.ScaleLayout(q)
 	f.signed = kernels.SignedPayload(q)
@@ -260,6 +263,12 @@ func halfPlane(a *Buf, f ssePackedFormat, src, dOut, mOut Mem, pay, x, tmp, t0, 
 		a.PMOVZXBDLoad(pay, src)
 		a.PSLLD(tmp, pay, 23)
 		a.MOVUPSStore(dOut, tmp)
+		return
+	}
+	if f.d32 {
+		// TQ2_F32: the word is the scale, and nothing converts.
+		a.MOVDQULoad(pay, src)
+		a.MOVUPSStore(dOut, pay)
 		return
 	}
 	if f.narrow {

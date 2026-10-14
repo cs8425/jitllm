@@ -185,6 +185,7 @@ func TestPackedPayloadIsNativeWidth(t *testing.T) {
 		quant.Q6_K:  6,
 		quant.MXFP4: 4,
 		quant.TQ2_0: 4, // 2 bits would need a 2-bit primary plane, as Q3_K's 3 would
+		quant.TQ2_F32: 4,
 	}
 	for _, f := range packedRefFormats {
 		bits, ok := native[f.g]

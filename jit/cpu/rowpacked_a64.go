@@ -60,6 +60,8 @@ func EmitPackedRow(q kernels.Quant) ([]byte, error) {
 			a.UXTL8h(6, 6)
 			a.UXTL4s(6, 6)
 			a.SHL4s(6, 6, 23)
+		} else if kernels.D32(q) {
+			a.LDRs(6, X9, 0) // TQ2_F32: the word is the scale
 		} else {
 			a.LDRh(6, X9, 0)
 			a.FCVTL(6, 6)

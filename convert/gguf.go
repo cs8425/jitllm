@@ -304,11 +304,11 @@ func sourceOf(f *meta.File) (*jlm.Source, error) {
 		data := f.Bytes(t)
 		srcType := t.Type
 		// A ternary type with no code here (TQ1_0, I2_S) is re-packed as
-		// TQ2_0, exactly or not at all (convert/bitnet.go).
-		if b, ok, terr := ternaryGGUF(t.Type, data, elemsOf(t.Dims)); terr != nil {
+		// TQ2_0 or TQ2_F32, exactly (convert/bitnet.go).
+		if b, ty, ok, terr := ternaryGGUF(t.Type, data, elemsOf(t.Dims)); terr != nil {
 			return nil, fmt.Errorf("convert: %s (%s): %w", t.Name, t.Type, terr)
 		} else if ok {
-			data, srcType = b, quant.TQ2_0
+			data, srcType = b, ty
 		}
 		ty, err := typeOf(srcType)
 		if err != nil {

@@ -205,6 +205,20 @@ func dequant[T destination](t Type, src []byte, dst []T) error {
 			}
 		}
 
+	case TQ2_F32:
+		// TQ2_0's codes with an f32 d after them: 256 elements in 68 bytes.
+		for b := uint64(0); b < blocks; b++ {
+			blk := src[b*68:]
+			d := float64(math.Float32frombits(binary.LittleEndian.Uint32(blk[64:])))
+			out := dst[b*256:]
+			for j := 0; j < 64; j++ {
+				base := 128*(j/32) + j%32
+				for l := 0; l < 4; l++ {
+					out[base+32*l] = T(float64(int(blk[j]>>(2*l)&3)-1) * d)
+				}
+			}
+		}
+
 	case TQ1_0:
 		// block_tq1_0 { uint8_t qs[48]; uint8_t qh[4]; ggml_half d; } -- 256
 		// elements in 54 bytes, five base-3 digits a byte (four in qh), each
@@ -262,7 +276,7 @@ var tq1Pow3 = [5]byte{1, 3, 9, 27, 81}
 // Dequantable reports whether Dequant handles type t.
 func Dequantable(t Type) bool {
 	switch t {
-	case F32, F16, BF16, Q4_0, Q5_0, Q5_1, Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, MXFP4, IQ4_NL, TQ1_0, TQ2_0:
+	case F32, F16, BF16, Q4_0, Q5_0, Q5_1, Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, MXFP4, IQ4_NL, TQ1_0, TQ2_0, TQ2_F32:
 		return true
 	}
 	return false

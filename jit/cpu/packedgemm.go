@@ -243,6 +243,8 @@ func EmitPackedMatMulStationary(t quant.Type, k, nrows, win int, dk DotKind) ([]
 			a.VPSLLD(tmp, tmp, 23)
 		case narrow:
 			a.VCVTPH2PS(tmp, Idx(R8, R9, 1, 0))
+		case f.d32:
+			a.VMOVDQULoad(tmp, Idx(R8, R15, 1, 0))
 		default:
 			a.VMOVDQULoad(pay, Idx(R8, R15, 1, 0))
 			a.VPSHUFB(tmp, pay, shufLo)

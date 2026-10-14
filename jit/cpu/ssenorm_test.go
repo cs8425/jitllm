@@ -395,7 +395,7 @@ func TestPackedRowSSEIsTheAVX2KernelBitForBit(t *testing.T) {
 				subnormal++
 			}
 		}
-		if subnormal == 0 {
+		if subnormal == 0 && !kernels.D32(q) { // an f32 scale has no f16 to be subnormal
 			t.Fatalf("%s: no subnormal f16 scale in the d plane -- the path this gate exists for was not exercised", gt)
 		}
 		konst := PackedRowConsts(q)

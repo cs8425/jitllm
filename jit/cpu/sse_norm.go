@@ -479,6 +479,8 @@ func EmitPackedRowSSE(q kernels.Quant) ([]byte, error) {
 			a.PXOR(XMM4, XMM4, XMM4)
 			a.PINSRBLoad(XMM4, XMM4, At(R9, 0), 0)
 			a.PSLLD(XMM6, XMM4, 23)
+		} else if kernels.D32(q) {
+			a.MOVSSLoad(XMM6, At(R9, 0)) // TQ2_F32: the word is the scale
 		} else {
 			a.PINSRWLoad(XMM4, XMM4, At(R9, 0), 0)
 			halfToFloatSSE(&a, XMM6, XMM4, XMM2, XMM3, XMM12)

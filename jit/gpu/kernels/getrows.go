@@ -76,9 +76,12 @@ func GetRowsPacked(q Quant, nrows, k, ntok int, scale float32) (*ir.Kernel, erro
 		dw = b.Load(ir.U32, pD, b.Add(ir.U32, b.Mul(ir.U32, super, c(int64(nrows))), r), 0)
 	}
 	var d ir.Value
-	if qi.e8m0 {
+	switch {
+	case qi.e8m0:
 		d = b.Bitcast(ir.F32, b.Shl(ir.U32, b.And(ir.U32, dw, c(0xFF)), c(23)))
-	} else {
+	case qi.d32:
+		d = b.Bitcast(ir.F32, dw) // TQ2F: the word is the scale
+	default:
 		d = b.CvtF16H(dw)
 	}
 	sc := d

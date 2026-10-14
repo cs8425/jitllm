@@ -32,6 +32,7 @@ type packedFormat struct {
 	stream    bool // container v27's SC stream (scstream.go)
 	narrow    bool // the d plane is narrower than a word a row (dplane.go)
 	e8        bool // the d plane is an E8M0 byte
+	d32       bool // the d word is the scale as an f32 (TQ2_F32)
 }
 
 // packedFormatOf decomposes t. who names the emitter in a refusal.
@@ -63,6 +64,7 @@ func packedFormatK(q kernels.Quant, t quant.Type) (packedFormat, error) {
 	f.stream = kernels.ScStream(q)
 	f.narrow = NarrowD(t)
 	f.e8 = E8M0D(t)
+	f.d32 = kernels.D32(q)
 	return f, nil
 }
 

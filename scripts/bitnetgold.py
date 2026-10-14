@@ -12,7 +12,7 @@
    $JITLLM_MODELS/synth-bitnet-{f16,i2s}.gguf
                                    bitnet.cpp's convert-hf-to-gguf-bitnet.py over
                                    the online checkpoint ("bitnet-b1.58")
-   testdata/golden/bitnet/synth-bitnet{,-online}.json
+   testdata/golden/bitnet/synth-bitnet{,-online,-online-f16,-online-i2s}.json
 
 THE ORACLE IS transformers' OWN BitNetForCausalLM, RUN THROUGH ITS OWN "bitnet"
 QUANTIZER (integrations/bitnet.py): every projection's input quantized to int8
@@ -30,9 +30,12 @@ are bf16 values, so the container holds them exactly.
 The online form's GGUFs are what bitnet.cpp's converter writes: its own
 ternarization (the same ops as WeightQuant, in f32), stored as F16 or as I2_S.
 llama.cpp's converter cannot write this class (it maps only 1bitLLM's names
-for the two inner norms). F16 makes each magnitude an f16, so that container
-is held to the online golden at a bound that absorbs that one rounding; the
-release form is held to its own golden at the activations' rounding alone.
+for the two inner norms). I2_S carries each magnitude as the f32 the class
+computes and writes the embedding as F16, so that container is held to the
+class run on an f16-rounded embedding (-online-i2s); F16 rounds each
+magnitude to an f16 too, so that one is held to the class run on those
+rounded magnitudes (-online-f16). Every container holds its file's weights exactly, so every
+golden is met at the activations' rounding alone.
 """
 import json
 import os
@@ -94,13 +97,38 @@ def copy_tok(d):
         shutil.copy(os.path.join(TOKDIR, "bitnet", f), d)
 
 
-def golden(name, d, ids, cfg):
+def half_magnitudes():
+    # WeightQuant with each ternarized weight stored as an f16: what
+    # bitnet.cpp's converter writes at --outtype f16, so its GGUF is held to
+    # the class run on the file's own weights.
+    from transformers.integrations import bitnet as B
+
+    def fwd(ctx, weight):
+        dtype = weight.dtype
+        weight = weight.float()
+        scale = 1.0 / weight.abs().mean().clamp_(min=1e-5)
+        w = (weight * scale).round().clamp(-1, 1) / scale
+        return w.half().float().to(dtype)
+
+    was = B.WeightQuant.forward
+    B.WeightQuant.forward = staticmethod(fwd)
+    return lambda: setattr(B.WeightQuant, "forward", was)
+
+
+def golden(name, d, ids, cfg, f16=False, embf16=False):
     from transformers import AutoModelForCausalLM
+    undo = half_magnitudes() if f16 else (lambda: None)
     m = AutoModelForCausalLM.from_pretrained(d, dtype=torch.float32)
+    if embf16:
+        # bitnet.cpp's I2_S writes the embedding (and so the tied head) as F16.
+        with torch.no_grad():
+            e = m.model.embed_tokens.weight
+            e.copy_(e.half().float())
     m.config._attn_implementation = "eager"
     m.eval()
     with torch.no_grad():
         lg = m(torch.tensor([ids])).logits[0]
+    undo()
     rows = [{"argmax": int(r.argmax()), "max": float(r.max()),
              "head": [round(float(x), 7) for x in r[:NLOGIT]]} for r in lg]
     tk = Tokenizer.from_file(os.path.join(d, "tokenizer.json"))
@@ -140,6 +168,8 @@ def build():
     save_file(sd, os.path.join(on, "model.safetensors"), metadata={"format": "pt"})
     copy_tok(on)
     golden("synth-bitnet-online", on, ids, cfg)
+    golden("synth-bitnet-online-f16", on, ids, cfg, f16=True)
+    golden("synth-bitnet-online-i2s", on, ids, cfg, embf16=True)
 
     # The release's form: the same codes, packed, and a bf16 multiplier per
     # projection that is not the latent magnitude, so the scale is the

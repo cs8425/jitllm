@@ -42,11 +42,14 @@ const (
 	// int8 is the ordinary unsigned 4-bit dot with the activation sum
 	// subtracted. Its activations are always int8 (see qinfo.intAct).
 	TQ2
+	// TQ2F is TQ2 with its scale an f32 (quant.TQ2_F32): the d word is the
+	// scale's bits, one row a word (DSlots 1). See qinfo.d32.
+	TQ2F
 )
 
 func (q Quant) String() string {
 	return [...]string{"Q4_0", "Q8_0", "Q4_K", "Q3_K", "Q5_K", "Q6_K", "Q5_0", "MXFP4",
-		"F32", "F16", "BF16", "Q5_1", "TQ2"}[q]
+		"F32", "F16", "BF16", "Q5_1", "TQ2", "TQ2F"}[q]
 }
 
 // FloatOf maps an unquantized weight type to its device format.
@@ -118,6 +121,10 @@ type qinfo struct {
 	// (the Volta tile, GemmVolta) computes a different function, not a
 	// rounding of the same one. Such kernels decline the format by name.
 	intAct bool
+	// d32 says the d word is the scale as an f32, whole -- a precision of
+	// the scale, as perSuper is its grouping. A reader takes the word's bits
+	// where every other format converts an f16 half.
+	d32 bool
 }
 
 // Scales are stored unfolded: one f16 d per super-block plus one integer byte
@@ -149,6 +156,8 @@ var qtab = [...]qinfo{
 	// format's own unused code, read as 2), and the source block's one d
 	// written on each of its eight sub-blocks.
 	TQ2: {bits: 4, sub: 32, biasK: 1, blockB: 66, blockE: 256, perSuper: 1, intAct: true},
+	// TQ2F is TQ2 with an f32 scale, a row to each d word.
+	TQ2F: {bits: 4, sub: 32, biasK: 1, blockB: 68, blockE: 256, perSuper: 1, intAct: true, d32: true},
 	// A "block" of a float format is one 32-element activation block.
 	Float32:  {sub: 32, blockB: 128, blockE: 32, perSuper: 1, float: 4},
 	Float16:  {sub: 32, blockB: 64, blockE: 32, perSuper: 1, float: 2},
@@ -212,6 +221,10 @@ func Layout(q Quant) (sub, bits int, biasK float32, biasArray bool) {
 	i := q.info()
 	return i.sub, i.bits, i.biasK, i.biasArray
 }
+
+// D32 reports whether q's d word is the scale as an f32 (TQ2F): a reader
+// takes its bits rather than converting an f16 half.
+func D32(q Quant) bool { return q.info().d32 }
 
 // MinInD reports a format whose minimum is the d word's high half alone, with
 // no per-sub-block integer to multiply it by: Q5_1. Its bias is dmin itself,
@@ -1025,10 +1038,13 @@ func matVec(s MatVecShape, into *segCtx) (*ir.Kernel, error) {
 		} else {
 			dw = b.Load(ir.U32, pD, b.Add(ir.U32, wrowD, b.Mul(ir.U32, super, bankRows)), tileOff(j))
 		}
-		if qi.e8m0 {
+		switch {
+		case qi.e8m0:
 			d = b.Bitcast(ir.F32, b.Shl(ir.U32,
 				b.And(ir.U32, dw, b.Const(ir.U32, 0xFF)), b.Const(ir.U32, 23)))
-		} else {
+		case qi.d32:
+			d = b.Bitcast(ir.F32, dw) // TQ2F: the word is the scale
+		default:
 			d = b.CvtF16H(dw)
 		}
 		var dmin ir.Value

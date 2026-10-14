@@ -26,8 +26,8 @@ import (
 //	bitlinear                the uint8 codes with a weight_scale the output is
 //	                         DIVIDED by
 //
-// Each becomes TypeTQ2 (convert/bitnet.go), with the weight's magnitude as
-// every block's d where that is an f16 exactly, and refused where it is not.
+// Each becomes TypeTQ2 or TypeTQ2F (convert/bitnet.go), the weight's
+// magnitude every block's scale at the precision it has.
 var bitnetHF = &hfArch{
 	arch:        jlm.ArchBitNet,
 	blockPrefix: llamaHF.blockPrefix,
@@ -153,7 +153,12 @@ func bitnetGather(c *jlm.Config, names []string, _ func(string) ([]float32, erro
 }
 
 // bitnetRetype gives a projection its ternary type before anything is laid
-// out, and the read that produces its TQ2_0 bytes.
+// out, and the read that produces its blocks. The scale's precision follows
+// from the dtypes alone, since the type is fixed before the data is read: a
+// bf16 or f16 scale (the release's weight_scale, a bf16 or f16 latent
+// checkpoint's magnitude) is an f16 exactly (TypeTQ2), and an f32 one, or one
+// that is a reciprocal (bitlinear divides by its weight_scale), is carried
+// as an f32 (TypeTQ2F).
 func bitnetRetype(hc *hfConfig, role jlm.Role, name string, t *safetensors.Tensor,
 	read func(name string) ([]byte, *safetensors.Tensor, error)) (*hfRetyped, error) {
 	if !bitnetProjections[role] {
@@ -166,58 +171,77 @@ func bitnetRetype(hc *hfConfig, role jlm.Role, name string, t *safetensors.Tenso
 	if len(t.Shape) != 2 {
 		return nil, fmt.Errorf("convert: %s has %d dimensions", name, len(t.Shape))
 	}
-	switch form {
-	case bitnetLatent:
-		if t.DType != safetensors.BF16 {
-			return nil, fmt.Errorf("convert: %s is %s; BitNet's latent weights are ternarized as the "+
-				"class runs them, in bf16: %w", name, t.DType, ErrNotImplemented)
+	typed := func(q quant.Type, shape []uint64, f func() ([]byte, quant.Type, error)) (*hfRetyped, error) {
+		ty, err := typeOf(q)
+		if err != nil {
+			return nil, err
 		}
-		out, in := t.Shape[0], t.Shape[1]
-		return &hfRetyped{ty: jlm.TypeTQ2, shape: []uint64{out, in}, read: func() ([]byte, error) {
-			b, _, err := read(name)
-			if err != nil {
-				return nil, err
-			}
-			tq, err := bitnetTernarizeBF16(b)
+		return &hfRetyped{ty: ty, shape: shape, read: func() ([]byte, error) {
+			b, got, err := f()
 			if err != nil {
 				return nil, fmt.Errorf("convert: %s: %w", name, err)
 			}
-			return tq, nil
-		}}, nil
-	default:
-		if t.DType != safetensors.U8 {
-			return nil, fmt.Errorf("convert: %s is %s, and this checkpoint's projections are "+
-				"packed codes (U8)", name, t.DType)
-		}
-		out, in := 4*t.Shape[0], t.Shape[1]
-		return &hfRetyped{ty: jlm.TypeTQ2, shape: []uint64{out, in}, read: func() ([]byte, error) {
-			b, _, err := read(name)
-			if err != nil {
-				return nil, err
+			if got != q {
+				return nil, fmt.Errorf("convert: %s: laid out as %s and packed as %s", name, q, got)
 			}
-			sb, st, err := read(name + "_scale")
-			if err != nil {
-				return nil, err
-			}
-			ws, err := bitnetScalar(st, sb)
-			if err != nil {
-				return nil, fmt.Errorf("convert: %s_scale: %w", name, err)
-			}
-			s := ws
-			if form == bitnetPackedDiv {
-				s = 1 / ws
-			}
-			d, ok := exactHalf(s)
-			if !ok {
-				return nil, fmt.Errorf("convert: %s: its magnitude %v is not an f16: %w", name, s, ErrNotImplemented)
-			}
-			tq, err := bitnetUnpack(b, int(out), int(in), d)
-			if err != nil {
-				return nil, fmt.Errorf("convert: %s: %w", name, err)
-			}
-			return tq, nil
+			return b, nil
 		}}, nil
 	}
+	if form == bitnetLatent {
+		round, q := latentRounding(t.DType)
+		if round == nil {
+			return nil, fmt.Errorf("convert: %s is %s, and BitNet's latent weights are ternarized in "+
+				"their own dtype (F32, BF16 or F16): %w", name, t.DType, ErrNotImplemented)
+		}
+		return typed(q, []uint64{t.Shape[0], t.Shape[1]}, func() ([]byte, quant.Type, error) {
+			b, _, err := read(name)
+			if err != nil {
+				return nil, 0, err
+			}
+			return bitnetTernarize(b, t.DType, round, q)
+		})
+	}
+	if t.DType != safetensors.U8 {
+		return nil, fmt.Errorf("convert: %s is %s, and this checkpoint's projections are "+
+			"packed codes (U8)", name, t.DType)
+	}
+	st, err := scaleTensor(read, name+"_scale")
+	if err != nil {
+		return nil, err
+	}
+	q := quant.TQ2_F32
+	if form == bitnetPackedMul && (st.DType == safetensors.BF16 || st.DType == safetensors.F16) {
+		q = quant.TQ2_0
+	}
+	out, in := 4*t.Shape[0], t.Shape[1]
+	return typed(q, []uint64{out, in}, func() ([]byte, quant.Type, error) {
+		b, _, err := read(name)
+		if err != nil {
+			return nil, 0, err
+		}
+		sb, st, err := read(name + "_scale")
+		if err != nil {
+			return nil, 0, err
+		}
+		ws, err := bitnetScalar(st, sb)
+		if err != nil {
+			return nil, 0, fmt.Errorf("%s_scale: %w", name, err)
+		}
+		s := ws
+		if form == bitnetPackedDiv {
+			s = 1 / ws
+		}
+		return bitnetUnpack(b, int(out), int(in), q, s)
+	})
+}
+
+// scaleTensor is the header of name, a weight_scale.
+func scaleTensor(read func(string) ([]byte, *safetensors.Tensor, error), name string) (*safetensors.Tensor, error) {
+	_, st, err := read(name)
+	if err != nil {
+		return nil, fmt.Errorf("convert: %s: %w", name, err)
+	}
+	return st, nil
 }
 
 // bitnetScalar reads a one-element float tensor.
@@ -240,74 +264,78 @@ func bitnetScalar(t *safetensors.Tensor, b []byte) (float32, error) {
 	return 0, fmt.Errorf("dtype %s", t.DType)
 }
 
-// bitnetUnpack turns transformers' packed codes into TQ2_0 blocks: a [out/4,
-// in] uint8 tensor whose byte (r, i) holds row j*out/4 + r's code for column
-// i in bits 2j (pack_weights / unpack_weights), the code being the weight
-// plus one.
-func bitnetUnpack(b []byte, out, in int, d uint16) ([]byte, error) {
+// bitnetUnpack turns transformers' packed codes into ternary blocks of type
+// q: a [out/4, in] uint8 tensor whose byte (r, i) holds row j*out/4 + r's
+// code for column i in bits 2j (pack_weights / unpack_weights), the code
+// being the weight plus one, every block at scale s.
+func bitnetUnpack(b []byte, out, in int, q quant.Type, s float32) ([]byte, quant.Type, error) {
 	rows4 := out / 4
 	if out%4 != 0 || len(b) != rows4*in || in%256 != 0 {
-		return nil, fmt.Errorf("%d bytes for a [%d, %d] ternary weight", len(b), out, in)
+		return nil, 0, fmt.Errorf("%d bytes for a [%d, %d] ternary weight", len(b), out, in)
 	}
-	dst := make([]byte, out*in/256*66)
-	var bad error
-	for o := 0; o < out; o++ {
-		src := b[(o%rows4)*in : (o%rows4)*in+in]
-		sh := uint(2 * (o / rows4))
-		for blk := 0; blk < in/256; blk++ {
-			tq2Put(dst[(o*in/256+blk)*66:], func(e int) uint8 {
-				c := src[blk*256+e] >> sh & 3
-				if c == 3 && bad == nil {
-					bad = fmt.Errorf("row %d column %d holds code 3, which is no ternary weight", o, blk*256+e)
-				}
-				return c
-			}, d)
-		}
-	}
-	return dst, bad
+	return ternaryPackAs(q, out*in, func(e int) uint8 {
+		o, i := e/in, e%in
+		return b[(o%rows4)*in+i] >> uint(2*(o/rows4)) & 3
+	}, func(int) float32 { return s })
 }
 
-// bitnetTernarizeBF16 is WeightQuant over a bf16 [out, in] weight, step by
-// step as torch runs it on bf16 tensors (each op computed in f32 and rounded
-// to bf16, round to nearest even):
-//
-//	m = bf16(sum|w| / n)          the mean, accumulated wide
-//	s = bf16(1 / m)               after clamp(min=1e-5)
-//	q = clamp(rne(bf16(w*s)), -1, 1)
-//	weight = bf16(q / s)          so the magnitude is bf16(1/s)
-//
-// The magnitude is the blocks' d, which a bf16 in f16's normal range is
-// exactly.
-func bitnetTernarizeBF16(b []byte) ([]byte, error) {
-	n := len(b) / 2
-	if n%256 != 0 {
-		return nil, fmt.Errorf("%d values is not whole 256-blocks", n)
+// latentRounding is the rounding torch applies after each op on a tensor of
+// dtype d (every op computed in f32, the result stored in d, to nearest
+// even), and the type the magnitude is carried in: an f32 needs TQ2_F32, a
+// bf16 or f16 is an f16 exactly.
+func latentRounding(d safetensors.DType) (func(float32) float32, quant.Type) {
+	switch d {
+	case safetensors.F32:
+		return func(x float32) float32 { return x }, quant.TQ2_F32
+	case safetensors.BF16:
+		return bf16Round, quant.TQ2_0
+	case safetensors.F16:
+		return func(x float32) float32 { return float32(quant.DecodeHalf(quant.EncodeHalf(x))) }, quant.TQ2_0
 	}
-	w := make([]float32, n)
+	return nil, 0
+}
+
+// bitnetTernarize is WeightQuant over an [out, in] latent weight of dtype d,
+// step by step as torch runs it on a tensor of that dtype, round being the
+// dtype's rounding:
+//
+//	m = round(sum|w| / n)         the mean, accumulated wide
+//	s = round(1 / m)              after clamp(min=1e-5)
+//	q = clamp(rne(round(w*s)), -1, 1)
+//	weight = round(q / s)         so the magnitude is round(1/s)
+func bitnetTernarize(b []byte, d safetensors.DType, round func(float32) float32, q quant.Type) ([]byte, quant.Type, error) {
+	var w []float32
+	switch d {
+	case safetensors.F32:
+		w = make([]float32, len(b)/4)
+		for i := range w {
+			w[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[4*i:]))
+		}
+	default:
+		w = make([]float32, len(b)/2)
+		for i := range w {
+			h := binary.LittleEndian.Uint16(b[2*i:])
+			if d == safetensors.BF16 {
+				w[i] = math.Float32frombits(uint32(h) << 16)
+			} else {
+				w[i] = float32(quant.DecodeHalf(h))
+			}
+		}
+	}
 	sum := 0.0
-	for i := range w {
-		w[i] = math.Float32frombits(uint32(binary.LittleEndian.Uint16(b[2*i:])) << 16)
-		sum += math.Abs(float64(w[i]))
+	for _, x := range w {
+		sum += math.Abs(float64(x))
 	}
-	m := bf16Round(float32(sum / float64(n)))
-	if m < bf16Round(1e-5) {
-		m = bf16Round(1e-5)
+	m := round(float32(sum / float64(len(w))))
+	if lo := round(1e-5); m < lo {
+		m = lo
 	}
-	s := bf16Round(1 / m)
-	mag := bf16Round(1 / s)
-	d, ok := exactHalf(mag)
-	if !ok {
-		return nil, fmt.Errorf("its magnitude %v is not an f16", mag)
-	}
-	out := make([]byte, n/256*66)
-	for blk := 0; blk < n/256; blk++ {
-		v := w[blk*256 : blk*256+256]
-		tq2Put(out[blk*66:], func(e int) uint8 {
-			q := math.RoundToEven(float64(bf16Round(v[e] * s)))
-			return uint8(max(-1, min(1, q)) + 1)
-		}, d)
-	}
-	return out, nil
+	s := round(1 / m)
+	mag := round(1 / s)
+	return ternaryPackAs(q, len(w), func(e int) uint8 {
+		v := math.RoundToEven(float64(round(w[e] * s)))
+		return uint8(max(-1, min(1, v)) + 1)
+	}, func(int) float32 { return mag })
 }
 
 // bf16Round is x rounded to the nearest bfloat16, ties to even, as torch's

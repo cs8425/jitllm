@@ -19,41 +19,51 @@ import (
 
 // The BitNet b1.58 fixtures (scripts/bitnetgold.py): transformers' own
 // BitNetForCausalLM run through its "bitnet" quantizer, so every projection's
-// input is int8 per token and every weight ternary, on both sides.
+// input is int8 per token and every weight ternary, on both sides. Every
+// container holds its file's weights exactly -- the scale at the precision
+// the file has it (TQ2_0's f16, TQ2_F32's f32) -- so the two arms part only
+// where an activation sits on a rounding boundary: the reference divides by
+// its scale and the engine multiplies by the reciprocal, and the two round a
+// half differently.
 //
-//	synth-bitnet-hf         the release's form (uint8 codes, a bf16
-//	                        weight_scale), from safetensors: the container
-//	                        holds every weight exactly, so the two arms part
-//	                        only where an activation rounds across a boundary
-//	                        one way and not the other
-//	synth-bitnet-f16.gguf   bitnet.cpp's converter over the latent form, its
-//	                        ternarization stored as F16: every block's
-//	                        magnitude rounded to an f16 on the way, held to
-//	                        the latent form's own golden
+//	synth-bitnet-hf          the release's form (uint8 codes, a bf16
+//	                         weight_scale), from safetensors: TQ2_0
+//	synth-bitnet-online-hf   the latent f32 weights, ternarized as the class
+//	                         does in f32: TQ2_F32
+//	synth-bitnet-i2s.gguf    bitnet.cpp's I2_S of the latent form, its f32
+//	                         scale carried: TQ2_F32 (its embedding F16, held
+//	                         to the class run on that embedding)
+//	synth-bitnet-f16.gguf    bitnet.cpp's F16 of the latent form, each
+//	                         magnitude an f16: TQ2_0, held to the class run on
+//	                         those rounded magnitudes (-online-f16)
 var bitnetFixtures = []struct {
 	model, golden string
-	bound         float64
+	typ           quant.Type
 }{
-	{"synth-bitnet-hf", "synth-bitnet", bitnetNMSE},
-	{"synth-bitnet-f16.gguf", "synth-bitnet-online", bitnetF16NMSE},
+	{"synth-bitnet-hf", "synth-bitnet", quant.TQ2_0},
+	{"synth-bitnet-online-hf", "synth-bitnet-online", quant.TQ2_F32},
+	{"synth-bitnet-i2s.gguf", "synth-bitnet-online-i2s", quant.TQ2_F32},
+	{"synth-bitnet-f16.gguf", "synth-bitnet-online-f16", quant.TQ2_0},
 }
 
-// bitnetNMSE is the bound against transformers where the container holds the
-// weights exactly: the engine and the reference quantize the same activations
-// with the same per-token scale, and part where a value sits on a rounding
-// boundary (the reference divides by its scale, the engine multiplies by its
-// reciprocal, and the two round a half differently). Measured in the 1e-7s;
-// every violation in bitnetViolations reads 1e-3 or far above.
-const bitnetNMSE = 1e-5
-
-// bitnetF16NMSE is the same bound where the converter stored each block's
-// magnitude as an f16 (up to 2^-12 relative per tensor, every tensor its own
-// rounding).
-const bitnetF16NMSE = 1e-4
+// bitnetNMSE is the bound against transformers, and bitnetExact the level an
+// unflipped position reads at. A position reads 1e-13 until one activation
+// sits within a few ulps of a rounding boundary (33.499996 against the
+// reference's int8 grid, in synth-bitnet-i2s at row 3), where the two arms'
+// summation orders put it on different sides: that one int8 step reads 1e-5
+// to 1e-4 there and in every later position through the KV cache. The bound
+// takes one such flip; every violation in bitnetViolations reads 3e-2 or far
+// above, more than ten times it. Rounding a scale to an f16 where the file
+// holds an f32 reads 4e-4..4e-3 on this fixture, which the exact arms below
+// would show as every position off bitnetExact.
+const (
+	bitnetNMSE  = 2e-3
+	bitnetExact = 1e-9
+)
 
 // openBitNet opens a BitNet fixture -- a HuggingFace directory or a GGUF --
 // and its golden.
-func openBitNet(t *testing.T, model, golden string) (*Model, *c6Golden) {
+func openBitNet(t *testing.T, model, golden string, typ quant.Type) (*Model, *c6Golden) {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "golden", "bitnet", golden+".json"))
 	if err != nil {
@@ -78,18 +88,18 @@ func openBitNet(t *testing.T, model, golden string) (*Model, *c6Golden) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bitnetSelected(m) {
+	if !bitnetSelected(m, typ) {
 		m.Close()
-		t.Fatalf("%s does not carry BitNet's graph: %+v", model, m.Cfg)
+		t.Fatalf("%s does not carry BitNet's graph with %s projections: %+v", model, typ, m.Cfg)
 	}
 	return m, g
 }
 
 // bitnetSelected reports whether the container is the graph the fixture is
-// for: every projection ternary, both inner norms on every block, relu2 on
+// for: every projection ternary of the type the file's scales need, both inner norms on every block, relu2 on
 // the gate, NEOX rotary, per-token activations, the session's window as wide
 // as the widest row.
-func bitnetSelected(m *Model) bool {
+func bitnetSelected(m *Model, typ quant.Type) bool {
 	c := m.Cfg
 	if c.Arch != "bitnet" || !c.TokenAct || c.Act != nn.ActReLU2 || !c.RopeNeox || !c.TiedEmbd {
 		return false
@@ -100,7 +110,7 @@ func bitnetSelected(m *Model) bool {
 			return false
 		}
 		for _, w := range []tensor{l.wq, l.wk, l.wv, l.wo, l.gate, l.up, l.down} {
-			if w.typ != quant.TQ2_0 {
+			if w.typ != typ {
 				return false
 			}
 		}
@@ -115,7 +125,7 @@ func bitnetSelected(m *Model) bool {
 func TestBitNetMatchesTransformers(t *testing.T) {
 	for _, fx := range bitnetFixtures {
 		t.Run(fx.model, func(t *testing.T) {
-			m, g := openBitNet(t, fx.model, fx.golden)
+			m, g := openBitNet(t, fx.model, fx.golden, fx.typ)
 			defer m.Close()
 			if m.Vocab == nil {
 				t.Fatalf("no tokenizer: %v", m.TokErr)
@@ -125,18 +135,34 @@ func TestBitNetMatchesTransformers(t *testing.T) {
 					t.Errorf("Encode(%q)\n  ours           %v\n  tokenizer.json %v", tk.Text, got, tk.IDs)
 				}
 			}
+			var checks, exact, flips int
 			worst := c6Worst(t, m, g, func(what string, p int, lg []float32) float64 {
 				t.Helper()
 				nmse := llama4Cmp(g.Pos[p].Head, lg)
-				if math.IsNaN(nmse) || math.IsInf(nmse, 0) || nmse > fx.bound {
-					t.Errorf("%s pos %d: NMSE %.3e against transformers (bound %.0e)", what, p, nmse, fx.bound)
+				if math.IsNaN(nmse) || math.IsInf(nmse, 0) || nmse > bitnetNMSE {
+					t.Errorf("%s pos %d: NMSE %.3e against transformers (bound %.0e)", what, p, nmse, bitnetNMSE)
 				}
-				if am := Greedy(lg); am != g.Pos[p].Argmax {
-					t.Errorf("%s pos %d: argmax %d, transformers %d", what, p, am, g.Pos[p].Argmax)
+				checks++
+				if nmse <= bitnetExact {
+					exact++
+					// An unflipped position must agree on the token too; a
+					// flipped one may tip a near-tie on this random fixture.
+					if am := Greedy(lg); am != g.Pos[p].Argmax {
+						t.Errorf("%s pos %d: argmax %d, transformers %d", what, p, am, g.Pos[p].Argmax)
+					}
+				} else if Greedy(lg) != g.Pos[p].Argmax {
+					flips++
 				}
 				return nmse
 			})
-			t.Logf("decode, prefill at every length and the batch: worst NMSE %.3e", worst)
+			// Every entry point starts at position 0, so the exact positions
+			// are most of them unless something other than a flip is off.
+			if exact < checks/4 {
+				t.Errorf("%d of %d positions read the reference exactly (NMSE <= %.0e): more than "+
+					"rounding-boundary flips separates the two", exact, checks, bitnetExact)
+			}
+			t.Logf("decode, prefill at every length and the batch: worst NMSE %.3e, %d of %d positions "+
+				"exact, %d tokens tipped past a flip", worst, exact, checks, flips)
 		})
 	}
 }
@@ -179,7 +205,7 @@ var bitnetScaleViolations = []struct {
 // form's golden and demands it fail by a wide margin: a feature the fixture
 // cannot see is a feature the match does not certify.
 func TestBitNetFeaturesAreLoadBearing(t *testing.T) {
-	m, g := openBitNet(t, bitnetFixtures[0].model, bitnetFixtures[0].golden)
+	m, g := openBitNet(t, bitnetFixtures[0].model, bitnetFixtures[0].golden, bitnetFixtures[0].typ)
 	defer m.Close()
 	worstOf := func(t *testing.T, m *Model) float64 {
 		t.Helper()
@@ -197,13 +223,13 @@ func TestBitNetFeaturesAreLoadBearing(t *testing.T) {
 	}
 	check := func(t *testing.T, name string, worst float64) {
 		t.Helper()
-		if !(worst > 100*bitnetNMSE) {
-			t.Errorf("violation %q reads NMSE %.3e: within 100x the bound %.0e, so the fixture cannot see it",
+		if !(worst > 10*bitnetNMSE) {
+			t.Errorf("violation %q reads NMSE %.3e: within 10x the bound %.0e, so the fixture cannot see it",
 				name, worst, bitnetNMSE)
 		}
 		t.Logf("violation %q: worst NMSE %.3e", name, worst)
 	}
-	if w := worstOf(t, m); w > bitnetNMSE {
+	if w := worstOf(t, m); w > bitnetExact {
 		t.Fatalf("the unviolated model reads %.3e: the violations below would measure nothing", w)
 	}
 	for _, v := range bitnetViolations {

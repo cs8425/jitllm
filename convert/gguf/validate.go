@@ -62,6 +62,9 @@ func sizeTensor(t *meta.Tensor) error {
 	if t.Type == quant.I2_S {
 		return sizeI2S(t)
 	}
+	if t.Type.Engine() {
+		return fmt.Errorf("type %d is one of this engine's own formats, which no GGUF carries", uint32(t.Type))
+	}
 	if !t.Type.Known() {
 		return fmt.Errorf("unknown ggml type %d", uint32(t.Type))
 	}

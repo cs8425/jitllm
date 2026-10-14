@@ -184,6 +184,7 @@ func EmitPackedMatVec(t quant.Type, rows int, dk DotKind) ([]byte, error) {
 	// straight from memory. The cost is only in the addressing (R9 and DStr).
 	narrow := NarrowD(t)
 	e8 := E8M0D(t)
+	d32 := kernels.D32(q)
 	minD := kernels.MinInD(q)
 	perWord, stride := 4, 8
 	if biasArray {
@@ -392,6 +393,9 @@ func EmitPackedMatVec(t quant.Type, rows int, dk DotKind) ([]byte, error) {
 					a.VPSLLD(t1, t1, 23)
 				} else if narrow {
 					a.VCVTPH2PS(t1, At(R8, int32(g*vec/2)))
+				} else if d32 {
+					// TQ2_F32: the word is the scale, a row a word.
+					a.VMOVDQULoad(t1, At(R8, off))
 				} else {
 					a.VMOVDQULoad(t0, At(R8, off))
 					f16x8(t1, t0, hi) // d

@@ -720,6 +720,8 @@ func (v *voltaDeq) scalesF32X(w []ir.Value, x, subIdx, row ir.Value) (sc, mn ir.
 			return d, v.zeroF
 		}
 		d = b.CvtF16H(b.Shr(ir.U32, w[0], sh))
+	} else if qi.d32 {
+		d = b.Bitcast(ir.F32, w[0]) // TQ2F: the word is the scale
 	} else {
 		d = b.CvtF16H(w[0])
 		if qi.biasArray {

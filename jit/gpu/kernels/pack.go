@@ -286,12 +286,16 @@ func extract(t Quant, blk []byte, s int, q []int32) (dBits, dminBits uint16, sc,
 		}
 		return binary.LittleEndian.Uint16(blk), 0, 0, 0
 
-	case TQ2:
+	case TQ2, TQ2F:
 		// Sub-block s is elements 32s..32s+31: bits 2(s%4) of qs[32(s/4)+l]
-		// (quant's TQ2_0 decoder). Every sub-block carries the block's d.
+		// (quant's TQ2_0 decoder). Every sub-block carries the block's d;
+		// TQ2F's f32 goes out as the d word's two halves, whole.
 		g, sh := blk[32*(s/4):], uint(2*(s%4))
 		for l := 0; l < 32; l++ {
 			q[l] = int32(g[l] >> sh & 3)
+		}
+		if t == TQ2F {
+			return binary.LittleEndian.Uint16(blk[64:]), binary.LittleEndian.Uint16(blk[66:]), 0, 0
 		}
 		return binary.LittleEndian.Uint16(blk[64:]), 0, 0, 0
 
@@ -532,9 +536,10 @@ func DSlots(q Quant) int {
 	switch {
 	case qtab[q].e8m0:
 		return 4
-	case qtab[q].biasArray:
+	case qtab[q].biasArray, qtab[q].d32:
 		// A minimum beside the scale needs the whole word, whatever perSuper
-		// is (Q5_1's d and m, a k-quant's d and dmin).
+		// is (Q5_1's d and m, a k-quant's d and dmin), and so does an f32
+		// scale (TQ2F).
 		return 1
 	case qtab[q].perSuper == 1:
 		return 2
