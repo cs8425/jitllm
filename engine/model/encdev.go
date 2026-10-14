@@ -38,7 +38,7 @@ func (m *Model) encBlocks() int {
 		return 0
 	}
 	if mb := m.enc.mb; mb != nil {
-		return len(mb.blocks) + len(mb.head)
+		return mb.trunk + len(mb.head)
 	}
 	return len(m.enc.blocks)
 }
@@ -96,6 +96,12 @@ func (e *Embedder) SetDeviceLayers(d nn.Device, max int) error {
 			return nil
 		}
 		return e.st.SetDeviceLayers(d, max)
+	}
+	if e.m.enc.lf != nil && d != nil {
+		// An LFM2 encoder's centred convolution and prefix mask have no
+		// device plan yet; declined by name until they do (RULE 8a).
+		return fmt.Errorf("model: an LFM2 encoder's blocks (centred convolution, prefix mask) " +
+			"are not planned on a device yet")
 	}
 	if e.seg == nil {
 		if d == nil {
@@ -226,7 +232,7 @@ func (s *State) encPlan(li int) *nn.LayerPlan {
 	enc := m.enc
 	if mb := enc.mb; mb != nil {
 		v := s.enc.violation
-		if li >= len(mb.blocks) {
+		if li >= mb.trunk {
 			// The decision head's: a pre-norm torch TransformerEncoderLayer,
 			// no positions, an ungated ReLU MLP of its own width.
 			p.NHead, p.NKVHead = mb.headHeads, mb.headHeads
@@ -274,8 +280,8 @@ func (s *State) encWeights(li int) nn.LayerWeights {
 	m, d := s.m, s.c.NEmbd
 	enc := m.enc
 	if mb := enc.mb; mb != nil {
-		if li >= len(mb.blocks) {
-			b := &mb.head[li-len(mb.blocks)]
+		if li >= mb.trunk {
+			b := &mb.head[li-mb.trunk]
 			return nn.LayerWeights{
 				AttnNorm: b.ln1W, AttnNormB: b.ln1B, FFNNorm: b.ln2W, FFNNormB: b.ln2B,
 				Wq: wt(b.wq), Wk: wt(b.wk), Wv: wt(b.wv), Wo: wt(b.wo),

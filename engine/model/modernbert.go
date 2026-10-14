@@ -47,6 +47,9 @@ type headBlock struct {
 type modernBERT struct {
 	embNorm, finalNorm []float32
 	blocks             []mbBlock
+	// trunk is the encoder's block count, the head's first block: len(blocks),
+	// or an LFM2 encoder's (lfm2Enc) when the head sits on that trunk.
+	trunk              int
 	head               []headBlock
 	headFFN, headHeads int
 	types              []float32 // DecisionKind rows of NEmbd: choice, score, noul
@@ -135,6 +138,7 @@ func buildModernBERT(c *jlm.File, m *Model, enc *encoder) error {
 	mb.ropeG = nn.Rope{NRot: cfg.NRot, Base: cfg.RopeBase, Neox: true, Scale: 1}
 	mb.ropeL = nn.Rope{NRot: cfg.NRot, Base: cfg.RopeBaseSWA, Neox: true, Scale: 1}
 	mb.blocks = make([]mbBlock, cfg.NLayer)
+	mb.trunk = len(mb.blocks)
 	mb.local = func(li int) bool { return li < len(mb.blocks) && !mb.blocks[li].global }
 	for i := range mb.blocks {
 		b, bi := &mb.blocks[i], int32(i)
@@ -412,16 +416,16 @@ func (e *Embedder) layaScores(out []float32, n int, qt jlm.QuestionType, markers
 	// every row, so they are gathered after it.
 	gather := false
 	for bi := 0; bi < len(mb.head); bi++ {
-		if li := len(mb.blocks) + bi; e.onDevice(li) {
-			hi, err := e.devRun(li, len(mb.blocks)+len(mb.head), n, x, nil, nil)
+		if li := mb.trunk + bi; e.onDevice(li) {
+			hi, err := e.devRun(li, mb.trunk+len(mb.head), n, x, nil, nil)
 			if err != nil {
 				return err
 			}
-			bi = hi - len(mb.blocks) - 1
+			bi = hi - mb.trunk - 1
 			gather = bi == len(mb.head)-1
 			continue
 		}
-		if err := m.encBlockPageIn(len(mb.blocks) + bi); err != nil {
+		if err := m.encBlockPageIn(mb.trunk + bi); err != nil {
 			return err
 		}
 		b := &mb.head[bi]

@@ -9550,6 +9550,51 @@ Clef, llama.cpp's convention), so a picture over 768x768 pixels is read
 smaller than Clef reads it; and a video frame larger than the tower's
 bound is refused by name rather than shrunk.
 
+### d1-omni: an LFM2 encoder under Laya's head
+
+LiquidAI's d1-omni-600M is LFM2.5-Encoder-350M (LFM2's sixteen blocks made
+bidirectional) with Laya's decision head on top: two pre-norm torch
+TransformerEncoderLayers with a ReLU MLP, the question type's row added to
+every row first, and a LayerNorm-Linear-GELU-Linear scorer at each option's
+`<|mask|>`. llama.cpp's converter writes it as an `lfm2` file whose
+block_count counts the head's two blocks and whose per-layer arrays run over
+all eighteen; `convert/d1omni.go` reads the trunk through a view of the file
+cut to sixteen blocks and states it as `jlm.ArchLFM2Enc`, so a reader that
+knows only the decoder refuses the container rather than running it under a
+causal mask. The head's fused, biased q|k|v is split in thirds of the
+residual (nn.MultiheadAttention's in_proj), whatever the trunk's GQA.
+
+What separates the trunk from LFM2's decoder, each removed by
+`TestD1OmniFeaturesAreLoadBearing` (worst logit 12.3, 12.3 and 1.1 off):
+
+- the short convolution is centred, `w0 bx[t-1] + w1 bx[t] + w2 bx[t+1]`
+  with zeros past either end, where the decoder's is causal over three past
+  rows. On the host it is three generated multiplies of `B*x` by each tap
+  repeated over the rows, two of them added one row shifted;
+- no causal mask on the attention;
+- a media prefix's rows attend to the prefix alone, and the prefix's last
+  row does not read the text's first through the convolution (encoder.py's
+  `keep_right`); both are in the code, and the pictures' gate, which comes
+  next, holds them.
+
+`prompt.encode` is transcribed as written: each piece tokenized alone after
+`<|name|>` is rewritten to `<¦name¦>`, the option block given
+max(96, min(24k+32, max_len/2)) tokens shared evenly, the question cut to
+that block and the state to what is left. A noul is read as [false, true],
+and the answer's confidence is the chosen option's probability.
+
+The GGUF stores every matrix in F16 and the checkpoint is F32, so a golden
+from the checkpoint as it is puts the engine 1.2e-2 off on the trunk -- the
+weights, not the graph. `scripts/d1omnigold.py` with `D1OMNI_F16=1` rounds
+each 2-D weight but the type table to f16 first, as the GGUF does, and the
+engine then sits at f32 order: 4.6e-5 on the trunk at the markers, 2.8e-5 on
+a logit, 5.5e-6 on a probability (`TestD1OmniMatchesReference`).
+
+A warm pass over every prompt makes no engine allocation, and half the
+blocks' pages give the same scores to the bit (`TestD1OmniKeepsThePrinciples`).
+The device tiers decline the trunk by name until its convolution and prefix
+mask are planned there.
+
 ## qwen4exp: Qwen3.8-Flash-Next (plan, before the code)
 
 The graph, read off llama.cpp's `src/models/qwen4exp.cpp` and its converter
