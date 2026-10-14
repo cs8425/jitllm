@@ -161,6 +161,9 @@ var decisionDevViolations = map[string]decisionDevViolation{
 	"lev": {"a norm epsilon of 1", func(m *Model) func() {
 		return cfgMut(m, func(c *Config) { c.RMSEps = 1 })
 	}},
+	"d1-omni": {"a norm epsilon of 1", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.RMSEps = 1 })
+	}},
 	// The device reads which blocks are local from the plan (mb.local): every
 	// block global there attends over every row at the global base.
 	// The device reads its own copy of the head (clefDevHead): with the joint

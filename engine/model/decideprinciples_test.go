@@ -257,7 +257,7 @@ func decisionNames() []struct {
 		kind       jlm.DecisionKind
 	}
 	for _, c := range decisionCases {
-		if c.kind != jlm.DecisionLaya {
+		if c.kind != jlm.DecisionLaya && c.kind != jlm.DecisionD1Omni {
 			out = append(out, struct {
 				name, gguf string
 				kind       jlm.DecisionKind
