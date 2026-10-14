@@ -913,6 +913,11 @@ const (
 	// weights are per dimension, shared by every head), and the KV cache holds
 	// the unweighted normed key on every tier. See convert.foldPostRopeQKNorm.
 	FlagQKNormPostRope Flags = 1 << 27
+	// FlagVisionBicubic says a tower's pictures are resampled bicubic where
+	// its family's processor class defaults to bilinear: LFM2-VL's
+	// image_resize_algo, which d1's file states and LFM2-VL's older files do
+	// not. A vision-section flag; no text model sets it.
+	FlagVisionBicubic Flags = 1 << 28
 )
 
 // Pooling is the embedding readout the flags describe, or PoolNone for a model
@@ -999,6 +1004,14 @@ type Vision struct {
 	// record, written only when set, so every other tower's section is the
 	// bytes it was.
 	WinPattern, WinSize uint32
+
+	// TileSize and Tolerance are LFM2-VL's tiling (Lfm2VlImageProcessor's
+	// tile_size and max_pixels_tolerance): a picture whose rounded size holds
+	// more than Tolerance times MaxPixels is cut into TileSize squares. Zero
+	// for every other tower; an optional tail after the pixel bounds, written
+	// only when set.
+	TileSize  uint32
+	Tolerance float32
 }
 
 // Projector is how tower embeddings become language-model tokens.

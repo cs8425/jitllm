@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"image"
 	"time"
 
 	"github.com/jitllm/jitllm/engine/model"
@@ -30,6 +31,9 @@ type DecideOptions struct {
 	State jinja.Value
 	// Questions are the request's questions in its order.
 	Questions []model.DecisionQuestion
+	// Images are the request's pictures in its order, at most
+	// model.MaxDecisionImages; only a vision decision model (d1) reads them.
+	Images []image.Image
 }
 
 // DecideResult is one answer per question, in question order.
@@ -76,14 +80,14 @@ func (e *Engine) Decide(ctx context.Context, o DecideOptions) (*DecideResult, er
 		}
 		lm.dec = d
 	}
-	if err := lm.dec.Prepare(o.State, o.Questions); err != nil {
+	if err := lm.dec.Prepare(o.State, o.Questions, len(o.Images)); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	t1 := time.Now()
-	ans, err := lm.dec.Decide(o.State, o.Questions)
+	ans, err := lm.dec.Decide(o.State, o.Questions, o.Images)
 	if err != nil {
 		return nil, err
 	}

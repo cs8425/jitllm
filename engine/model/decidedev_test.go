@@ -82,7 +82,7 @@ func decideOn(t *testing.T, m *Model, dev nn.Device, n int, ok func(placed int) 
 	var out [][]DecisionAnswer
 	for _, req := range decisionRequests {
 		state, qs := decisionRequest(t, filepath.Join("testdata", "decision", req+".json"))
-		ans, err := d.Decide(state, qs)
+		ans, err := d.Decide(state, qs, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

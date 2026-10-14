@@ -226,8 +226,9 @@ func towerName(v *jlm.Vision, name string) string {
 	if v != nil && v.Projector == jlm.ProjLlama4 && strings.Contains(name, ".attn_post_norm.") {
 		return strings.Replace(name, ".attn_post_norm.", ".ln2.", 1)
 	}
-	// Kimi-VL's are mm.1 and mm.2: llava's mm.0 and mm.2 positions.
-	if v != nil && v.Projector == jlm.ProjKimiVL && strings.HasPrefix(name, "mm.1.") {
+	// Kimi-VL's and LFM2-VL's are mm.1 and mm.2: llava's mm.0 and mm.2
+	// positions.
+	if v != nil && (v.Projector == jlm.ProjKimiVL || v.Projector == jlm.ProjLFM2) && strings.HasPrefix(name, "mm.1.") {
 		return "mm.0." + strings.TrimPrefix(name, "mm.1.")
 	}
 	return name

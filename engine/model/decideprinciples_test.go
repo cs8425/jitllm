@@ -60,10 +60,11 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 			}
 			defer d.Close()
 			state, qs := decisionRequest(t, filepath.Join("testdata", "decision", "ambiguous.json"))
-			ids, groups, err := d.prompt(state, &qs[0], 0)
+			spans, groups, err := d.prompt(state, &qs[0], 0)
 			if err != nil {
 				t.Fatal(err)
 			}
+			ids := spans[0].Tokens
 			labels := func(lg []float32) []float32 {
 				s, err := d.labelScores(lg, groups)
 				if err != nil {
@@ -208,7 +209,7 @@ func TestDecisionRelocatesBetweenDevices(t *testing.T) {
 			defer d.Close()
 			state, qs := decisionRequest(t, filepath.Join("testdata", "decision", "support.json"))
 			answer := func() [][]DecisionAnswer {
-				ans, err := d.Decide(state, qs)
+				ans, err := d.Decide(state, qs, nil)
 				if err != nil {
 					t.Fatal(err)
 				}

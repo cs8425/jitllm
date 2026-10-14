@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"image"
 	"sort"
 	"strconv"
 	"strings"
@@ -98,6 +99,10 @@ type Decider struct {
 	// emb is the encoder's working memory, for a readout that runs on an
 	// encoder (Laya); st is nil then.
 	emb *Embedder
+
+	// pics is the request in flight's pictures, each its run of the prompt
+	// (cutPictures); nil between requests and for a text request.
+	pics [][]Span
 
 	// violation names one feature of the readout a test removes, to show the
 	// gate sees it (RULE 10). Empty in every caller but those tests.
@@ -209,7 +214,10 @@ func (d *Decider) InputTokens() int { return d.input }
 // puts each in the order the model was trained to see it: a noul true first on
 // d1. It is called by Decide; a caller that wants the refusal before queueing
 // calls it first.
-func (d *Decider) Prepare(state jinja.Value, qs []DecisionQuestion) error {
+func (d *Decider) Prepare(state jinja.Value, qs []DecisionQuestion, images int) error {
+	if err := d.checkImages(images); err != nil {
+		return err
+	}
 	if len(qs) == 0 {
 		return fmt.Errorf("questions must be a non-empty object")
 	}
@@ -242,14 +250,25 @@ func (d *Decider) Prepare(state jinja.Value, qs []DecisionQuestion) error {
 	return nil
 }
 
-// Decide answers every question about state, one forward pass per question
-// (two for a lev choice, its options shown in both orders). qs is the
-// request's questions in its order; the answers come back in the same order.
-func (d *Decider) Decide(state jinja.Value, qs []DecisionQuestion) ([]DecisionAnswer, error) {
-	if err := d.Prepare(state, qs); err != nil {
+// Decide answers every question about state and imgs, one forward pass per
+// question (two for a lev choice, its options shown in both orders). qs is
+// the request's questions in its order; the answers come back in the same
+// order. imgs are the request's pictures, in its order (d1 only).
+func (d *Decider) Decide(state jinja.Value, qs []DecisionQuestion, imgs []image.Image) ([]DecisionAnswer, error) {
+	if err := d.Prepare(state, qs, len(imgs)); err != nil {
 		return nil, err
 	}
 	d.input = 0
+	d.pics = nil
+	if len(imgs) > 0 {
+		pics, err := d.cutPictures(imgs)
+		if err != nil {
+			return nil, err
+		}
+		d.pics = pics
+		defer func() { d.pics = nil }()
+		state = replaceText(state, decisionMarker, " ")
+	}
 	out := make([]DecisionAnswer, len(qs))
 	for i := range qs {
 		q := &qs[i]
@@ -296,7 +315,7 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 	if d.kind == jlm.DecisionLaya {
 		return d.layaRun(state, q)
 	}
-	ids, groups, err := d.prompt(state, q, v)
+	spans, groups, err := d.prompt(state, q, v)
 	if err != nil {
 		return nil, err
 	}
@@ -323,11 +342,16 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 		}
 		defer func() { h.Pick, h.PickVals = nil, nil }()
 	}
-	lg, err := d.st.Prefill(ids)
+	var lg []float32
+	if len(spans) == 1 && spans[0].Picture == nil && spans[0].Embd == nil {
+		lg, err = d.st.Prefill(spans[0].Tokens)
+	} else {
+		lg, err = d.st.PrefillMixed(spans...)
+	}
 	if err != nil {
 		return nil, err
 	}
-	d.input += len(ids)
+	d.input += SpanPositions(spans, d.m.Cfg.NEmbd)
 	if h != nil && h.Picked {
 		d.picked++
 		return d.labelScoresOf(h.PickVals, groups)
@@ -343,9 +367,10 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 	return d.labelScoresOf(vals, groups)
 }
 
-// prompt is variant v of q as a decoder readout asks it: the prompt's ids,
-// and the label ids each output reads, a group per option (or per rating).
-func (d *Decider) prompt(state jinja.Value, q *DecisionQuestion, v int) ([]int32, [][]int32, error) {
+// prompt is variant v of q as a decoder readout asks it: the prompt's spans
+// (its ids alone without pictures), and the label ids each output reads, a
+// group per option (or per rating).
+func (d *Decider) prompt(state jinja.Value, q *DecisionQuestion, v int) ([]Span, [][]int32, error) {
 	opts := d.order(q)
 	var groups [][]int32
 	var labels []string
@@ -369,14 +394,23 @@ func (d *Decider) prompt(state jinja.Value, q *DecisionQuestion, v int) ([]int32
 	if err != nil {
 		return nil, nil, err
 	}
-	ids := d.m.Vocab.EncodeSpecial(prompt, false)
-	if len(ids) == 0 {
+	var spans []Span
+	if len(d.pics) > 0 {
+		var err error
+		if spans, err = d.pictureSpans(prompt, d.pics); err != nil {
+			return nil, nil, err
+		}
+	} else if ids := d.m.Vocab.EncodeSpecial(prompt, false); len(ids) > 0 {
+		spans = []Span{{Tokens: ids}}
+	}
+	n := SpanPositions(spans, d.m.Cfg.NEmbd)
+	if n == 0 {
 		return nil, nil, fmt.Errorf("the prompt is empty")
 	}
-	if len(ids) > d.st.MaxSeq() {
-		return nil, nil, fmt.Errorf("the prompt is %d tokens and this decider holds %d", len(ids), d.st.MaxSeq())
+	if n > d.st.MaxSeq() {
+		return nil, nil, fmt.Errorf("the prompt is %d positions and this decider holds %d", n, d.st.MaxSeq())
 	}
-	return ids, groups, nil
+	return spans, groups, nil
 }
 
 // labelScores is one score per label group of the prompt's last logits lg.
@@ -454,7 +488,12 @@ func (d *Decider) render(state jinja.Value, q *DecisionQuestion, opts []Decision
 		in = sortKeys(in)
 		dict = in.AsDict()
 	}
-	data := map[string]any{"images": jinja.NewList(nil)}
+	// One marker per picture, which prompt turns into the picture's run.
+	marks := make([]jinja.Value, len(d.pics))
+	for i := range marks {
+		marks[i] = jinja.NewString(decisionMarker)
+	}
+	data := map[string]any{"images": jinja.NewList(marks)}
 	for _, k := range dict.Keys {
 		data[k] = dict.Data[k]
 	}
@@ -914,14 +953,15 @@ func jsonFloat(f float64) string { return strconv.FormatFloat(f, 'g', -1, 64) }
 
 // ParseDecisionRequest reads a /v1/systemone body: the model it names (""
 // when none), the state and the questions, every object's keys in the order
-// the body wrote them.
-func ParseDecisionRequest(body []byte) (string, jinja.Value, []DecisionQuestion, error) {
+// the body wrote them, and the pictures' data URLs in request order
+// (DecisionMedia, which takes them out of the state).
+func ParseDecisionRequest(body []byte) (string, jinja.Value, []DecisionQuestion, []string, error) {
 	v, err := jinja.FromJSON(body)
 	if err != nil {
-		return "", jinja.None(), nil, fmt.Errorf("the request is not JSON: %w", err)
+		return "", jinja.None(), nil, nil, fmt.Errorf("the request is not JSON: %w", err)
 	}
 	if !v.IsDict() {
-		return "", jinja.None(), nil, fmt.Errorf("the request must be a JSON object")
+		return "", jinja.None(), nil, nil, fmt.Errorf("the request must be a JSON object")
 	}
 	req := v.AsDict()
 	name := ""
@@ -930,12 +970,16 @@ func ParseDecisionRequest(body []byte) (string, jinja.Value, []DecisionQuestion,
 	}
 	state, ok := req.Get("state")
 	if !ok {
-		return "", jinja.None(), nil, fmt.Errorf("state must be provided")
+		return "", jinja.None(), nil, nil, fmt.Errorf("state must be provided")
 	}
 	qv, _ := req.Get("questions")
 	qs, err := ParseDecisionQuestions(qv)
 	if err != nil {
-		return "", jinja.None(), nil, err
+		return "", jinja.None(), nil, nil, err
 	}
-	return name, state, qs, nil
+	state, urls, err := DecisionMedia(req, state)
+	if err != nil {
+		return "", jinja.None(), nil, nil, err
+	}
+	return name, state, qs, urls, nil
 }
