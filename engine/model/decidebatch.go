@@ -108,7 +108,16 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 		if res.Err = d.Prepare(rq.State, rq.Questions, len(rq.Images)); res.Err != nil {
 			continue
 		}
-		if len(rq.Images) > 0 || len(rq.Videos) > 0 {
+		// On a device a request runs alone too: a batch step there carries a
+		// prompt chunk as ragged rows, which attend through the decode plan a
+		// row at a time, step a recurrent block's state through each run in
+		// one sequential launch and stage a rotary table a row, where the
+		// request's own prefill runs the tiled prefill attention and the
+		// chunked recurrence. Measured on the M4 (Metal, every block placed),
+		// both requests as one batch took 19.8x (d1) and 19.1x (lev) the
+		// requests alone. A batch on the host is faster than alone (0.64x d1,
+		// 0.84x lev) and stays one.
+		if len(rq.Images) > 0 || len(rq.Videos) > 0 || d.batchAlone() {
 			res.Answers, res.Err = d.DecideMedia(rq.State, rq.Questions, rq.Images, rq.Videos)
 			res.InputTokens = d.InputTokens()
 			continue
@@ -156,7 +165,9 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 	at := 0
 	for r := range reqs {
 		res := &out[r]
-		if res.Err != nil {
+		// A request that failed, or ran alone (its pictures, a device), has
+		// no prompt among the jobs.
+		if res.Err != nil || res.Answers != nil {
 			continue
 		}
 		qs := reqs[r].Questions
@@ -250,6 +261,14 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 		}
 	}
 	return nil
+}
+
+// batchAlone reports whether DecideBatch runs each request alone: a decoder
+// readout whose blocks sit on a device. A gate turns it off to hold the
+// device's batch session to the requests alone.
+func (d *Decider) batchAlone() bool {
+	return d.kind != jlm.DecisionLaya && d.kind != jlm.DecisionClef && d.st != nil &&
+		d.st.GPULayers() > 0 && d.violation != "device-batch"
 }
 
 // batchSession is the Decider's batch session, at least rows wide, placed on
