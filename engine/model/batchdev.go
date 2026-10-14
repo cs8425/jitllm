@@ -108,19 +108,29 @@ func (s *State) relocateRows(took []int) {
 		s.relocateFor(end)
 		return
 	}
-	var bases, ends []int
+	bases, ends := s.rrBases[:0], s.rrEnds[:0]
 	for q, k := range took {
 		if k > 0 {
 			bases, ends = append(bases, q*s.maxSeq), append(ends, s.bpos[q]+k)
 		}
 	}
-	s.relocateUntil(end, func() bool { return sd.ReserveKVSeqs(bases, ends) })
+	s.rrBases, s.rrEnds, s.rrSD = bases, ends, sd
+	if s.rrFits == nil {
+		s.rrFits = s.reserveSeqs
+	}
+	s.relocateUntil(end, s.rrFits)
+	s.rrSD = nil
 }
+
+// reserveSeqs is relocateRows' question to the device: whether the stepping
+// sequences' next positions fit (nn.SeqKVDevice.ReserveKVSeqs).
+func (s *State) reserveSeqs() bool { return s.rrSD.ReserveKVSeqs(s.rrBases, s.rrEnds) }
 
 // flatSlots is each row's place in the device's flat history, sequence q's
 // position p at q*maxSeq+p (nn.RowsDevice).
 func (s *State) flatSlots(seq, pos []int) []int {
-	slot := make([]int, len(seq))
+	s.rrFlat = slices.Grow(s.rrFlat[:0], len(seq))[:len(seq)]
+	slot := s.rrFlat
 	for r, q := range seq {
 		slot[r] = q*s.maxSeq + pos[r]
 	}

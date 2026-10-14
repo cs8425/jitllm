@@ -406,6 +406,14 @@ type State struct {
 	tailPos []int
 	// rtTook, rtStart and rtSeen are rowsTake's scratch, kept from step to step.
 	rtTook, rtStart []int
+	// retireRow is Retire's one row, handed to the device without a slice
+	// made each time; rrBases, rrEnds and rrFlat are relocateRows' and
+	// flatSlots', and rrSD the device relocateRows reserves on.
+	retireRow       [1]int
+	rrBases, rrEnds []int
+	rrFlat          []int
+	rrSD            nn.SeqKVDevice
+	rrFits          func() bool
 	rtSeen          []bool
 	// relocate hands the device's highest block to the host when its history
 	// cannot grow, rather than letting the token fail. See SetRelocate.
@@ -3230,7 +3238,8 @@ func (s *State) Retire(i int) {
 	if s.recurrent() {
 		s.ResetRecurrent(i)
 		if s.devLinear() {
-			if rr, ok := s.ld.(nn.RecRowsDevice); !ok || !rr.ResetRecRows([]int{i}) {
+			s.retireRow[0] = i
+			if rr, ok := s.ld.(nn.RecRowsDevice); !ok || !rr.ResetRecRows(s.retireRow[:]) {
 				s.retireErr = fmt.Errorf("model: row %d's recurrent state on the device could not be reset", i)
 			}
 		}
