@@ -2263,6 +2263,12 @@ func freeScratch(bs *blockScratch) {
 		}
 	}
 	bs.vwins = nil
+	for _, b := range bs.vsegs { // the packed sequences' buffers, likewise
+		if b != nil {
+			b.Free()
+		}
+	}
+	bs.vsegs = nil
 	freePaged(bs.pkv)
 	bs.mlab.free()
 	bs.ds4.free()

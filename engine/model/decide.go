@@ -113,6 +113,11 @@ type Decider struct {
 	jobs []*batchJob
 	// batchN is how many of jobs the last batch ran.
 	batchN int
+	// packIDs and packMarks are a packed encoder pass's ids and marker rows
+	// (layaPacked), and packs counts the passes run.
+	packIDs   []int32
+	packMarks []int
+	packs     int
 
 	// violation names one feature of the readout a test removes, to show the
 	// gate sees it (RULE 10). Empty in every caller but those tests.

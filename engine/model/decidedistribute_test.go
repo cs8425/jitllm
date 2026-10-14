@@ -346,9 +346,19 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 						alone = append(alone, ans)
 						tokens = append(tokens, d.InputTokens())
 					}
+					packs0 := d.packs
 					got, err := d.DecideBatch(reqs)
 					if err != nil {
 						t.Fatal(err)
+					}
+					if m.IsEncoder() {
+						// Packed: fewer encoder passes than prompts, more than
+						// one sequence in a pass.
+						passes := d.packs - packs0
+						t.Logf("%d prompts in %d packed encoder pass(es)", d.batchN, passes)
+						if passes == 0 || passes >= d.batchN {
+							t.Fatalf("%d prompts ran in %d encoder passes: nothing was packed", d.batchN, passes)
+						}
 					}
 					for i, r := range got {
 						if (r.Err != nil) != (len(reqs[i].Questions) == 0) {
@@ -386,14 +396,17 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 					if !(worst <= tol) {
 						t.Errorf("batched, the answers moved %.6f from each alone", worst)
 					}
+					// The violation: a decoder's prompt chunks laid out at their
+					// positions reversed, so a row's history is not the prompt's
+					// (Scheduler.chunkPos); an encoder's packed sequences
+					// attending across one another.
 					if m.IsEncoder() {
-						return
+						d.emb.violation = "sequences-attend-across"
+						defer func() { d.emb.violation = "" }()
+					} else {
+						d.batch.chunkPos = func(base, j, k int) int { return base + k - 1 - j }
+						defer func() { d.batch.chunkPos = nil }()
 					}
-					// The violation: each prompt chunk's rows laid out at
-					// their positions reversed, so a row's history is not the
-					// prompt's (Scheduler.chunkPos).
-					d.batch.chunkPos = func(base, j, k int) int { return base + k - 1 - j }
-					defer func() { d.batch.chunkPos = nil }()
 					vio, err := d.DecideBatch(reqs)
 					if err != nil {
 						t.Logf("the violation failed the batch: %v", err)
@@ -405,9 +418,9 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 							seen = max(seen, decisionDiffRow(t, [][]DecisionAnswer{alone[i]}, [][]DecisionAnswer{vio[i].Answers}))
 						}
 					}
-					t.Logf("chunks at reversed positions: the answers move %.5f", seen)
-					if seen <= tol {
-						t.Errorf("chunks at reversed positions moved the answers %.5f: the gate does not see it", seen)
+					t.Logf("the violation moves the answers %.5f", seen)
+					if seen <= max(tol, decisionSeen) {
+						t.Errorf("the violation moved the answers %.5f: the gate does not see it", seen)
 					}
 				})
 			}
