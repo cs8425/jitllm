@@ -105,16 +105,15 @@ func TestDecisionMovesBetweenCards(t *testing.T) {
 			if !m.IsEncoder() {
 				t.Run("mid-prompt", func(t *testing.T) {
 					state, qs := decisionRequest(t, filepath.Join("testdata", "decision", "ambiguous.json"))
-					ids, groups, err := d.prompt(state, &qs[0], 0)
-					if err != nil {
-						t.Fatal(err)
-					}
+					rp := readoutOf(t, d, state, qs)
+					ids := rp.ids
+					var err error
 					x, y := len(ids)/3, 2*len(ids)/3
 					// run prefills the prompt in three parts, the blocks moved
 					// between them when moved is set; lose clears the device's
 					// recurrent summaries before the first move.
 					run := func(moved, lose bool) ([]float32, []BlockMove) {
-						st.Reset()
+						rp.start()
 						rows0 := st.PrefillRows()
 						var lg []float32
 						var mvs []BlockMove
@@ -139,11 +138,7 @@ func TestDecisionMovesBetweenCards(t *testing.T) {
 						if got := st.PrefillRows() - rows0; got != len(ids) {
 							t.Fatalf("%d prompt rows run for a %d-token prompt", got, len(ids))
 						}
-						s, err := d.labelScores(lg, groups)
-						if err != nil {
-							t.Fatal(err)
-						}
-						return s, mvs
+						return rp.finish(lg), mvs
 					}
 					ctl, _ := run(false, false)
 					got, mvs := run(true, false)
@@ -176,7 +171,7 @@ func TestDecisionMovesBetweenCards(t *testing.T) {
 			t.Run("between-questions", func(t *testing.T) {
 				state, qs := decisionRequest(t, filepath.Join("testdata", "decision", "support.json"))
 				answer := func() [][]DecisionAnswer {
-					ans, err := d.Decide(state, qs)
+					ans, err := d.Decide(state, qs, nil)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -305,10 +300,10 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 			for range 2 {
 				for _, r := range decisionRequests {
 					state, qs := decisionRequest(t, filepath.Join("testdata", "decision", r+".json"))
-					reqs = append(reqs, DecisionRequest{state, qs})
+					reqs = append(reqs, DecisionRequest{State: state, Questions: qs})
 				}
 			}
-			bad := DecisionRequest{reqs[0].State, nil} // no questions: refused alone
+			bad := DecisionRequest{State: reqs[0].State} // no questions: refused alone
 			reqs = append(reqs[:1], append([]DecisionRequest{bad}, reqs[1:]...)...)
 			arms := []*tier.GPU{nil}
 			arms = append(arms, decisionDevices(t)...)
@@ -339,7 +334,7 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 							alone, tokens = append(alone, nil), append(tokens, 0)
 							continue
 						}
-						ans, err := d.Decide(r.State, r.Questions)
+						ans, err := d.Decide(r.State, r.Questions, nil)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -358,7 +353,7 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 							t.Fatalf("request %d ran %d tokens in the batch and %d alone", i, r.InputTokens, tokens[i])
 						}
 					}
-					if !m.IsEncoder() {
+					if !m.IsEncoder() && c.kind != jlm.DecisionClef {
 						st := d.BatchStats()
 						t.Logf("batch: %d steps, %d prompt rows, at most %d prompts in a step; %d of %d blocks on the device",
 							st.Steps, st.PromptRows, st.MaxSeqs, d.BatchDeviceBlocks(), decisionBlocks(m))
@@ -387,6 +382,30 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 						t.Errorf("batched, the answers moved %.6f from each alone", worst)
 					}
 					if m.IsEncoder() {
+						return
+					}
+					if c.kind == jlm.DecisionClef {
+						// Clef answers a request in one pass of its own (its
+						// head reads every row, which a batch session's rows do
+						// not give back). The violation: the State not reset
+						// between the batch's requests, so each runs after the
+						// last one's rows.
+						d.violation = "no-reset"
+						vio, err := d.DecideBatch(reqs)
+						d.violation = ""
+						if err != nil {
+							t.Fatal(err)
+						}
+						seen := 0.0
+						for i := range reqs {
+							if alone[i] != nil {
+								seen = max(seen, decisionDiffRow(t, [][]DecisionAnswer{alone[i]}, [][]DecisionAnswer{vio[i].Answers}))
+							}
+						}
+						t.Logf("requests run without a reset between them: the answers move %.5f", seen)
+						if seen <= tol {
+							t.Errorf("no reset between requests moved the answers %.5f: the gate does not see it", seen)
+						}
 						return
 					}
 					// The violation: each prompt chunk's rows laid out at

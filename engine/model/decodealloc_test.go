@@ -49,6 +49,14 @@ func TestDecodeDoesNotAllocate(t *testing.T) {
 	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
 		specs = strings.Split(v, ",")
 	}
+	// Every block resident whatever the host has free: the gate measures a
+	// resident model's decode, and the default page budget is eight tenths of
+	// MemAvailable when the model opens. With other jobs holding the laptop's
+	// memory that once fell below olmoe's 4 GiB, and its windows read 300-400
+	// pages and allocated a read goroutine for each. A budget the model fits
+	// is a choice of this gate, not a second path: paging is gated elsewhere
+	// (TestPagingDoesNotChangeTheAnswer), and scripts/cap bounds what it holds.
+	resident := WithPageBudget(1 << 40)
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			// jlmOf skips naming the model when neither it nor its container
@@ -69,7 +77,7 @@ func TestDecodeDoesNotAllocate(t *testing.T) {
 			// there and nowhere this gate ran. Pinned here, it runs on every
 			// fused matrix of every host.
 			t.Run("host-ksliced", func(t *testing.T) {
-				mk, err := Open(jlmOf(t, p), noTune, WithJITOptions(nn.WithFusedKSlices(2)))
+				mk, err := Open(jlmOf(t, p), noTune, resident, WithJITOptions(nn.WithFusedKSlices(2)))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -91,7 +99,7 @@ func TestDecodeDoesNotAllocate(t *testing.T) {
 				if len(sched.NUMANodes()) < 2 {
 					t.Skip("one NUMA node: DoNodes is the plain region here, which the host arm measured")
 				}
-				mn, err := Open(jlmOf(t, p), noTune, WithJITOptions(nn.WithSched(sched.WithNUMA(true))))
+				mn, err := Open(jlmOf(t, p), noTune, resident, WithJITOptions(nn.WithSched(sched.WithNUMA(true))))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -115,7 +123,7 @@ func TestDecodeDoesNotAllocate(t *testing.T) {
 			})
 			// The stream trial pinned off with the tuners: it migrates blocks
 			// between its runs, and a migration's page-ins are not a decode.
-			m, err := Open(jlmOf(t, p), noTune, WithStreamTrial(false))
+			m, err := Open(jlmOf(t, p), noTune, resident, WithStreamTrial(false))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -309,10 +317,14 @@ func stepAllocs(t *testing.T, m *Model, g *tier.GPU, mode stepMode) {
 	}
 	// Each device counts the rows it ran, so on a tier over several devices
 	// every device holding blocks counts the whole step and the rest none.
-	d1, placed := g.DevStats(), g.Placed()
+	//
+	// The head's device counts it too: a card with no room for the
+	// projection beside the blocks leaves it to another device (PrepHead),
+	// where it is the step's own submission (tier.GPU.LayersRows).
+	d1, placed, hd := g.DevStats(), g.Placed(), g.HeadDevice()
 	for i := range d1 {
 		w := want
-		if i >= len(placed) || placed[i] == 0 {
+		if (i >= len(placed) || placed[i] == 0) && i != hd {
 			w = 0
 		}
 		if got := d1[i].SessionRows - d0[i].SessionRows; got != w {
@@ -647,6 +659,38 @@ func TestOffCardDecodeDoesNotAllocate(t *testing.T) {
 					}
 				})
 			}
+		})
+	}
+}
+
+// TestStepAllocsUnderABudget is TestDecodeDoesNotAllocate's step arm on a card
+// held to budgets the step barely fits, which the full suite reaches only when
+// another process happens to hold the card's memory. On the 4 GB laptop card
+// over Vulkan, synth-gemma4-moe at 112 MiB places every block but leaves the
+// head to another device, which refused the joint step; at 128 MiB the
+// step's batched width does not fit beside the blocks, and every step built,
+// refused and dropped it -- compiling its kernels again each time. A budget
+// is bytes on a particular device, so on another card an arm may land
+// elsewhere: CARD TOO SMALL, or a placement with room to spare.
+func TestStepAllocsUnderABudget(t *testing.T) {
+	m, err := Open(jlmOf(t, testmodels.Path("synth-gemma4-moe.gguf")), noTune, WithStreamTrial(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	spec := "vulkan"
+	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
+		spec = strings.Split(v, ",")[0]
+	}
+	for _, mib := range []uint64{112, 128} {
+		t.Run(fmt.Sprint(mib, "MiB"), func(t *testing.T) {
+			g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(spec), tier.WithBudget(mib << 20)},
+				testTierOpts(t)...)...)
+			if err != nil || g == nil {
+				noDevice(t, spec, err)
+			}
+			defer g.Close()
+			stepAllocs(t, m, g, stepAll)
 		})
 	}
 }

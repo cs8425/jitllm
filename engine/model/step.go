@@ -295,12 +295,12 @@ func (s *State) StepRefusal() error {
 
 // The conditions StepRefusal names.
 var (
-	errStepNoDevice      = errors.New("model: the State's device does not step rows of different sessions (no nn.SessionStepper)")
-	errStepBatched       = errors.New("model: a batched State steps its own rows, not other sessions'")
-	errStepEmbedder      = errors.New("model: an embedder runs no decode step")
-	errStepNoRows        = errors.New("model: the State's device runs no ragged rows (no nn.RowsDevice)")
-	errStepHeadElsewhere = errors.New("model: the head is not on the device that runs the last block")
-	errStepSplit         = errors.New("model: not every block of the State is on the device")
+	errStepNoDevice = errors.New("model: the State's device does not step rows of different sessions (no nn.SessionStepper)")
+	errStepBatched  = errors.New("model: a batched State steps its own rows, not other sessions'")
+	errStepEmbedder = errors.New("model: an embedder runs no decode step")
+	errStepNoRows   = errors.New("model: the State's device runs no ragged rows (no nn.RowsDevice)")
+	errStepNoHead   = errors.New("model: the head is not on a device")
+	errStepSplit    = errors.New("model: not every block of the State is on the device")
 )
 
 // hostStepper reports whether the runs can go as one host step across their

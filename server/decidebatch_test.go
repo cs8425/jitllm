@@ -16,6 +16,7 @@ import (
 
 	"github.com/jitllm/jitllm/engine/model"
 	"github.com/jitllm/jitllm/internal/testmodels"
+	"github.com/jitllm/jitllm/internal/testmodels/fresh"
 	"github.com/jitllm/jitllm/tok/jinja"
 )
 
@@ -32,6 +33,9 @@ var decisionServerModels = []struct {
 	{"d1-3B", "d1/d1-3B-Q8_0.jlm", 0.03},
 	{"lev", "lev/lev-Q8_0.jlm", 0.05},
 	{"laya", "laya/gguf/Laya-BF16.jlm", 0},
+	// Clef answers a request in one pass of its own: batched is alone.
+	{"clef", "clef/Clef-Flash-Q8_0.jlm", 0},
+	{"clef-fixture", "clef/fixture/clef-fixture.jlm", 0},
 }
 
 // TestSystemOneBatchesConcurrentRequests sends concurrent /v1/systemone
@@ -52,6 +56,7 @@ func TestSystemOneBatchesConcurrentRequests(t *testing.T) {
 	for _, c := range decisionServerModels {
 		t.Run(c.name, func(t *testing.T) {
 			path := testmodels.Path(c.path)
+			fresh.Must(t, path)
 			if _, err := os.Stat(path); err != nil {
 				t.Skipf("MODEL MISSING: %s (set JITLLM_MODELS to the model directory) -- this gate proved nothing", path)
 			}
@@ -101,7 +106,7 @@ func TestSystemOneBatchesConcurrentRequests(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				ans, err := d.Decide(state, qs)
+				ans, err := d.Decide(state, qs, nil)
 				if err != nil {
 					t.Fatal(err)
 				}

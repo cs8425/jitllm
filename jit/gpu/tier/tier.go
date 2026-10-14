@@ -487,6 +487,12 @@ type Config struct {
 	// it replaces inside a CUDA graph (gpu-kernels.md, "A persistent decode
 	// block"). CUDA only; elsewhere it is declined (Stats.PersistWhy).
 	Persist bool
+	// PersistDeps orders a persistent kernel's tasks with dependency
+	// counters (ir.PersistDeps): a task waits only for the tasks it reads or
+	// overwrites, a tile of an elementwise task only for the producer tiles
+	// whose elements it touches, and a workgroup with nothing to do in a task
+	// does not wait for it. A mode of Persist; off by default.
+	PersistDeps bool
 	// PersistGrid caps a persistent kernel's grid below the co-residency
 	// limit; zero takes the limit, or the widest launch's groups when fewer.
 	PersistGrid int
@@ -494,6 +500,12 @@ type Config struct {
 	// replaying a captured graph: the other arm of that comparison, a field so
 	// both arms can be live in one process.
 	NoGraph bool
+	// NoTowerChunks refuses a picture whose whole non-causal set does not fit
+	// rather than running it row-chunked (chunkTower, LayersPhase).
+	NoTowerChunks bool
+	// NoPickMV runs the label pick as the head's whole matvec and a gather
+	// (the arm before kernels.MatVec's PickOf), for the A/B.
+	NoPickMV bool
 	// ScalarSoftmax runs the thread-per-head softmax instead of the warp
 	// reduction, the other arm of that comparison. It is ignored on a device
 	// that did not pass pickSoftmax's check, where the scalar kernel runs
@@ -692,7 +704,10 @@ type Stats struct {
 	// grid-barrier-separated phases, PersistCompiles the compositions built
 	// and PersistFallbacks those that failed and ran per-op; PersistWhy is
 	// why the path is declined on this device.
+	// PersistDepLaunches counts those launched with dependency counters
+	// (Config.PersistDeps), PersistDepTiles their tile-wise edges.
 	PersistLaunches, PersistParts, PersistPhases, PersistCompiles, PersistFallbacks int
+	PersistDepLaunches, PersistDepTiles                                             int
 	PersistWhy                                                                      string
 	// RagHeadOne counts ragged steps whose head ran decode's own projection on
 	// the one row that wanted logits, rather than a batched twin over every
@@ -975,6 +990,12 @@ type Stats struct {
 	// HeadFolds counts batched chunks that ran the output projection on
 	// their last row inside their own submission.
 	HeadFolds int
+	// TowerChunked counts non-causal sets built row-chunked (chunkTower), and
+	// TowerPhases the phase calls run over them (LayersPhase).
+	TowerChunked, TowerPhases int
+	// PickRows counts label picks the head ran as the picked rows' own
+	// projection (pickMV) instead of the whole head and a gather.
+	PickRows int
 	// FlashPrefills counts batched attention launches of a one-kernel form
 	// (kernels.FlashPrefill70, FlashPrefillTile), paged or not.
 	FlashPrefills int
@@ -1141,6 +1162,8 @@ func (s *Stats) add(o Stats) {
 	s.PersistPhases += o.PersistPhases
 	s.PersistCompiles += o.PersistCompiles
 	s.PersistFallbacks += o.PersistFallbacks
+	s.PersistDepLaunches += o.PersistDepLaunches
+	s.PersistDepTiles += o.PersistDepTiles
 	if o.PersistWhy != "" {
 		s.PersistWhy = o.PersistWhy
 	}
@@ -1264,6 +1287,9 @@ func (s *Stats) add(o Stats) {
 	s.PagedPrefillPasses += o.PagedPrefillPasses
 	s.EmbedLaunches += o.EmbedLaunches
 	s.HeadFolds += o.HeadFolds
+	s.TowerChunked += o.TowerChunked
+	s.TowerPhases += o.TowerPhases
+	s.PickRows += o.PickRows
 	s.FlashPrefills += o.FlashPrefills
 	s.VisionAttnChunks += o.VisionAttnChunks
 	if o.MMAWhy != "" {
@@ -1547,6 +1573,10 @@ type devShared struct {
 	// visCap is the rows the non-causal set is built for and visMax the
 	// largest grid a tower placed here takes (visrows.go). Guarded by mu.
 	visCap, visMax int
+	// visKeys is the keys the set's k/v pairs and score rows hold when it is
+	// row-chunked (LayersPhase): a picture of visKeys rows runs visCap rows a
+	// call. 0 when the set takes a picture whole (visKeys is visCap).
+	visKeys int
 	// visSmall counts the calls in a row the set was more than twice what
 	// they needed (ReserveRows), which shrinks it at visShrinkCalls.
 	visSmall int
@@ -1702,17 +1732,25 @@ type devShared struct {
 	pcache     *persistCache                 // composed persistent kernels; see persist.go
 	// convK, conv and convN are the convolutional blocks' kernels, their
 	// shared scratch and how many hold it (conv.go).
-	convK   map[convKey]backend.Kernel
-	conv    convScratch
-	convN   int
-	ragSeg  map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
-	argmaxK backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
+	convK map[convKey]backend.Kernel
+	conv  convScratch
+	// dh is Clef's decision head on this device (dechead.go), and ClefHeads
+	// how many requests it has answered.
+	dh        dhState
+	ClefHeads int64
+	convN     int
+	ragSeg    map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
+	argmaxK   backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
 	// samplePenK and sampleKs are the device sampler's kernels: the penalty
 	// over the head's rows and, per k, the two top-k passes (sample.go).
 	samplePenK backend.Kernel
 	sampleKs   map[int]sampleKerns
 	// pickK is the label pick's gather over the head's rows (pick.go).
-	pickK  backend.Kernel
+	pickK backend.Kernel
+	// pickMV projects the picked rows of the head alone (kernels.MatVec's
+	// PickOf), in place of the head's whole matvec and pickK's gather; nil
+	// where the head's format or a cap needs the whole row.
+	pickMV backend.Kernel
 	hostA  []uint32
 	hostAX []float32
 
@@ -1990,6 +2028,7 @@ func New(slots []Slot, options ...Option) (*GPU, error) {
 	// A jitllmtest build can make the persistent path every tier's default
 	// (PersistByDefaultForTest), so the regression gates run through it.
 	cfg.Persist = persistDefault
+	cfg.PersistDeps = persistDepsDefault
 	for _, f := range o.cfg {
 		f(cfg)
 	}
@@ -2389,6 +2428,7 @@ func (g *devTier) Close() {
 	// Every session's queue, before the device that owns them, once nothing
 	// runs on one.
 	g.quiesce()
+	g.dhClose()
 	for _, ds := range g.sess {
 		ds.closeQueue()
 	}

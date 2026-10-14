@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"image"
 
 	"github.com/jitllm/jitllm/engine/nn"
 	"github.com/jitllm/jitllm/format/jlm"
@@ -21,6 +22,13 @@ import (
 type DecisionRequest struct {
 	State     jinja.Value
 	Questions []DecisionQuestion
+	// Images are the request's pictures, in its order (d1's, Clef's); a
+	// request with pictures runs on its own (Decide), its tower once and its
+	// picture rows from the image cache for every question after the first.
+	Images []image.Image
+	// Videos are the request's videos (Clef's); a request with one runs on
+	// its own too.
+	Videos []VideoFrames
 }
 
 // decisionBatchRows is the most prompts one batch session runs at once.
@@ -46,10 +54,12 @@ type batchJob struct {
 	ids     []int32
 	groups  [][]int32
 	markers []int
-	scores  []float32
-	seq     Seq
-	sample  func([]float32) int32
-	err     error
+	// clef is a Clef request's prompt: one job answers the whole request.
+	clef   *clefPrompt
+	scores []float32
+	seq    Seq
+	sample func([]float32) int32
+	err    error
 }
 
 // read is the job's sequence's Sample: the label scores at the prompt's last
@@ -95,10 +105,24 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 	n := 0
 	for r := range reqs {
 		rq, res := &reqs[r], &out[r]
-		if res.Err = d.Prepare(rq.State, rq.Questions); res.Err != nil {
+		if res.Err = d.Prepare(rq.State, rq.Questions, len(rq.Images)); res.Err != nil {
+			continue
+		}
+		if len(rq.Images) > 0 || len(rq.Videos) > 0 {
+			res.Answers, res.Err = d.DecideMedia(rq.State, rq.Questions, rq.Images, rq.Videos)
+			res.InputTokens = d.InputTokens()
 			continue
 		}
 		first := n
+		if d.kind == jlm.DecisionClef {
+			j := d.job(n)
+			j.r, j.q, j.v = r, -1, 0
+			if res.Err = d.clefJob(j, rq.State, rq.Questions); res.Err != nil {
+				continue
+			}
+			n++
+			continue
+		}
 	questions:
 		for qi := range rq.Questions {
 			q := &rq.Questions[qi]
@@ -132,10 +156,17 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 	at := 0
 	for r := range reqs {
 		res := &out[r]
-		if res.Err != nil {
+		// A request that failed alone, or that ran alone (its media), has
+		// its answer already and no job in the batch.
+		if res.Err != nil || res.Answers != nil {
 			continue
 		}
 		qs := reqs[r].Questions
+		if d.kind == jlm.DecisionClef {
+			res.Answers, res.Err = d.clefAnswers(qs, jobs[at].scores)
+			at++
+			continue
+		}
 		res.Answers = make([]DecisionAnswer, len(qs))
 		for qi := range qs {
 			var all [][]float32
@@ -164,6 +195,24 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 	d.input = 0
 	for _, j := range jobs {
 		d.input += len(j.ids)
+	}
+	if d.kind == jlm.DecisionClef {
+		// One pass a request, every row of it kept for the head: a batch
+		// session's rows give back their last row alone.
+		for _, j := range jobs {
+			if cap(j.scores) < len(j.clef.opts) {
+				j.scores = make([]float32, len(j.clef.opts))
+			}
+			j.scores = j.scores[:len(j.clef.opts)]
+			if err := d.clefForward(j.clef, j.scores); err != nil {
+				return err
+			}
+		}
+		d.input = 0
+		for _, j := range jobs {
+			d.input += len(j.ids)
+		}
+		return nil
 	}
 	if d.kind == jlm.DecisionLaya {
 		for _, j := range jobs {

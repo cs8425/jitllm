@@ -963,14 +963,6 @@ func (g *GPU) HeadDeviceName() (string, bool) {
 	return "", false
 }
 
-// HeadWith reports that the projection is on the device holding block li --
-// the one place a rows step can take it (LayersRows).
-func (g *GPU) HeadWith(li int) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.head != nil && g.own[li] == g.head
-}
-
 // Pin keeps block li where it is: the pager never picks it as a victim, and a
 // budget below what the pinned blocks charge is refused. False when no device
 // holds the block.

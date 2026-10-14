@@ -135,6 +135,13 @@ var Models = []Model{
 		Repo: "bartowski/swiss-ai_Apertus-8B-Instruct-2509-GGUF",
 		File: "swiss-ai_Apertus-8B-Instruct-2509-Q4_K_M.gguf", Bytes: 5057885568},
 
+	// --- bitnet-b1.58 ---
+	// Microsoft's own conversion; 212 of 214 teacher-forced positions take
+	// transformers' token on the release's golden, the other two ties.
+	{Name: "bitnet-b1.58-2b-4t", Title: "BitNet b1.58 2B-4T", Arch: "bitnet-b1.58", Params: "2B", Quant: "I2_S",
+		Repo: "microsoft/bitnet-b1.58-2B-4T-gguf", File: "ggml-model-i2_s.gguf", Bytes: 1187801280,
+		Note: "Ternary weights: every projection is -1, 0 or 1 times one scale."},
+
 	// --- the state-space hybrids and the short convolutions ---
 	// Each teacher-forced against llama.cpp (TestSSMRealModelsTeacherForced).
 	{Name: "granite-4.0-h-350m", Title: "Granite 4.0 H 350M", Arch: "granitehybrid", Params: "350M",
@@ -295,6 +302,9 @@ var Models = []Model{
 	{Name: "lev", Title: "Lev 4B (decision model)", Arch: "qwen35", Params: "4B", Quant: "Q8_0",
 		Repo: "ggml-org/lev-GGUF", File: "lev-Q8_0.gguf", Bytes: 4482405280,
 		Note: "A decision model: `jitllm decide` or POST /v1/systemone; the adapter merged into Qwen3.5-4B."},
+	{Name: "clef-flash", Title: "Clef-Flash (decision model)", Arch: "clef", Params: "9.1B", Quant: "Q8_0",
+		Repo: "ggml-org/Clef-Flash-GGUF", File: "Clef-Flash-Q8_0.gguf", Bytes: 9657260192,
+		Note: "A decision model: `jitllm decide` or POST /v1/systemone; every question answered jointly in one pass, text states only."},
 	{Name: "qwen3-embedding-0.6b", Title: "Qwen3-Embedding 0.6B (embeddings)", Arch: "qwen3", Params: "0.6B",
 		Quant: "F16", Repo: "Qwen/Qwen3-Embedding-0.6B-GGUF", File: "Qwen3-Embedding-0.6B-f16.gguf",
 		Bytes: 1197629632, Note: "A text embedding model: `jitllm embed`, 1024 dims, last-token pooled."},

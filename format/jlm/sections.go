@@ -175,7 +175,10 @@ func encodeConfig(c *Config) []byte {
 	// it did before the field existed. The tenth, a decision model's readout
 	// and temperatures, implies the first nine; an older reader drops it and
 	// runs the model as the backbone it is, a model that generates.
-	q4e := c.HCLowRank != 0 || c.QSARatio != 0 || c.NGramBlock != 0
+	// The twelfth, Clef's routing blocks and head epsilon, implies the first
+	// eleven; an older reader refuses its decision kind by code.
+	clef := c.DecisionRouting != 0 || c.DecisionEps != 0
+	q4e := clef || c.HCLowRank != 0 || c.QSARatio != 0 || c.NGramBlock != 0
 	dec := q4e || c.Decision != DecisionNone || c.DecisionBlocks != 0 || c.DecisionHeadTokens != 0 || len(c.DecisionTemps) != 0 ||
 		c.DecisionHeads != 0
 	k3 := dec || c.AttnResBlock != 0 || c.ExpertLatent != 0 || c.SituBeta != 0 || c.SituLinearBeta != 0 ||
@@ -272,6 +275,10 @@ func encodeConfig(c *Config) []byte {
 				w.u64(v)
 			}
 		}
+	}
+	if clef {
+		w.u32(c.DecisionRouting)
+		w.f32(c.DecisionEps)
 	}
 	return w.b
 }
@@ -407,6 +414,10 @@ func decodeConfig(b []byte) (*Config, error) {
 				}
 			}
 		}
+	}
+	if r.err == nil && len(r.b) > 0 {
+		c.DecisionRouting = r.u32()
+		c.DecisionEps = r.f32()
 	}
 	if r.err != nil {
 		return nil, r.err
@@ -550,8 +561,10 @@ func encodeVision(v *Vision) []byte {
 	// The optional tail: a tiling preprocessor's crop count bounds (InternVL),
 	// then Qwen2.5-VL's window attention, each written only when it or a field
 	// after it is set, so every earlier tower's section is byte-identical.
-	// The pixel bounds of a tower read at its own size come third.
-	pix := v.MinPixels != 0 || v.MaxPixels != 0
+	// The pixel bounds of a tower read at its own size come third, and
+	// LFM2-VL's tile size and tolerance fourth.
+	tile := v.TileSize != 0 || v.Tolerance != 0
+	pix := v.MinPixels != 0 || v.MaxPixels != 0 || tile
 	if v.MinTiles != 0 || v.MaxTiles != 0 || v.WinPattern != 0 || v.WinSize != 0 || pix {
 		w.u32(v.MinTiles)
 		w.u32(v.MaxTiles)
@@ -563,6 +576,10 @@ func encodeVision(v *Vision) []byte {
 	if pix {
 		w.u32(v.MinPixels)
 		w.u32(v.MaxPixels)
+	}
+	if tile {
+		w.u32(v.TileSize)
+		w.f32(v.Tolerance)
 	}
 	return w.b
 }
@@ -596,6 +613,9 @@ func decodeVision(b []byte) (*Vision, error) {
 	}
 	if r.err == nil && len(r.b) > 0 {
 		v.MinPixels, v.MaxPixels = r.u32(), r.u32()
+	}
+	if r.err == nil && len(r.b) > 0 {
+		v.TileSize, v.Tolerance = r.u32(), r.f32()
 	}
 	if r.err != nil {
 		return nil, r.err

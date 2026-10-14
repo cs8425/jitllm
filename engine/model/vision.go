@@ -100,6 +100,13 @@ type TowerConfig struct {
 	// TokenLimit is Kimi-VL's processor's in_token_limit: a picture of more
 	// whole patches is scaled down to it (kimivit.go).
 	TokenLimit int
+	// TileSize and Tolerance are LFM2-VL's tiling (lfm2vision.go): a picture
+	// past Tolerance times MaxPixels is cut into TileSize squares. Zero for
+	// every other tower.
+	TileSize  int
+	Tolerance float64
+	// Bicubic says the pictures are resampled bicubic (FlagVisionBicubic).
+	Bicubic bool
 	// Deep is the segment-local blocks whose output a deepstack merger reads,
 	// ascending (Qwen3-VL); tap k's rows add into the text model after its
 	// block k.
@@ -227,10 +234,10 @@ func (c TowerConfig) projK() int {
 
 // projEps is the projector norm's epsilon. InternVL's is torch's LayerNorm
 // default, 1e-5, not the tower's 1e-6: the reference constructs it without
-// one, and llama.cpp hardcodes the same. gemma3's soft_emb_norm takes the
-// tower's.
+// one, and llama.cpp hardcodes the same; LFM2-VL's nn.LayerNorm is the same
+// default. gemma3's soft_emb_norm takes the tower's.
 func (c TowerConfig) projEps() float64 {
-	if c.Kind == jlm.ProjInternVL {
+	if c.Kind == jlm.ProjInternVL || c.Kind == jlm.ProjLFM2 {
 		return 1e-5
 	}
 	return c.Eps
@@ -275,7 +282,12 @@ type Tower struct {
 	// patchW is the conv-as-matmul, 2-D by the time it reaches a container:
 	// [k, NEmbd] with k >= PatchSz*PatchSz*channels, zero-padded up to a whole
 	// quantization block by convert.reshapePatchEmbd.
-	patchW  tensor
+	patchW tensor
+	// patchW1 is a conv3d patch embedding's second temporal plane alone
+	// (convert.foldPatchPlanes), which a video's second frame reads; patchW
+	// is the planes' sum. Absent on every other tower, and on a container
+	// converted before the plane was kept.
+	patchW1 tensor
 	patchB  []float32
 	clsW    []float32 // the class embedding, one NEmbd row, or nil
 	posW    []float32 // learned position embeddings, Seq x NEmbd
@@ -326,6 +338,9 @@ type Tower struct {
 // list rather than two copies of it. The blocks' are the model's layers.
 func (t *Tower) weights() []*tensor {
 	ws := []*tensor{&t.patchW}
+	if t.patchW1.e != nil {
+		ws = append(ws, &t.patchW1)
+	}
 	if t.mergeW.e != nil {
 		ws = append(ws, &t.mergeW)
 	}
@@ -409,11 +424,11 @@ func buildTower(c0 *jlm.File) (*Tower, error) {
 	switch v.Projector {
 	case jlm.ProjIdefics3, jlm.ProjMLP, jlm.ProjQwen2VL, jlm.ProjQwen25VL, jlm.ProjGemma3, jlm.ProjInternVL,
 		jlm.ProjResampler, jlm.ProjJanus, jlm.ProjPixtral, jlm.ProjLlama4, jlm.ProjGemma4V, jlm.ProjPhi4,
-		jlm.ProjQwen3VL, jlm.ProjGLM4V, jlm.ProjGemma3nV, jlm.ProjKimiVL, jlm.ProjHunyuanVL:
+		jlm.ProjQwen3VL, jlm.ProjGLM4V, jlm.ProjGemma3nV, jlm.ProjKimiVL, jlm.ProjHunyuanVL, jlm.ProjLFM2:
 	default:
 		return nil, fmt.Errorf("model: OpenTower: projector %v unsupported "+
 			"(only idefics3, mlp, qwen2vl_merger, qwen2.5vl_merger, qwen3vl_merger, glm4v, kimivl, hunyuanvl, gemma3, "+
-			"internvl, resampler, janus_pro, pixtral, llama4, gemma4v, phi4, gemma3nv)", v.Projector)
+			"internvl, resampler, janus_pro, pixtral, llama4, gemma4v, phi4, gemma3nv, lfm2)", v.Projector)
 	}
 	c.NLayer, c.NEmbd, c.NFFN = int(v.NLayer), int(v.NEmbd), int(v.NFFN)
 	c.NHead, c.ImageSz, c.PatchSz = int(v.NHead), int(v.ImageSize), int(v.PatchSize)
@@ -456,6 +471,10 @@ func buildTower(c0 *jlm.File) (*Tower, error) {
 		// Read at its own size between the two pixel counts the file states,
 		// to whole merge units (smart_resize, ResizeTo).
 		c.MinPixels, c.MaxPixels = int(v.MinPixels), int(v.MaxPixels)
+	case jlm.ProjLFM2:
+		if err := lfm2Pixels(c, v); err != nil {
+			return nil, err
+		}
 	}
 	if v.Projector == jlm.ProjGLM4V {
 		c.MinPixels = min(glmMinPixels, c.MaxPixels)
@@ -568,6 +587,15 @@ func buildTower(c0 *jlm.File) (*Tower, error) {
 	if t.patchB, err = optVec(jlm.RoleVPatchBias, jlm.DenseBlock); err != nil {
 		return nil, err
 	}
+	if c0.Has(jlm.RoleVPatchEmbd, jlm.DenseBlock, 1) {
+		if t.patchW1, err = getAt(jlm.RoleVPatchEmbd, jlm.DenseBlock, 1); err != nil {
+			return nil, err
+		}
+		if t.patchW1.rows != t.patchW.rows || t.patchW1.k != t.patchW.k {
+			return nil, fmt.Errorf("model: OpenTower: the second temporal plane is %dx%d, the first %dx%d",
+				t.patchW1.rows, t.patchW1.k, t.patchW.rows, t.patchW.k)
+		}
+	}
 	if c.CLS {
 		if t.clsW, err = vec(jlm.RoleVClassEmbd, jlm.DenseBlock); err != nil {
 			return nil, err
@@ -619,11 +647,12 @@ func buildTower(c0 *jlm.File) (*Tower, error) {
 			return nil, fmt.Errorf("model: OpenTower: gemma4v's position tables are %d floats, not two tables "+
 				"of %d-wide rows", len(t.posW), c.NEmbd)
 		}
-	} else if side := c.ImageSz / c.PatchSz; v.Projector == jlm.ProjPhi4 {
-		// Phi-4's is a square table resized to each grid (phi4Table).
+	} else if side := c.ImageSz / c.PatchSz; v.Projector == jlm.ProjPhi4 || v.Projector == jlm.ProjLFM2 {
+		// Phi-4's and LFM2-VL's are a square table resized to each grid
+		// (phi4Table).
 		if len(t.posW) != side*side*c.NEmbd {
-			return nil, fmt.Errorf("model: OpenTower: phi4's position table is %d floats, want %dx%d rows of %d",
-				len(t.posW), side, side, c.NEmbd)
+			return nil, fmt.Errorf("model: OpenTower: %s's position table is %d floats, want %dx%d rows of %d",
+				c.Projector, len(t.posW), side, side, c.NEmbd)
 		}
 	} else if n := c.Seq() * c.NEmbd; t.posW != nil && c.PosBuckets == 0 && !resampled && len(t.posW) != n {
 		return nil, fmt.Errorf("model: OpenTower: position embeddings are %d floats, want %d (%d rows x %d)",
@@ -802,7 +831,8 @@ func buildTower(c0 *jlm.File) (*Tower, error) {
 	}
 	// The projector's own norm: gemma3's RMSNorm and InternVL's LayerNorm are
 	// required, every other projector has none.
-	if v.Projector == jlm.ProjGemma3 || v.Projector == jlm.ProjInternVL {
+	if v.Projector == jlm.ProjGemma3 || v.Projector == jlm.ProjInternVL ||
+		v.Projector == jlm.ProjLFM2 && c0.Has(jlm.RoleVProjNorm, jlm.DenseBlock, -1) {
 		if t.projNorm, err = vec(jlm.RoleVProjNorm, jlm.DenseBlock); err != nil {
 			return nil, err
 		}
@@ -815,12 +845,21 @@ func buildTower(c0 *jlm.File) (*Tower, error) {
 				return nil, err
 			}
 		}
+		// LFM2-VL's LayerNorm may come without its bias (llama.cpp reads
+		// each on its own).
+		if v.Projector == jlm.ProjLFM2 {
+			if t.projNormB, err = optVec(jlm.RoleVProjNormBias, jlm.DenseBlock); err != nil {
+				return nil, err
+			}
+		}
+	} else if v.Projector == jlm.ProjLFM2 && c0.Has(jlm.RoleVProjNormBias, jlm.DenseBlock, -1) {
+		return nil, fmt.Errorf("model: OpenTower: lfm2's projector norm has a bias and no weight")
 	}
 	// The MLP projector is two matrices and a GELU; only the last has to emit
 	// ProjDim, since the hidden width may differ.
 	if v.Projector == jlm.ProjMLP || v.Projector == jlm.ProjQwen2VL || v.Projector == jlm.ProjQwen25VL ||
 		v.Projector == jlm.ProjInternVL || v.Projector == jlm.ProjJanus || v.Projector == jlm.ProjPhi4 ||
-		v.Projector == jlm.ProjQwen3VL || v.Projector == jlm.ProjKimiVL {
+		v.Projector == jlm.ProjQwen3VL || v.Projector == jlm.ProjKimiVL || v.Projector == jlm.ProjLFM2 {
 		if t.projW2, err = get(jlm.RoleVProj2, jlm.DenseBlock); err != nil {
 			return nil, err
 		}
@@ -917,6 +956,11 @@ type visRun struct {
 	// pair for its run and hands it on (lend, unlend).
 	kp, vp []float32
 	gather []float32
+	// px2 is the encode in progress's second frame (a video's temporal pair,
+	// Picture.Pixels2), nil for a still picture; gather2 and pair are its
+	// gathered difference from the first frame and that difference's rows.
+	px2           []float32
+	gather2, pair []float32
 	// posTab is Phi-4's position table resized to the grid posAt
 	// (phi4Table), nil for every other tower.
 	posTab []float32
@@ -949,6 +993,8 @@ type visRun struct {
 	// index in the segment (-1 is the entry's rows): the tower's tracer, for
 	// localising a device/host disagreement per block.
 	afterBlock func(li int, x []float32)
+	// chunkX is a row-chunked tower call's phase-1 scratch (towerLayers).
+	chunkX []float32
 	// atStage, when set, sees the rows at the named points llama.cpp's graph
 	// dump names too: "pos_embed" (block 0's input), "post_ln", "proj_in"
 	// (the projector's first matrix's input) and "out". The tracer's other
@@ -1256,6 +1302,14 @@ func (s *State) encodeBegin(px []float32, gh, gw int) error {
 	if err := s.mm(x[first*E:], t.patchW, gather, np); err != nil {
 		return err
 	}
+	// A video's temporal pair: the planes' sum read the first frame, and the
+	// second plane reads the second frame's difference from it, so the row is
+	// x0*W0 + x1*W1 (convert.foldPatchPlanes).
+	if v.px2 != nil {
+		if err := s.patchPair(x[first*E:first*E+np*E], gather, pw, np, pk); err != nil {
+			return err
+		}
+	}
 	// 1b. The class token, if there is one: one learned embedding in row 0,
 	// before the position table is added, so it gets position row 0.
 	if c.CLS {
@@ -1276,7 +1330,7 @@ func (s *State) encodeBegin(px []float32, gh, gw int) error {
 		}
 		rows := v.posRows[:n]
 		table := t.posW
-		if c.Kind == jlm.ProjPhi4 {
+		if c.Kind == jlm.ProjPhi4 || c.Kind == jlm.ProjLFM2 {
 			table = s.phi4Table(gh, gw)
 		}
 		if c.PosAxis > 0 {
@@ -1409,7 +1463,7 @@ func (s *State) encodeBlocks(max int) (bool, error) {
 			// The image's rows and no more: the scratch may hold more rows
 			// than the picture (reserveTowerRows rounds them up), and a row
 			// past the image is a key every row would attend to.
-			if !s.ld.Layers(li, hi, 0, p.n, x, cs, nil, nil) {
+			if !s.towerLayers(li, hi, p.n, x, cs) {
 				// A device that fails mid-image has left the residual in an
 				// unknown state, so this is an error rather than a fallback.
 				why := "no reason given"
@@ -1722,8 +1776,9 @@ func (s *State) project(patches []float32) ([]float32, error) {
 			}
 		}
 		src = v.grp
-		// InternVL's LayerNorm over the grouped row, before the MLP.
-		if c.Kind == jlm.ProjInternVL {
+		// InternVL's LayerNorm over the grouped row, before the MLP, and
+		// LFM2-VL's where its file carries one.
+		if c.Kind == jlm.ProjInternVL || c.Kind == jlm.ProjLFM2 && t.projNorm != nil && !lfm2NoProjNorm {
 			w := c.projK()
 			s.normRows(v.grp, v.grp, t.projNorm, t.projNormB, w, c.Tokens(), true, c.projEps(),
 				s.rowChunk(c.Tokens(), w))
@@ -1748,12 +1803,18 @@ func (s *State) project(patches []float32) ([]float32, error) {
 	//
 	// The activation here is GELU-tanh, not the tower's own: llama.cpp uses
 	// ggml_gelu for the projector. HF's "gelu" is the erf-exact form; the two
-	// differ by <1e-3 and the divergence is deliberate.
+	// differ by <1e-3 and the divergence is deliberate. LFM2-VL's is the erf
+	// form, its reference's (Lfm2VlMultiModalProjector, ACT2FN["gelu"]), where
+	// llama.cpp's lfm2 graph runs the tanh form (RULE 7m).
 	if err := s.mm(v.hid, t.projW, src, nt); err != nil {
 		return nil, err
 	}
 	s.visBiasRows(v.hid, t.projB, nt)
-	s.actAll(v.hid[:nt*t.projW.rows], nn.ActGELU)
+	act := nn.ActGELU
+	if c.Kind == jlm.ProjLFM2 && !lfm2TanhGELU {
+		act = nn.ActGELUErf
+	}
+	s.actAll(v.hid[:nt*t.projW.rows], act)
 	s.jit.NewInput()
 	out := v.out
 	if v.ord != nil {
@@ -2015,4 +2076,56 @@ func (s *State) Vision() (*State, error) {
 		s.visState = v
 	}
 	return s.visState, nil
+}
+
+// towerLayers runs tower blocks [li, hi) over the picture's n rows on the
+// device: one Layers call, or -- where the device built the non-causal set
+// row-chunked because the whole picture's did not fit (nn.RowChunker) --
+// block by block, every chunk's phase 1 before any chunk's phase 2. x and cs
+// are the picture's rows; cs may be nil (a tower with no rotary).
+func (s *State) towerLayers(li, hi, n int, x, cs []float32) bool {
+	rc, ok := s.ld.(nn.RowChunker)
+	c := 0
+	if ok {
+		c = rc.TowerChunk()
+	}
+	if c <= 0 || c >= n {
+		return s.ld.Layers(li, hi, 0, n, x, cs, nil, nil)
+	}
+	e := len(x) / n
+	rw := 0
+	if cs != nil {
+		rw = len(cs) / n
+	}
+	tmp := s.towerChunkX(c * e)
+	for b := li; b < hi; b++ {
+		for phase := 1; phase <= 2; phase++ {
+			for at := 0; at < n; at += c {
+				m := min(c, n-at)
+				xs := x[at*e : (at+m)*e]
+				if phase == 1 {
+					// Phase 1 leaves the rows as they were; the device's
+					// copy goes to scratch so nothing can touch x.
+					xs = append(tmp[:0], xs...)
+				}
+				var cr []float32
+				if cs != nil {
+					cr = cs[at*rw : (at+m)*rw]
+				}
+				if !rc.LayersPhase(b, b+1, at, m, n, phase, xs, cr, nil) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// towerChunkX is phase 1's scratch for one chunk's rows, kept on the vision
+// segment so a warm encode allocates nothing.
+func (s *State) towerChunkX(n int) []float32 {
+	if cap(s.vis.chunkX) < n {
+		s.vis.chunkX = make([]float32, n)
+	}
+	return s.vis.chunkX[:n]
 }
