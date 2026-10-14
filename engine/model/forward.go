@@ -1110,8 +1110,8 @@ func (s *State) SetDeviceLayers(d nn.Device, max int) error {
 		// post-norms are optional per-layer roles.
 		PostNorm:  s.m.hasPostNorm(),
 		NoPreNorm: s.m.hasNoPreNorm(),
-		// BitNet's inner norms, which the arch carries on every block.
-		SubNorm:     c.TokenAct,
+		// BitNet's inner norms, read off the weights as the post-norms are.
+		SubNorm:     s.m.hasSubNorm(),
 		AttnSoftcap: c.AttnSoftcap,
 		ActWin:      s.jit.ActWindow(),
 		// Zero for a dense model, which is what makes every existing plan

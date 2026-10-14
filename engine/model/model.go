@@ -4029,6 +4029,16 @@ func (m *Model) hasNoPreNorm() bool {
 	return false
 }
 
+// hasSubNorm reports whether some block carries BitNet's inner norms.
+func (m *Model) hasSubNorm() bool {
+	for i := range m.layers {
+		if l := &m.layers[i]; l.attnSubNorm != nil || l.ffnSubNorm != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // hasPostNorm reports whether some block carries gemma2's post-norms.
 func (m *Model) hasPostNorm() bool {
 	// By index: a copy of each layer would read its bindings, which another

@@ -46,6 +46,13 @@ var bitnetFixtures = []struct {
 	{"synth-bitnet-f16.gguf", "synth-bitnet-online-f16", quant.TQ2_0},
 }
 
+// BitNet's two GGUF fixtures run the five principles' gates (paging,
+// relocation, the batch faulting its blocks in, zero allocations), one with
+// an f16 scale (TQ2_0) and one with an f32 (TQ2_F32).
+func init() {
+	principleFixtures = append(principleFixtures, "synth-bitnet-f16.gguf", "synth-bitnet-i2s.gguf")
+}
+
 // bitnetNMSE is the bound against transformers, and bitnetExact the level an
 // unflipped position reads at. A position reads 1e-13 until one activation
 // sits within a few ulps of a rounding boundary (33.499996 against the

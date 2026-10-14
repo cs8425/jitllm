@@ -211,14 +211,14 @@ func packSub(qs []uint32, q []int32, qi qinfo, si, nrows, r int) {
 	pw := qi.sub * qi.bits / 32
 	hw := qi.sub * qi.hi / 32
 	var out [32]byte
-	if qi.bits == 4 {
-		h := qi.sub / 2
+	if qi.bits < 8 {
+		// Fields(qi) fields a byte: element l is field l/(sub/fields) of byte
+		// l%(sub/fields), so a byte's fields are elements a field-run apart
+		// -- the 4-bit formats' two nibbles half a sub-block apart, TQ2's four
+		// 2-bit codes a quarter apart.
+		n := qi.sub / Fields(qi)
 		for l := 0; l < qi.sub; l++ {
-			if l < h {
-				out[l] |= byte(q[l]) & 0xF
-			} else {
-				out[l-h] |= byte(q[l]) << 4
-			}
+			out[l%n] |= (byte(q[l]) & byte(1<<uint(qi.bits)-1)) << uint(qi.bits*(l/n))
 		}
 	} else {
 		for l := 0; l < qi.sub; l++ {
@@ -237,6 +237,14 @@ func packSub(qs []uint32, q []int32, qi qinfo, si, nrows, r int) {
 		qs[(si*(pw+hw)+w)*nrows+r] = binary.LittleEndian.Uint32(out[4*w:])
 	}
 }
+
+// Fields is how many primary codes one payload byte holds: two nibbles, four
+// 2-bit codes, or one byte. A field-run, sub/Fields elements, is how far apart
+// a byte's fields are (packSub).
+func Fields(qi qinfo) int { return 8 / qi.bits }
+
+// FieldsOf is Fields for a format, for an emitter.
+func FieldsOf(q Quant) int { return Fields(q.info()) }
 
 // extract pulls one sub-block's integer quants out of a GGUF block, along with
 // the raw f16 bits of its super-scale and the integer per-sub-block scale.
