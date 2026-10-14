@@ -1250,6 +1250,10 @@ type Model struct {
 	// the plan (planRuns).
 	expIONs  int64
 	expReads int64
+	// hostExperts is set once a device has run a block's routed experts on
+	// the host from inside its submission (hybrid experts): from then on a
+	// short prompt takes the decode path (forwardRowsFor).
+	hostExperts atomic.Bool
 	expBytes int64
 	expCalls int64
 	// hostStepRows is the rows StepRuns has run as host steps across
