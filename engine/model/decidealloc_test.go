@@ -174,7 +174,7 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 	for range 2 {
 		for _, req := range decisionRequests {
 			state, qs := decisionRequest(t, filepath.Join("testdata", "decision", req+".json"))
-			reqs = append(reqs, DecisionRequest{state, qs})
+			reqs = append(reqs, DecisionRequest{State: state, Questions: qs})
 		}
 	}
 	for range 2 {

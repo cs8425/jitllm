@@ -161,7 +161,7 @@ func TestDecisionMatchesLlamaCpp(t *testing.T) {
 						if d.st != nil && d.st.KVIsF16() != arm.f16 {
 							t.Fatalf("the kv cache is f16=%v, the arm asked for %v", d.st.KVIsF16(), arm.f16)
 						}
-						ans, err := d.Decide(state, qs)
+						ans, err := d.Decide(state, qs, nil)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -214,7 +214,7 @@ func TestDecisionReadoutIsLoadBearing(t *testing.T) {
 			}
 			defer d.Close()
 			d.violation = c.violation
-			ans, err := d.Decide(state, qs)
+			ans, err := d.Decide(state, qs, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -305,7 +305,7 @@ func TestDecisionPicksOnTheHost(t *testing.T) {
 				var out [][]DecisionAnswer
 				for _, req := range decisionRequests {
 					state, qs := decisionRequest(t, filepath.Join("testdata", "decision", req+".json"))
-					ans, err := d.Decide(state, qs)
+					ans, err := d.Decide(state, qs, nil)
 					if err != nil {
 						t.Fatal(err)
 					}

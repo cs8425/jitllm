@@ -9316,6 +9316,63 @@ encoder and the head now each hold the set for their own geometry
 (`JIT.AttnSetFor`). The real checkpoint could not have shown it: 1024 wide at
 16 heads, both widths are 64.
 
+## LFM2-VL and d1's pictures
+
+d1-3B (LiquidAI/d1-3B, its GGUF and `mmproj-d1-3B-F16.gguf`) reads
+pictures: llama.cpp's projector type `lfm2`, `jlm.ProjLFM2`. The tower is
+Phi-4-reasoning-vision's SigLIP2 NaFlex with the post-LayerNorm kept
+(transformers' `last_hidden_state`; all 27 blocks, `vision_feature_layer`
+absent), the projector InternVL's shape: the 2x2 unshuffle, a LayerNorm
+when the file has one (d1's has none), linear, GELU, linear.
+
+What the file does not state is the class's: Lfm2VlImageProcessor's 64 to
+256 tokens a piece, 2 to 10 tiles of 512 pixels past twice the budget, a
+thumbnail at the smart-resized size. The converter writes them into the
+container (`Vision.MinPixels/MaxPixels/MinTiles/MaxTiles` and a new tail,
+`TileSize`, `Tolerance`), and the file's `image_resize_algo` as
+`FlagVisionBicubic` (the class default is bilinear; d1's file says bicubic).
+The tile choice is InternVL's `gridOf` unchanged; the resize is torchvision's
+8-bit one (`rgb8.resize`), which differs from Pillow's in a few dozen samples
+a picture (its int16 weights against Pillow's 22-bit ones).
+
+Two places jitllm follows the model's own code and not llama.cpp
+(RULE 7m): the projector's GELU is transformers' erf form (llama.cpp's lfm2
+graph runs the tanh form; d1-omni's runs erf), and a picture over 1024x1024
+is first resized to that many pixels with Pillow BICUBIC, as d1's
+`runner.cap_pixels` does before its processor; llama.cpp hands mtmd the
+picture as it came. The GELU form is under the int8 activations' noise
+(projector alone, 2.443e-3 erf against 2.443e-3 tanh on quad-and-disc).
+
+A decision request carries pictures as llama.cpp's server reads them
+(`model.DecisionMedia`): `files` then `images` data URLs, then every
+`image_url` part of a chat-message state, taken out of its message; at most
+8; `videos` refused. The systemone template writes one marker per picture
+and each becomes its LFM2 run (`<|image_start|>`, `<|img_row_R_col_C|>` and
+the tile, `<|img_thumbnail|>` and the thumbnail, `<|image_end|>`). Every
+question re-prefills the picture's rows from the model's image cache; the
+tower runs once per request.
+
+What the gates measured (laptop i7-12700H, AVX2 host, RTX 3050 Ti 4 GB under
+CUDA and Vulkan; M4 mini, arm64 host and Metal):
+
+| gate | result |
+|---|---|
+| `TestLFM2LayoutMatchesProcessor` | 21 sizes, 11 tiled, every plan the processor's |
+| `TestLFM2RealMatchesTransformers`, pixels | 0 differing values on 4 pictures (1, 1, 5 and 4 pieces) |
+| tower rows against transformers f32 | NMSE 4.4e-5 to 1.3e-4 |
+| projector alone on the reference rows | 2.4e-3 to 5.9e-3; transformers' own projector with int8 inputs reads 2.7e-3 against itself on the photo |
+| violations | bilinear resize moves 2e5-2e6 samples; no thumbnail fails by shape; transposed table NMSE 0.33-1.12; transposed unshuffle 0.10-0.37 |
+| tower, all 27 blocks on CUDA / Vulkan / Metal | 1.6e-3 / 6.6e-4 to 1.9e-3 / 1.7e-3 to 3.7e-3 against the host |
+| `TestD1DecidesOverPicturesAsItsReference` (d1's runner.py, f32, 8 requests of 3 questions) | worst probability 0.0263 (laptop host), 0.0183 (M4 host), 0.0160 (Metal, every text block); another picture's rows read 0.97 |
+| `TestD1PicturesMatchLlamaCpp` (llama-server, same GGUF and mmproj) | positions 978 and 702, llama.cpp's exactly; worst probability 0.0083 and 0.0091 |
+| `TestWarmImageEncodeDoesNotAllocate/lfm2` | 0 allocations |
+| `TestEveryTowerRunsSSE/lfm2` | pixels bit-identical, encode NMSE 9.6e-4 against AVX2 |
+
+Not yet run: the decision gate with every text block on a card (the 4 GB
+laptop card holds 7 of 30 under CUDA and 2 under Vulkan beside the tower;
+the V100s were busy with another agent's measurement), and a randomised
+LFM2-VL fixture through llama.cpp's own converter (the gates above run the
+real checkpoint).
 ### Clef-Flash
 
 Clef-Flash is qwen35 with a joint schema head (`jlm.DecisionClef`): one prompt

@@ -205,7 +205,7 @@ func TestDecisionRelocatesBetweenDevices(t *testing.T) {
 			defer d.Close()
 			state, qs := decisionRequest(t, filepath.Join("testdata", "decision", "support.json"))
 			answer := func() [][]DecisionAnswer {
-				ans, err := d.Decide(state, qs)
+				ans, err := d.Decide(state, qs, nil)
 				if err != nil {
 					t.Fatal(err)
 				}

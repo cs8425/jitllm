@@ -104,7 +104,7 @@ func TestSystemOneBatchesConcurrentRequests(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				ans, err := d.Decide(state, qs)
+				ans, err := d.Decide(state, qs, nil)
 				if err != nil {
 					t.Fatal(err)
 				}

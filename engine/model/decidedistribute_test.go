@@ -171,7 +171,7 @@ func TestDecisionMovesBetweenCards(t *testing.T) {
 			t.Run("between-questions", func(t *testing.T) {
 				state, qs := decisionRequest(t, filepath.Join("testdata", "decision", "support.json"))
 				answer := func() [][]DecisionAnswer {
-					ans, err := d.Decide(state, qs)
+					ans, err := d.Decide(state, qs, nil)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -300,10 +300,10 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 			for range 2 {
 				for _, r := range decisionRequests {
 					state, qs := decisionRequest(t, filepath.Join("testdata", "decision", r+".json"))
-					reqs = append(reqs, DecisionRequest{state, qs})
+					reqs = append(reqs, DecisionRequest{State: state, Questions: qs})
 				}
 			}
-			bad := DecisionRequest{reqs[0].State, nil} // no questions: refused alone
+			bad := DecisionRequest{State: reqs[0].State} // no questions: refused alone
 			reqs = append(reqs[:1], append([]DecisionRequest{bad}, reqs[1:]...)...)
 			arms := []*tier.GPU{nil}
 			arms = append(arms, decisionDevices(t)...)
@@ -334,7 +334,7 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 							alone, tokens = append(alone, nil), append(tokens, 0)
 							continue
 						}
-						ans, err := d.Decide(r.State, r.Questions)
+						ans, err := d.Decide(r.State, r.Questions, nil)
 						if err != nil {
 							t.Fatal(err)
 						}
