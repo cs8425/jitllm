@@ -156,7 +156,9 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 	at := 0
 	for r := range reqs {
 		res := &out[r]
-		if res.Err != nil {
+		// A request that failed alone, or that ran alone (its media), has
+		// its answer already and no job in the batch.
+		if res.Err != nil || res.Answers != nil {
 			continue
 		}
 		qs := reqs[r].Questions
