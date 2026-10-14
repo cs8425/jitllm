@@ -65,33 +65,48 @@ def requests(requests_dir):
             yield name[:-5], body
 
 
-def pictures(body):
-    """The request's images, data URLs decoded to PIL pictures."""
+def decode(u):
+    """A data URL's picture, as PIL decodes it."""
     import base64
     import io
     from PIL import Image
+    head, data = u.split(",", 1)
+    return Image.open(io.BytesIO(base64.b64decode(data))).convert("RGB")
+
+
+def pictures(body):
+    """The request's images, data URLs decoded to PIL pictures."""
+    return [decode(u) for u in body.get("images") or []]
+
+
+def videos(body):
+    """The request's videos, each its frames decoded (Clef's frame arrays),
+    with no frame rate: what Clef's code is handed for frames alone."""
+    import numpy as np
     out = []
-    for u in body.get("images") or []:
-        head, data = u.split(",", 1)
-        out.append(Image.open(io.BytesIO(base64.b64decode(data))).convert("RGB"))
+    for v in body.get("videos") or []:
+        frames = v["frames"] if isinstance(v, dict) else v
+        out.append(np.stack([np.asarray(decode(u)) for u in frames]))
     return out
 
 
 def goldens(jsm, model, tok, body, processor=None):
     req = dict(body, model="clef")
     proc = types.SimpleNamespace(tokenizer=tok)
-    if req.get("images"):
+    media = bool(req.get("images") or req.get("videos"))
+    if media:
         if processor is None:
-            raise SystemExit("a request with images needs the release's processor")
+            raise SystemExit("a request with images or videos needs the release's processor")
         req["images"] = pictures(body)
+        req["videos"] = videos(body)
         proc = processor
     with torch.no_grad():
         answer = jsm.systemone(model, proc, req)
-        rec = jsm.encode_record(tok, req, processor=proc if req.get("images") else None)
+        rec = jsm.encode_record(tok, req, processor=proc if media else None)
         batch = jsm.collate_records([rec], tok.pad_token_id or 0, torch.device("cpu"))
         logits = model(batch)[0]
         logits_a8 = None
-        if req.get("images"):
+        if media:
             # The tower at the engine's arithmetic: every Linear's input in
             # the tower and its merger rounded to q8 per 32, and the patch
             # embedding's input -- the frame, which the engine reads once
@@ -108,11 +123,15 @@ def goldens(jsm, model, tok, body, processor=None):
                 if isinstance(mod, torch.nn.Linear):
                     mod.weight.copy_(q8rows(mod.weight))
                 elif isinstance(mod, torch.nn.Conv3d):
+                    # The container's two matrices: the planes' sum and the
+                    # second plane, each Q8_0; the input hook below hands
+                    # them the first frame and the frames' difference.
                     w = mod.weight  # (out, c, t, p, p)
                     o, c, t, ph, pw = w.shape
                     folded = q8rows(w.sum(2).reshape(o, c * ph * pw)).reshape(o, c, ph, pw)
-                    w.zero_()
+                    second = q8rows(w[:, :, 1].reshape(o, c * ph * pw)).reshape(o, c, ph, pw)
                     w[:, :, 0] = folded
+                    w[:, :, 1] = second
             hooks = []
             for mname, mod in model.named_modules():
                 if ".visual." not in "." + mname + ".":
@@ -124,8 +143,9 @@ def goldens(jsm, model, tok, body, processor=None):
                         x = inp[0]
                         c, t, ph, pw = m.in_channels, m.kernel_size[0], m.kernel_size[1], m.kernel_size[2]
                         x5 = x.reshape(-1, c, t, ph, pw)
-                        f = qact(x5[:, :, 0].reshape(-1, c * ph * pw)).reshape(-1, c, 1, ph, pw)
-                        return (f.expand(-1, c, t, ph, pw).reshape(x.shape),)
+                        f0 = qact(x5[:, :, 0].reshape(-1, c * ph * pw)).reshape(-1, c, ph, pw)
+                        d = qact((x5[:, :, 1] - x5[:, :, 0]).reshape(-1, c * ph * pw)).reshape(-1, c, ph, pw)
+                        return (torch.stack([f0, d], 2).reshape(x.shape),)
                     hooks.append(mod.register_forward_pre_hook(conv_in))
             try:
                 logits_a8 = model(batch)[0]

@@ -386,21 +386,31 @@ func (d *Decider) clefPrompt(state jinja.Value, qs []DecisionQuestion) (*clefPro
 	prefix := enc("<|im_start|>system\n" + clefSystem + "<|im_end|>\n<|im_start|>user\nSTATE:\n")
 	// The pictures (encode_record's _encode_media): each one's markers and
 	// rows, then a newline, between the prefix and the state.
+	// The pictures, then the videos (each pair of frames a Picture whose
+	// rows stand as <|video_pad|>).
 	var media []Span
 	var mediaIDs []int32
-	if len(d.pics) > 0 {
-		pad, ok := d.m.Vocab.ID("<|image_pad|>")
-		if !ok {
-			return nil, fmt.Errorf("the vocabulary has no <|image_pad|>")
+	if len(d.pics) > 0 || len(d.vids) > 0 {
+		pad, ok1 := d.m.Vocab.ID("<|image_pad|>")
+		vpad, ok2 := d.m.Vocab.ID("<|video_pad|>")
+		if !ok1 || !ok2 {
+			return nil, fmt.Errorf("the vocabulary has no <|image_pad|> and <|video_pad|>")
 		}
 		for _, run := range d.pics {
+			media = append(media, run...)
+		}
+		for _, run := range d.vids {
 			media = append(media, run...)
 		}
 		media = append(media, Span{Tokens: enc("\n")})
 		for _, sp := range media {
 			if sp.Picture != nil {
+				id := pad
+				if sp.Picture.Pixels2 != nil {
+					id = vpad
+				}
 				for range sp.Picture.Rows {
-					mediaIDs = append(mediaIDs, pad)
+					mediaIDs = append(mediaIDs, id)
 				}
 				continue
 			}
