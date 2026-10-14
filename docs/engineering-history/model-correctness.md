@@ -9368,11 +9368,28 @@ CUDA and Vulkan; M4 mini, arm64 host and Metal):
 | `TestWarmImageEncodeDoesNotAllocate/lfm2` | 0 allocations |
 | `TestEveryTowerRunsSSE/lfm2` | pixels bit-identical, encode NMSE 9.6e-4 against AVX2 |
 
-Not yet run: the decision gate with every text block on a card (the 4 GB
-laptop card holds 7 of 30 under CUDA and 2 under Vulkan beside the tower;
-the V100s were busy with another agent's measurement), and a randomised
-LFM2-VL fixture through llama.cpp's own converter (the gates above run the
-real checkpoint).
+The fixture (`scripts/lfm2visiongold.py --fixture`, `synth-lfm2vl`):
+transformers' Lfm2VlForConditionalGeneration at toy size, every parameter and
+buffer randomised, with the projector LayerNorm d1 lacks, both GGUFs from
+llama.cpp's converter (the text model as the Lfm2ForCausalLM it is, the tower
+renamed to the published checkpoints' `vision_tower.vision_model.*`, three
+tower blocks because the converter names `linear_2` by a block index), and a
+1100x700 picture cut into 3x2 tiles and a thumbnail. Against transformers at
+the engine's arithmetic (Q8 weights and q8 activations in the reference): the
+tower 3.8e-5, the projector 1.3e-4, the projector alone 5.7e-8; every prompt
+position the processor's (markers, picture rows, text); logits from the pixels
+7.8e-7 with no argmax flip; every text and tower block on CUDA 7.0e-10 and
+Vulkan 2.0e-12 against the host. Each feature removed is seen by the projector
+alone: no LayerNorm 0.23, the tanh GELU 1.5e-6 (26x the clean arm, the fixture
+being where the erf form is visible), the transposed unshuffle 2.9e-2; the
+transposed position table 1.9e-3 from the pixels.
+
+Relocation and paging: `TestTowerEncodeResumesAcrossARelocation/lfm2` (the
+tower's first blocks on the card, then home mid-encode, under a two-page
+budget) is bit-identical on CUDA and Vulkan, and `TestD1PicturesMatchLlamaCpp`
+answers both picture requests to the bit under a budget of four text pages
+and two tower pages.
+
 ### Clef-Flash
 
 Clef-Flash is qwen35 with a joint schema head (`jlm.DecisionClef`): one prompt
@@ -9391,6 +9408,52 @@ so the in-memory model the first goldens came from was one no checkpoint can
 hold (0.16 of a logit off, every row but the first matching the reloaded
 backbone to 2e-5). The goldens now come from the checkpoint as written, read
 back as the release is read, and only persistent tensors are randomised.
+
+### Clef's pictures and videos
+
+A Clef request may carry `images` and `videos` (the request shape d1's
+takes; a video is Clef's "frame array", here an array of frame data URLs or
+`{"frames": [...], "fps": rate}`). Clef's own code (`encode_record`) puts
+the processor's expansion of `"<|vision_start|><|image_pad|><|vision_end|>"`
+per picture and `"<|vision_start|><|video_pad|><|vision_end|>"` per video,
+then a newline, between `STATE:\n` and the state; the head's spans are row
+indexes, so a picture's rows count as the processor's pads do
+(`clefPrompt`). A picture is the Qwen3.5 tower's one Picture between its
+markers. A video is Qwen3VLVideoProcessor's: frames sampled at 2 a second
+(`np.linspace`, rounded half to even) -- at the 24 frames a second the
+reference assumes when frames come with no rate --, every frame resized to
+one size by the video smart_resize over all frames (torchvision's 8-bit
+bicubic), paired by temporal_patch_size 2 with the last repeated, each pair
+one Picture whose patches attend only to each other (the reference's
+per-frame cu_seqlens), laid out as `<t seconds>` (the pair's two frames'
+mean time, `%.1f`) and its rows between markers, all inside the
+placeholder's own markers.
+
+A pair is two different frames, which a container whose patch embedding was
+folded to the planes' sum cannot read; `convert.foldPatchPlanes` now keeps
+the second plane beside the sum (`RoleVPatchEmbd` index 1), and a pair's
+row is x0*(W0+W1) + (x1-x0)*W1 (`State.patchPair`, generated gather,
+difference and add). A container converted before carries no second plane
+and refuses a video by name.
+
+Gates (`TestClefMediaMatchesReference`, laptop host, RTX 3050 Ti under CUDA
+and Vulkan): a fixture like Clef's random one but with the release's 48x48
+position table (`clefgold.py fixture-vl`; the 8x8 table of the text
+fixture reads a picture at 128 pixels where the processor reads 384), its
+goldens with the reference's tower inputs and matrices rounded as the
+container's are (`logits_a8`). Every row and span is the reference's. Two
+pictures: 5.5e-4 from the reference's logits (8.1e-3 against its f32 tower),
+5.2e-4 on CUDA and 5.5e-4 on Vulkan with every block; the pictures left out
+move 0.126. A video of ten frames (four sampled, two pairs): 1.4e-4 (2.3e-3
+against the f32 tower), 2.0e-4 on CUDA; the media left out move 0.066, and
+each pair's second frame read as its first 0.081.
+
+Two places Clef's processor and this engine's tower part, recorded rather
+than built: Clef's image bounds are 65536 to 16777216 pixels where every
+Qwen-VL tower here is bounded by the mmproj's image_size squared (768 for
+Clef, llama.cpp's convention), so a picture over 768x768 pixels is read
+smaller than Clef reads it; and a video frame larger than the tower's
+bound is refused by name rather than shrunk.
 
 ## qwen4exp: Qwen3.8-Flash-Next (plan, before the code)
 

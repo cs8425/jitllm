@@ -105,6 +105,10 @@ type Decider struct {
 	// allocates nothing.
 	one [1]Span
 
+	// vids is the request in flight's videos, each its run of the prompt
+	// (cutVideos); nil between requests.
+	vids [][]Span
+
 	// pics is the request in flight's pictures, each its run of the prompt
 	// (cutPictures); nil between requests and for a text request.
 	pics [][]Span
@@ -263,7 +267,9 @@ func (d *Decider) Prepare(state jinja.Value, qs []DecisionQuestion, images int) 
 	if len(qs) == 0 {
 		return fmt.Errorf("questions must be a non-empty object")
 	}
-	if (state.IsNone() || state.IsUndefined()) && d.kind != jlm.DecisionLFM2D1 {
+	// d1 and Clef read a null state (pictures alone): d1's runner and
+	// llama.cpp allow it, and Clef's systemone renders it as JSON null.
+	if (state.IsNone() || state.IsUndefined()) && d.kind != jlm.DecisionLFM2D1 && d.kind != jlm.DecisionClef {
 		return fmt.Errorf("state must be provided")
 	}
 	for i := range qs {
@@ -297,11 +303,20 @@ func (d *Decider) Prepare(state jinja.Value, qs []DecisionQuestion, images int) 
 // the request's questions in its order; the answers come back in the same
 // order. imgs are the request's pictures, in its order (d1 only).
 func (d *Decider) Decide(state jinja.Value, qs []DecisionQuestion, imgs []image.Image) ([]DecisionAnswer, error) {
+	return d.DecideMedia(state, qs, imgs, nil)
+}
+
+// DecideMedia is Decide for a request that carries videos too (Clef's).
+func (d *Decider) DecideMedia(state jinja.Value, qs []DecisionQuestion, imgs []image.Image,
+	vids []VideoFrames) ([]DecisionAnswer, error) {
 	if err := d.Prepare(state, qs, len(imgs)); err != nil {
 		return nil, err
 	}
+	if err := d.checkVideos(len(vids), len(imgs)); err != nil {
+		return nil, err
+	}
 	d.input = 0
-	d.pics = nil
+	d.pics, d.vids = nil, nil
 	if len(imgs) > 0 {
 		pics, err := d.cutPictures(imgs)
 		if err != nil {
@@ -310,6 +325,14 @@ func (d *Decider) Decide(state jinja.Value, qs []DecisionQuestion, imgs []image.
 		d.pics = pics
 		defer func() { d.pics = nil }()
 		state = replaceText(state, decisionMarker, " ")
+	}
+	if len(vids) > 0 {
+		v, err := d.cutVideos(vids)
+		if err != nil {
+			return nil, err
+		}
+		d.vids = v
+		defer func() { d.vids = nil }()
 	}
 	out := make([]DecisionAnswer, len(qs))
 	if d.kind == jlm.DecisionClef {
@@ -1096,11 +1119,34 @@ func jsonString(s string) string { return jinja.NewString(s).JSON() }
 
 func jsonFloat(f float64) string { return strconv.FormatFloat(f, 'g', -1, 64) }
 
-// ParseDecisionRequest reads a /v1/systemone body: the model it names (""
-// when none), the state and the questions, every object's keys in the order
-// the body wrote them, and the pictures' data URLs in request order
-// (DecisionMedia, which takes them out of the state).
-func ParseDecisionRequest(body []byte) (string, jinja.Value, []DecisionQuestion, []string, error) {
+// DecisionBody is a /v1/systemone body as ParseDecisionRequest reads it.
+type DecisionBody struct {
+	// Model is the model it names, "" when none.
+	Model     string
+	State     jinja.Value
+	Questions []DecisionQuestion
+	// Images are the pictures' data URLs in request order (DecisionMedia,
+	// which takes them out of the state); Videos the videos'
+	// (DecisionVideos).
+	Images []string
+	Videos []VideoURLs
+}
+
+// ParseDecisionRequest reads a /v1/systemone body, every object's keys in the
+// order the body wrote them.
+func ParseDecisionRequest(body []byte) (DecisionBody, error) {
+	var out DecisionBody
+	var err error
+	out.Model, out.State, out.Questions, out.Images, err = parseDecisionRequest(body)
+	if err != nil {
+		return out, err
+	}
+	v, _ := jinja.FromJSON(body)
+	out.Videos, err = DecisionVideos(v.AsDict())
+	return out, err
+}
+
+func parseDecisionRequest(body []byte) (string, jinja.Value, []DecisionQuestion, []string, error) {
 	v, err := jinja.FromJSON(body)
 	if err != nil {
 		return "", jinja.None(), nil, nil, fmt.Errorf("the request is not JSON: %w", err)
