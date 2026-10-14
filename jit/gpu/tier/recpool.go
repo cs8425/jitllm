@@ -261,6 +261,8 @@ func (g *devTier) recZeroLayers(ls []*layer, base, rows int) error {
 		return nil
 	}
 	var zb backend.Buf
+	var zeros []byte
+	hostZeros := false
 	if uint64(n) <= g.recZerosBytes {
 		zb = g.recZeros
 	}
@@ -276,14 +278,28 @@ func (g *devTier) recZeroLayers(ls []*layer, base, rows int) error {
 				if b.buf == nil || b.w == 0 {
 					continue
 				}
-				if zb == nil {
+				if zb == nil && !hostZeros {
 					var err error
 					if zb, err = g.allocBytes(make([]byte, n)); err != nil {
+						// A card with no room for the kept zeros still has its
+						// pools: their slots take zeros written from the host,
+						// as a new pool's do (newRecPool).
+						hostZeros = true
+					} else {
+						g.RecZeroSource += uint64(n)
+						g.dropRecZeros()
+						g.recZeros, g.recZerosBytes = zb, uint64(n)
+					}
+				}
+				if hostZeros {
+					if len(zeros) < rows*b.w*4 {
+						zeros = make([]byte, rows*b.w*4)
+					}
+					if err := b.buf.WriteAt(base*b.w*4, zeros[:rows*b.w*4]); err != nil {
 						return err
 					}
-					g.RecZeroSource += uint64(n)
-					g.dropRecZeros()
-					g.recZeros, g.recZerosBytes = zb, uint64(n)
+					g.RecZeroBytes += uint64(rows * b.w * 4)
+					continue
 				}
 				if err := g.dev.Copy(b.buf, base*b.w*4, zb, 0, rows*b.w*4); err != nil {
 					return err

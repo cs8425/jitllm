@@ -1396,6 +1396,25 @@ type RowsDevice interface {
 	LayersRows(lo, hi int, pos, slot []int, seqLen int, x, cs, csSWA []float32, head *Head) bool
 }
 
+// RowsWidther is a RowsDevice that states how many rows one LayersRows call
+// can take: RowsWidth(want) is the widest step of at most want rows whose
+// batched scratch every device holding a block holds or can build in its
+// budget now, 0 when not even the narrowest fits. A caller filling steps
+// (model.Scheduler) keeps under it, since a step wider than the scratch is
+// refused rather than split.
+type RowsWidther interface {
+	RowsWidth(want int) int
+}
+
+// RowsRoomer is a RowsDevice that says, before a step runs, whether every
+// device holding a block has room for it: the batched scratch for rows rows
+// and a recurrent state for each of seqs sequences, built or grown now. A step
+// it has no room for is refused before anything runs, so a caller asks first
+// and brings its blocks home rather than fail the step.
+type RowsRoomer interface {
+	RowsRoom(rows, seqs int) bool
+}
+
 // SeqKVDevice is a LayerDevice that keeps attention history per sequence --
 // the device pages it (docs/design/device-kv-paging.md) -- rather than one
 // cache laid out in RowsDevice's slots. A batch's rows then migrate one at a
