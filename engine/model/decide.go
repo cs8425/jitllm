@@ -193,6 +193,17 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 		}
 		d.maxOptions = len(d.labels)
 	case jlm.DecisionLFM2D1:
+	case jlm.DecisionOpenJev:
+		// One letter per option, each of which must be one token
+		// (server-decision.cpp).
+		for _, c := range "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" {
+			id, ok := d.single(string(c))
+			if !ok {
+				return nil, fmt.Errorf("model: openjev's label %q is not one token", c)
+			}
+			d.labels = append(d.labels, id)
+		}
+		d.maxOptions = len(d.labels)
 	case jlm.DecisionClef:
 		d.st = m.NewState(maxSeq)
 		if err := d.clefInit(); err != nil {
@@ -398,7 +409,7 @@ func (d *Decider) variants(q *DecisionQuestion) int {
 // order is the question's options in the order the prompt shows them: d1
 // shows a noul true first.
 func (d *Decider) order(q *DecisionQuestion) []DecisionOption {
-	if (d.kind == jlm.DecisionLFM2D1 || d.kind == jlm.DecisionClef) && q.Type == jlm.QuestionNoul && d.violation != "false-first" {
+	if (d.kind == jlm.DecisionLFM2D1 || d.kind == jlm.DecisionClef || d.kind == jlm.DecisionOpenJev) && q.Type == jlm.QuestionNoul && d.violation != "false-first" {
 		return []DecisionOption{q.Options[1], q.Options[0]}
 	}
 	return q.Options
@@ -586,6 +597,11 @@ func (d *Decider) promptText(state jinja.Value, q *DecisionQuestion, v int) (str
 			n = levRatings
 		}
 		for _, id := range d.labels[:n] {
+			groups = append(groups, []int32{id})
+		}
+	case jlm.DecisionOpenJev:
+		// The template writes the letters itself.
+		for _, id := range d.labels[:len(opts)] {
 			groups = append(groups, []int32{id})
 		}
 	case jlm.DecisionLFM2D1:

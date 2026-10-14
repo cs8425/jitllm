@@ -173,6 +173,20 @@ it covers most of the family with no new architecture.
 - **Mode B** (`mode_b_head.pt`, a candidate-path head for large option sets) is
   not converted by llama.cpp; lev's server routes choice sets over the tokenizer
   limit to it. Not in scope until mode A is done.
+
+### OpenJev (openjev/openjev; GGUF ggml-org/OpenJev-GGUF)
+
+- **Backbone**: qwen35 with a qwen3vl tower.
+- **Readout**: label-token logits (`decision.type = openjev`). One letter per
+  option, A..Z then a..z, each required to be one token, so at most 52
+  options; the template writes the letters itself. One prompt per question;
+  a noul is shown true first. Temperatures per question type from the file,
+  TypeSafe's confidence.
+- **jitllm**: `jlm.DecisionOpenJev`, held to llama-server on llama.cpp's own
+  test model (ggml-org/tinyopenjev-for-testing-gguf, a random 33M qwen35) in
+  every decision gate. Pictures are not on: the test model's tower is F16 at a
+  width of 144, which the converter cannot quantize (k not a multiple of 32),
+  so a picture request is refused until a tower matrix at that width converts.
 - **Prompt**: Qwen chat format, system prompt "You are a System One decision
   model...", `# Evidence`, `# Criterion`, `# Options` / `# Scale`, an empty
   `<think>` block, JSON keys sorted.
