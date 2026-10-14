@@ -175,7 +175,7 @@ type Config struct {
 	// (kernels.MatVecShape.Gate2): each workgroup sums its rows of both
 	// matrices over the one operand and writes act(gate)*up, the bits the
 	// gate's launch and up's gated launch write, where the backend's lowering
-	// makes that exact (kernels.Gate2Exact). Off by default.
+	// makes that exact (kernels.Gate2Exact). On by default.
 	GateUp2 bool
 	// ActInPrefetch is how many weight words each thread of an operand-prologue
 	// matvec prefetches before its prologue (kernels.ActIn.Prefetch): 0 is the
@@ -2041,6 +2041,9 @@ func New(slots []Slot, options ...Option) (*GPU, error) {
 	// (PersistByDefaultForTest), so the regression gates run through it.
 	cfg.Persist = persistDefault
 	cfg.PersistDeps = persistDepsDefault
+	// Gate2 is the default where it is exact (kernels.Gate2Exact): on a V100
+	// it read 1.008-1.028 of the two launches on Llama 1B, 3B and 8B.
+	cfg.GateUp2 = true
 	for _, f := range o.cfg {
 		f(cfg)
 	}
