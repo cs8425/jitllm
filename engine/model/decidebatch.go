@@ -30,6 +30,9 @@ type DecisionRequest struct {
 	// Videos are the request's videos (Clef's); a request with one runs on
 	// its own too.
 	Videos []VideoFrames
+	// Audio is the request's voice clip, 16 kHz mono samples (d1-omni's);
+	// a request with one runs on its own (DecideAudio).
+	Audio []float32
 }
 
 // decisionBatchRows is the most prompts one batch session runs at once.
@@ -118,6 +121,11 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 		// both requests as one batch took 19.8x (d1) and 19.1x (lev) the
 		// requests alone. A batch on the host is faster than alone (0.64x d1,
 		// 0.84x lev) and stays one.
+		if len(rq.Audio) > 0 {
+			res.Answers, res.Err = d.DecideAudio(rq.State, rq.Questions, rq.Audio)
+			res.InputTokens = d.InputTokens()
+			continue
+		}
 		if len(rq.Images) > 0 || len(rq.Videos) > 0 || d.batchAlone() {
 			res.Answers, res.Err = d.DecideMedia(rq.State, rq.Questions, rq.Images, rq.Videos)
 			res.InputTokens = d.InputTokens()
