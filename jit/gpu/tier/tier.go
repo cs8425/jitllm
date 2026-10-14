@@ -707,7 +707,7 @@ type Stats struct {
 	// launch and whose down formed act(gate)*up (Config.GateUpFuse).
 	GateUpFused int
 	// GateUpWhy is why the last block's gate and up could not be fused.
-	GateUpWhy string
+	GateUpWhy                              string
 	RagQKVFused, RagResFused, RagGateFused int
 	// PersistLaunches counts persistent kernels launched (Config.Persist),
 	// PersistParts the per-op launches they ran, PersistPhases their
