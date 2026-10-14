@@ -148,6 +148,9 @@ type lane struct {
 	// exactWs are the prompt chunk widths built for a chunk's own width
 	// (layersFor), least recently used first (keepExact).
 	exactWs []int
+	// noRoom is the batched widths prepBatch built and then refused for the
+	// budget, by geometry set, with the budget as it stood (noRoomFor).
+	noRoom map[noRoomKey]budgetAt
 	// planeCap narrows the vision score planes below planeBudget's when a
 	// picture's set does not fit the budget at the default (resizeTower);
 	// 0 is no cap.

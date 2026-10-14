@@ -397,7 +397,7 @@ func stepGate(t *testing.T, m *Model, g *tier.GPU, apart bool) stepResult {
 	for i, st := range together {
 		switch err := st.StepRefusal(); err {
 		case nil:
-		case errStepHeadElsewhere, errStepSplit:
+		case errStepNoHead, errStepSplit:
 			// Placed whole and then moved: the prompts' history took the room
 			// (relocation), which is a card too small for this gate.
 			t.Skipf("CARD TOO SMALL: session %d's prompt moved part of the model home: %v (%s) -- this gate "+

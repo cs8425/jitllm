@@ -1288,9 +1288,6 @@ type NamedDevice interface {
 	// DeviceOf is the name of the device holding block li, and whether one does.
 	DeviceOf(li int) (string, bool)
 	HeadDeviceName() (string, bool)
-	// HeadWith is the head on the device holding block li: the one place a
-	// rows step takes it.
-	HeadWith(li int) bool
 	// Pin keeps block li on its device through seam moves, budget shrinks
 	// and eviction; it reports false when no device holds the block.
 	Pin(li int, on bool) bool
