@@ -198,8 +198,12 @@ func TestGemma3TowerPagesThroughTheDevice(t *testing.T) {
 				continue
 			}
 			paged++
-			if nm, worst := nmseOf(got, ref); worst != 0 {
-				t.Fatalf("%s under %d bytes: paging the tower changed its output (NMSE %.3e)", spec, b, nm)
+			// A page-in uploads the same bytes, but a budget this tight also
+			// narrows the attention's score planes (more query passes,
+			// resizeTower), which moves the reduction order on some
+			// backends: Vulkan reads 2.9e-4 on a V100 at 0.6, CUDA 0.
+			if nm, _ := nmseOf(got, ref); math.IsNaN(nm) || nm > towerPagedNMSE {
+				t.Fatalf("%s under %d bytes: paging the tower moved its output NMSE %.3e", spec, b, nm)
 			}
 		}
 		if paged == 0 {
@@ -275,7 +279,7 @@ func TestTowerChunksUnderABudget(t *testing.T) {
 				continue
 			}
 			chunkedRuns++
-			if math.IsNaN(nm) || nm > 1e-4 {
+			if math.IsNaN(nm) || nm > towerPagedNMSE {
 				t.Fatalf("%s under %d bytes: the row-chunked tower reads NMSE %.3e against the whole set's", spec, b, nm)
 			}
 		}
@@ -287,3 +291,10 @@ func TestTowerChunksUnderABudget(t *testing.T) {
 		t.Skip("no GPU backend on this host")
 	}
 }
+
+// towerPagedNMSE bounds a paged or row-chunked tower's projector output
+// against the whole resident one: the reduction-order band of narrower
+// attention passes (2.9e-4 measured on Vulkan, 0 on CUDA), well under what a
+// key read from the wrong rows does (0.53, TestTowerChunksUnderABudget's
+// mutation) and ten times under the device-against-host bound (1e-2).
+const towerPagedNMSE = 1e-3
