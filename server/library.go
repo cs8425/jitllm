@@ -107,7 +107,13 @@ func (e *Engine) loadedNamed(name string) *LoadedModel {
 // returns the loaded model, loading an enabled one on demand.
 func (e *Engine) resolveModel(name string) (*LoadedModel, error) {
 	if name == "" {
-		return nil, fmt.Errorf("%w: model is required", ErrInvalid)
+		e.mu.RLock()
+		if len(e.order) <= 0 {
+			e.mu.RUnlock()
+			return nil, fmt.Errorf("%w: model is required", ErrInvalid)
+		}
+		name = e.order[0]
+		e.mu.RUnlock()
 	}
 	if lm := e.loadedNamed(name); lm != nil {
 		return lm, nil
