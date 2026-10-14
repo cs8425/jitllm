@@ -571,6 +571,7 @@ func towerFamilies() []towerFamily {
 		{"gemma4", func(t *testing.T) (*Model, *Tower) { m, _ := openGemma4V(t); return m, m.Tower() }},
 		{"phi4", func(t *testing.T) (*Model, *Tower) { m, _ := openPhi4VFixture(t); return m, m.Tower() }},
 		{"gemma3n", func(t *testing.T) (*Model, *Tower) { m, _ := openGemma3nV(t); return m, m.Tower() }},
+		{"lfm2", func(t *testing.T) (*Model, *Tower) { m := openD1VL(t); return m, m.Tower() }},
 	}
 }
 
