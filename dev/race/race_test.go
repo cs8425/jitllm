@@ -173,6 +173,26 @@ func TestSummaryNamesBothAndTheRatios(t *testing.T) {
 	}
 }
 
+// TestViewFitsTheTerminal: the screen is exactly the terminal's height, so
+// the summary row is never scrolled off the bottom of a recording.
+func TestViewFitsTheTerminal(t *testing.T) {
+	for _, h := range []int{24, 36} {
+		m := &model{sides: [2]Side{{Name: "a", Label: "x"}, {Name: "b", Label: "y"}}, header: []string{"hw", "setup"}, w: 120, h: h}
+		for i := range m.panes {
+			m.panes[i].text.WriteString(strings.Repeat("**Heading**\n\nsome words in a paragraph, ", 300))
+			m.panes[i].chunks = 2000
+		}
+		s := hb.Sample{TTFT: time.Millisecond, CompletionTokens: 3, ITL: []time.Duration{time.Millisecond, time.Millisecond}}
+		m.panes[0].done, m.panes[0].rank = &s, 1
+		m.panes[1].done, m.panes[1].rank = &s, 2
+		m.results = [2]hb.Sample{s, s}
+		m.ended = true
+		if got := strings.Count(m.View(), "\n") + 1; got != h {
+			t.Fatalf("a %d-row terminal got a %d-row screen", h, got)
+		}
+	}
+}
+
 func TestLiveRate(t *testing.T) {
 	if r := liveRate(11, time.Second, 2*time.Second); r != 10 {
 		t.Fatalf("%v", r)
