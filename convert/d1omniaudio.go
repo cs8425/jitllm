@@ -65,9 +65,10 @@ func audioOf(f *meta.File, nVis uint32) (*jlm.Audio, []jlm.Tensor, error) {
 	if v, ok := f.KV["clip.has_audio_encoder"]; !ok || v.Type != meta.Bool || len(v.Raw) != 1 || v.Raw[0] == 0 {
 		return nil, nil, nil
 	}
-	proj, _ := f.KV["clip.audio.projector_type"].String()
-	if proj != "d1omni_a" {
-		return nil, nil, fmt.Errorf("convert: clip: audio projector %q is not implemented: %w", proj, ErrNotImplemented)
+	// Another family's audio half (Gemma 3n's) is not built: set aside
+	// (withoutAudio), as it was before this one.
+	if proj, _ := f.KV["clip.audio.projector_type"].String(); proj != "d1omni_a" {
+		return nil, nil, nil
 	}
 	key := func(k string) uint32 {
 		v, ok := f.KV["clip.audio."+k]

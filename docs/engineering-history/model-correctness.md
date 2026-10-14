@@ -9701,9 +9701,31 @@ a warm clip's encoding allocates nothing. llama.cpp's d1-omni server reads
 the same 251 positions and answers within 0.012
 (`TestD1OmniVoiceMatchesLlamaCpp`).
 
-The audio tower runs on the host: its blocks are not offered to a device yet
--- the relative-position score and the subsampling's convolutions have no
-device plan -- and that is the next piece of work, not a design.
+On a device each FastConformer block is a convolutional-tower block
+(`nn.ConvConformer`), a program of generated kernels as Gemma 3n's
+MobileNet blocks are (`jit/gpu/tier/conv.go`): LayerNorm in three passes,
+the matrices' batched twins with a bias launch after each, the macaron
+halves as `AddHalf`, the relative-position scores in one kernel
+(`kernels.RelPosScores`: both terms, the position table's row picked by the
+offset), the row softmax, the weighted sum (`AttnAccRows`), the GLU's
+`SigmoidMul`, the depthwise convolution (`DWConv1dRows`), the folded
+BatchNorm (`AffineRows`, the depthwise bias folded into its shift at load)
+and SiLU. The program is built for the 30 seconds' 375 rows and a call
+writes its own row count to a one-word buffer: the keys, the weighted sum
+and the convolution stop there by SELECTING, not by multiplying by zero, since
+the rows past it hold whatever the scratch held. The projected
+position table is a matmul of a constant sinusoid table, 2R-1 rows, per
+block per call. The audio blocks are placed through their own encoder
+segment State (`audState`), the one placement path; the front end, the
+subsampling, the adapter and the residual stay on the host.
+
+`TestD1OmniHearsOnEveryDevice` places every audio block: the prefix rows sit
+at NMSE 1.3e-4 against the host's on the laptop's RTX 3050 Ti under CUDA and
+Vulkan, the answers 0.008-0.012 from the reference, and a warm clip makes no
+allocation (the convolutional submission's closure and its run list were
+made per call; they are the devTier's now). Swapping the attention's u and v
+on the device moves the rows to NMSE 0.097. The kernels against their loops,
+rows past the call poisoned NaN: `backend.TestConformerKernelsMatchTheLoops`.
 
 ## qwen4exp: Qwen3.8-Flash-Next (plan, before the code)
 

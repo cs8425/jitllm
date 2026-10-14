@@ -244,7 +244,15 @@ func (d *Decider) Close() error {
 // (Embedder.SetDevice).
 func (d *Decider) SetDevice(dev nn.Device, max int) error {
 	if d.emb != nil {
-		return d.emb.SetDeviceLayers(dev, max)
+		if err := d.emb.SetDeviceLayers(dev, max); err != nil {
+			return err
+		}
+		// An audio tower's blocks go where the encoder's do, every one the
+		// device takes (d1-omni's).
+		if max != 0 {
+			return d.emb.setAudioDevice(dev)
+		}
+		return d.emb.setAudioDevice(nil)
 	}
 	if err := d.st.SetDeviceLayers(dev, max); err != nil {
 		return err

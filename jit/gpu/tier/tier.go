@@ -1660,6 +1660,10 @@ type devShared struct {
 	// device's and not a session's: their calls are one at a time
 	// (GPU.convMu).
 	convTo launchTo
+	// convCall is the convolutional submission's arguments, and convFn its
+	// method value, made once (conv.go).
+	convCall convCallArgs
+	convFn   func(backend.Session)
 	// roomGen moves every time this device may have gained room: a refund, or
 	// a budget raised. A caller that gave blocks up reads it to know when
 	// asking for them back could succeed. See GPU.RoomGen.
@@ -1924,7 +1928,9 @@ type GPU struct {
 	// its submissions, in the scratch every convolutional block there shares
 	// (conv.go), so two sessions' calls go one after the other.
 	convTmp [2][]float32
-	convMu  sync.Mutex
+	// convRuns is ConvLayers' runs, reused under convMu.
+	convRuns []run
+	convMu   sync.Mutex
 	// rowsErr is why the last LayersRows failed, naming the device: the
 	// devices' LastErr summed by Stats is whichever wrote last, not the one
 	// that refused.

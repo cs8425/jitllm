@@ -62,6 +62,9 @@ type audioTower struct {
 
 	// pages is each block's matrices and their spans (encPage).
 	pages []encPage
+	// pe is the relative positions' sinusoids a device's blocks read
+	// (audioPE), built on the first offer.
+	pe []float32
 }
 
 type audBlock struct {
@@ -74,6 +77,9 @@ type audBlock struct {
 	gluV, gluG, pw2           tensor
 	gluVB, gluGB, pw2B        []float32
 	dw, dwB, bnS, bnB         []float32
+	// bnShift is the folded BatchNorm's shift with the depthwise bias folded
+	// in, dwB*bnS + bnB: a device's one affine launch.
+	bnShift                   []float32
 	ff2N, ff2NB, ff2UB, ff2DB []float32
 	ff2Up, ff2Down            tensor
 	outN, outNB               []float32
@@ -250,6 +256,13 @@ func buildAudio(c *jlm.File, m *Model) (*audioTower, error) {
 	if err != nil {
 		return nil, err
 	}
+	for j := range a.blocks {
+		b := &a.blocks[j]
+		b.bnShift = make([]float32, d)
+		for c := range b.bnShift {
+			b.bnShift[c] = b.dwB[c]*b.bnS[c] + b.bnB[c]
+		}
+	}
 	a.tables()
 	for _, w := range []*tensor{&a.subOut, &a.ad1, &a.ad2, &a.resDown, &a.resUp} {
 		bindOne(c, w)
@@ -365,6 +378,7 @@ type audioRun struct {
 	x, h, q, k, v, qu, qv, p, t, ff, g, cv []float32
 	att, bd, acc                           []float32
 	tapRows                                []float32
+	devOut                                 []float32
 	posTab                                 []float32
 	attn                                   *nn.AttnSet
 	attStride                              int
@@ -639,7 +653,16 @@ func (e *Embedder) audioBlocks(x []float32, t int) error {
 	growA(&r.att, nh*r.attStride)
 	growA(&r.bd, nh*r.attStride)
 	growA(&r.acc, nh*hd)
-	for j := range a.blocks {
+	for j := 0; j < len(a.blocks); j++ {
+		// A run of placed blocks is one device call over the clip's rows.
+		if e.audioOnDevice(j) {
+			hi, err := e.audioDevRun(j, x, t)
+			if err != nil {
+				return err
+			}
+			j = hi - 1
+			continue
+		}
 		if err := m.audioPageIn(j); err != nil {
 			return err
 		}
