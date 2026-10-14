@@ -64,7 +64,7 @@ type ssePackedFormat struct {
 	pw, hw, halfSub int
 	// fields codes a payload byte, a field-run (sub/fields) apart; see
 	// kernels.Fields.
-	fields, run int
+	fields, run     int
 	perWord, stride int
 	// stream: container v27's SC stream (kernels.ScStream, scstream.go).
 	stream bool

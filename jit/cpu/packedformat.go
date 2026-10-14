@@ -32,11 +32,11 @@ type packedFormat struct {
 	// nibbles, four 2-bit codes, one byte) and run how far apart in the
 	// sub-block a byte's fields are, sub/fields elements (kernels.Fields).
 	fields, run int
-	sub16     bool // a 16-wide sub-block, corrected through AHalf
-	stream    bool // container v27's SC stream (scstream.go)
-	narrow    bool // the d plane is narrower than a word a row (dplane.go)
-	e8        bool // the d plane is an E8M0 byte
-	d32       bool // the d word is the scale as an f32 (TQ2_F32)
+	sub16       bool // a 16-wide sub-block, corrected through AHalf
+	stream      bool // container v27's SC stream (scstream.go)
+	narrow      bool // the d plane is narrower than a word a row (dplane.go)
+	e8          bool // the d plane is an E8M0 byte
+	d32         bool // the d word is the scale as an f32 (TQ2_F32)
 }
 
 // packedFormatOf decomposes t. who names the emitter in a refusal.
