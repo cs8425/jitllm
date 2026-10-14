@@ -975,6 +975,9 @@ type Stats struct {
 	// RecZeroSource counts the bytes of zeros those copies read, uploaded
 	// once a zeroing.
 	RecZeroSource uint64
+	// RecZeroHost counts seat zeroings written from the host because the
+	// kept zeros could not be had on the device (recZeroLayers).
+	RecZeroHost int
 	// PagedStagedLaunches counts decode attentions that ran the staged
 	// kernels rather than FlashDecodeKV (kernels.ChooseDecodePlan).
 	PagedStagedLaunches int
@@ -1295,6 +1298,7 @@ func (s *Stats) add(o Stats) {
 	s.RecZeroBytes += o.RecZeroBytes
 	s.RecZeroCopies += o.RecZeroCopies
 	s.RecZeroSource += o.RecZeroSource
+	s.RecZeroHost += o.RecZeroHost
 	s.PagedPrefill70 += o.PagedPrefill70
 	s.PagedAccMMA += o.PagedAccMMA
 	s.FlashPrefill80 += o.FlashPrefill80

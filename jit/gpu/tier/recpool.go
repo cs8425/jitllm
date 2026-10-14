@@ -280,7 +280,15 @@ func (g *devTier) recZeroLayers(ls []*layer, base, rows int) error {
 				}
 				if zb == nil && !hostZeros {
 					var err error
-					if zb, err = g.allocBytes(make([]byte, n)); err != nil {
+					if roomFaulted("nozeros") || roomFaulted("nozeros-nohost") {
+						err = fmt.Errorf("no room for the kept zeros (roomFault)")
+					} else {
+						zb, err = g.allocBytes(make([]byte, n))
+					}
+					if err != nil && roomFaulted("nozeros-nohost") {
+						return err
+					}
+					if err != nil {
 						// A card with no room for the kept zeros still has its
 						// pools: their slots take zeros written from the host,
 						// as a new pool's do (newRecPool).
@@ -299,6 +307,7 @@ func (g *devTier) recZeroLayers(ls []*layer, base, rows int) error {
 						return err
 					}
 					g.RecZeroBytes += uint64(rows * b.w * 4)
+					g.RecZeroHost++
 					continue
 				}
 				if err := g.dev.Copy(b.buf, base*b.w*4, zb, 0, rows*b.w*4); err != nil {
@@ -321,6 +330,10 @@ func (g *devTier) recZeroLayers(ls []*layer, base, rows int) error {
 // (or Config.SharedRec asks), every pool takes the shared form. Callers hold
 // g.mu, outside a session.
 func (g *devTier) growSeat(sid uint64, rows int) bool {
+	if rows > 1 && (roomFaulted("noseat") || roomFaulted("noseat-lie")) {
+		g.LastErr = "rows: a batch's recurrent states do not fit in this device's budget (roomFault)"
+		return false
+	}
 	old, had := g.recSeats[sid]
 	if had && old.rows >= rows {
 		return true

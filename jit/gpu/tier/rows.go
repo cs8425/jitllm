@@ -416,6 +416,9 @@ func (g *GPU) layersRows(self uint64, lo, hi int, pos, slot []int, sid []uint64,
 // does, or no device holds a block.
 func (g *GPU) RowsWidth(want int) int {
 	w := min(want, batchWidth)
+	if roomFaulted("narrow-lie") {
+		return w
+	}
 	for _, d := range g.devs {
 		d.mu.Lock()
 		held := false
@@ -446,6 +449,9 @@ func (g *GPU) RowsWidth(want int) int {
 // batched scratch for rows rows (batchFor) and, where a linear block is
 // placed, the session's recurrent seat for seqs sequences (growSeat).
 func (g *GPU) rowsRoom(sid uint64, rows, seqs int) bool {
+	if roomFaulted("noseat-lie") || roomFaulted("narrow-lie") {
+		return true
+	}
 	r := (rows + 7) / 8 * 8
 	for _, d := range g.devs {
 		v := d.as(sid)

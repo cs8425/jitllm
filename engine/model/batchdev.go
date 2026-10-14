@@ -104,8 +104,13 @@ func (s *State) relocateRows(took []int, rows int) {
 		}
 	}
 	room := func() bool { return true }
-	if rr, ok := s.ld.(nn.RowsRoomer); ok {
+	if rr, ok := s.ld.(nn.RowsRoomer); ok && s.devCount() > 0 {
 		room = func() bool { return rr.RowsRoom(rows, s.nseq) }
+		// Counted once a step: blocks go home for the step's room here,
+		// or all at once in forwardRows when relocation is off.
+		if !room() {
+			s.roomHome++
+		}
 	}
 	sd, ok := s.ld.(nn.SeqKVDevice)
 	if !ok || !sd.PerSequenceKV() || s.nseq == 1 {
