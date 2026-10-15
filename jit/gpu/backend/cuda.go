@@ -290,13 +290,7 @@ type cudaSession struct {
 	// EndRecord.
 	marks    *[]kernMark
 	recMarks []kernMark
-	// trial says this session's launches are a tuner's trial (MarkTrial):
-	// the timing instrument names them under TrialPrefix.
-	trial bool
 }
-
-// MarkTrial implements TrialMarker.
-func (s *cudaSession) MarkTrial() { s.trial = true }
 
 func (s *cudaSession) Write(b Buf, p []byte) error { return s.WriteAt(b, 0, p) }
 
@@ -373,20 +367,16 @@ func (s *cudaSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
 		return err
 	}
 	ck.noteRan()
-	name := ck.name
-	if s.trial && (t0 != nil || s.marks != nil) {
-		name = TrialPrefix + name
-	}
 	if t0 != nil {
 		if e, err := cuda.NewEvent(); err == nil && e.RecordOn(st) == nil {
-			directMarks.add(kernPair{t0, e, name})
+			directMarks.add(kernPair{t0, e, ck.name})
 		}
 	}
 	if s.marks != nil {
 		// Inside a timed capture: an event NODE after the launch, so a replay
 		// stamps each kernel's end with no host in the loop.
 		if e, err := cuda.NewEvent(); err == nil && e.RecordNode(s.stream) == nil {
-			*s.marks = append(*s.marks, kernMark{e, name})
+			*s.marks = append(*s.marks, kernMark{e, ck.name})
 		}
 	}
 	return nil

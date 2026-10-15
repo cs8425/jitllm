@@ -79,9 +79,7 @@ const (
 	RoleAGLUGateB  Role = 1034
 	RoleADW        Role = 1035 // the depthwise convolution, tap-major [tap][chan]
 	// RoleADWB is the depthwise convolution's bias as the converter reads
-	// it: folded into RoleABNShift since version 30 and written by no
-	// converter since; a version 29 container carries it, which migrate29
-	// folds.
+	// it; it is folded into RoleABNShift and never written to a container.
 	RoleADWB     Role = 1036
 	RoleABNScale Role = 1037 // BatchNorm folded: x*scale + shift
 	// RoleABNShift is the BatchNorm's shift with the depthwise bias folded
@@ -126,7 +124,7 @@ var audioRoleNames = map[Role]string{
 	RoleAConvNorm: "a.norm_conv", RoleAConvNormB: "a.norm_conv.bias",
 	RoleAGLUVal: "a.conv_pw1.value", RoleAGLUValB: "a.conv_pw1.value.bias",
 	RoleAGLUGate: "a.conv_pw1.gate", RoleAGLUGateB: "a.conv_pw1.gate.bias",
-	RoleADW: "a.conv_dw", RoleADWB: "a.conv_dw.bias",
+	RoleADW:      "a.conv_dw",
 	RoleABNScale: "a.conv_norm", RoleABNShift: "a.conv_norm.bias+conv_dw.bias",
 	RoleAPW2: "a.conv_pw2", RoleAPW2B: "a.conv_pw2.bias",
 	RoleAFF2Norm: "a.ffn_norm_1", RoleAFF2NormB: "a.ffn_norm_1.bias",

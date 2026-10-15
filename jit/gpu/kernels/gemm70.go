@@ -127,7 +127,22 @@ func voltaSwizzle(b *ir.Builder, r ir.Value, c int, weights bool) ir.Value {
 // expert sheet, so one staged tile serves every token routed there. Launch
 // GemmVoltaGrouped(s, t, used) workgroups; the row block varies fastest, so
 // token blocks past `used` are never launched.
-func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
+func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) { return gemmVolta(s, t, nil) }
+
+// gemmCtx is where gemmVolta emits when it is one SEGMENT of a
+// GemmVoltaSegments kernel: the shared builder, a suffix that keeps its
+// parameters apart from the other segments', the operand every segment
+// reads, the workgroup index relative to the segment's first, and the
+// staging buffers declared once before any segment's loop.
+type gemmCtx struct {
+	b        *ir.Builder
+	suffix   string
+	pB       ir.Value
+	cta      func() ir.Value
+	shA, shB ir.Value
+}
+
+func gemmVolta(s MatVecShape, t VoltaTile, into *gemmCtx) (*ir.Kernel, error) {
 	if !GemmVoltaOK(s.T) {
 		return nil, fmt.Errorf("kernels: GemmVolta: %v has no Volta layout", s.T)
 	}
@@ -203,21 +218,40 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 	if grouped {
 		name += fmt.Sprintf("_e%d", s.Experts)
 	}
-	b := ir.New(name, [3]int{nth, 1, 1})
-	pQS := b.Param("pQS", ir.U32)
-	pD := b.Param("pD", ir.U32)
-	pSC := b.Param("pSC", ir.U32)
-	pB := b.Param("pB", ir.U32)
-	pOut := b.Param("pOut", ir.F32)
+	var b *ir.Builder
+	var pQS, pD, pSC, pB, pOut, shA, shB ir.Value
+	sfx := ""
+	cta := func() ir.Value { return b.CTAID() }
+	if into == nil {
+		b = ir.New(name, [3]int{nth, 1, 1})
+		pQS = b.Param("pQS", ir.U32)
+		pD = b.Param("pD", ir.U32)
+		pSC = b.Param("pSC", ir.U32)
+		pB = b.Param("pB", ir.U32)
+		pOut = b.Param("pOut", ir.F32)
+	} else {
+		if grouped || split > 1 {
+			return nil, fmt.Errorf("kernels: GemmVoltaSegments: a segment is dense and unsplit")
+		}
+		b, sfx, cta, pB = into.b, into.suffix, into.cta, into.pB
+		pQS = b.Param("pQS"+sfx, ir.U32)
+		pD = b.Param("pD"+sfx, ir.U32)
+		pSC = b.Param("pSC"+sfx, ir.U32)
+		pOut = b.Param("pOut"+sfx, ir.F32)
+	}
 	var pBias, pSel ir.Value
 	if s.Bias {
-		pBias = b.Param("pBias", ir.F32)
+		pBias = b.Param("pBias"+sfx, ir.F32)
 	}
 	if grouped {
 		pSel = b.Param("pSel", ir.U32)
 	}
-	shA := b.Shared("gemmA", ir.U32, nbuf*BM*kHalf)
-	shB := b.Shared("gemmB", ir.U32, nbuf*BN*kHalf)
+	if into == nil {
+		shA = b.Shared("gemmA", ir.U32, nbuf*BM*kHalf)
+		shB = b.Shared("gemmB", ir.U32, nbuf*BN*kHalf)
+	} else {
+		shA, shB = into.shA, into.shB
+	}
 	c := func(v int64) ir.Value { return b.Const(ir.U32, v) }
 	add := func(v ir.Value, n int64) ir.Value {
 		if n == 0 {
@@ -246,7 +280,7 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 	// The workgroup's block: token blocks vary fastest, so the workgroups that
 	// read one weight block run together and it comes from DRAM about once.
 	mB, nB := s.Rows/BM, s.NTok/BN
-	grp := b.CTAID()
+	grp := cta()
 	var bn, bm, seg ir.Value
 	if grouped {
 		// The row block fastest: a launch of GemmVoltaGrouped workgroups
@@ -686,5 +720,93 @@ func GemmVolta(s MatVecShape, t VoltaTile) (*ir.Kernel, error) {
 			}
 		}
 	}
+	if into != nil {
+		return nil, nil
+	}
 	return b.Done(), nil
+}
+
+// GemmVoltaSegments is several GemmVolta GEMMs over one binary16 operand in
+// one launch: a block's q, k and v, whose weights may be different formats
+// and blockings as long as their workgroups are one width. Segment i owns a
+// contiguous run of workgroups (GemmVoltaSegmentsGrid) and runs GemmVolta's
+// own body for its shape there, guarded by a loop that runs once in its
+// workgroups and never in the others, as MatVecSegments does. Every segment
+// is unsplit: a small k or v projection that alone would split k to fill the
+// card (and reduce its partials) rides q's grid instead.
+//
+// Parameters: pB (the shared operand), then per segment pQS, pD, pSC, pOut
+// and, when the segment has one, pBias. The staging buffers are declared
+// once, at the largest segment's size.
+func GemmVoltaSegments(segs []MatVecShape, tiles []VoltaTile) (*ir.Kernel, error) {
+	blocks, nth, err := GemmVoltaSegmentsGrid(segs, tiles)
+	if err != nil {
+		return nil, err
+	}
+	name := "gemmvoltaseg"
+	shA, shB := 0, 0
+	for i, sg := range segs {
+		t := tiles[i]
+		qi := qtab[sg.T]
+		kHalf := t.KB * qi.sub / 2
+		nbuf := 2
+		if t.Single {
+			nbuf = 1
+		}
+		shA, shB = max(shA, nbuf*t.Rows()*kHalf), max(shB, nbuf*t.Toks()*kHalf)
+		name += fmt.Sprintf("_%s_%d_m%dn%dk%d", strings.ToLower(sg.T.String()), sg.Rows, t.MT, t.NT, t.KB)
+	}
+	name += fmt.Sprintf("x%d_t%d", segs[0].K, segs[0].NTok)
+	if sh := 4 * (shA + shB); sh > 48<<10 {
+		return nil, fmt.Errorf("kernels: GemmVoltaSegments: %d bytes of shared memory, over the 48 KiB a kernel may declare", sh)
+	}
+	b := ir.New(name, [3]int{nth, 1, 1})
+	ctx := gemmCtx{b: b, pB: b.Param("pB", ir.U32)}
+	ctx.shA = b.Shared("gemmA", ir.U32, shA)
+	ctx.shB = b.Shared("gemmB", ir.U32, shB)
+	start := 0
+	for i, sg := range segs {
+		lo, hi := b.Const(ir.U32, int64(start)), b.Const(ir.U32, int64(start+blocks[i]))
+		c := b.CTAID()
+		zero, one := b.Const(ir.U32, 0), b.Const(ir.U32, 1)
+		b.LoopN(b.Select(ir.U32, b.Lt(ir.U32, c, hi), b.Select(ir.U32, b.Lt(ir.U32, c, lo), zero, one), zero))
+		seg := ctx
+		seg.suffix = fmt.Sprintf("%d", i)
+		seg.cta = func() ir.Value { return b.Sub(ir.U32, b.CTAID(), lo) }
+		if _, err := gemmVolta(sg, tiles[i], &seg); err != nil {
+			return nil, fmt.Errorf("kernels: GemmVoltaSegments: segment %d: %w", i, err)
+		}
+		b.EndLoop()
+		start += blocks[i]
+	}
+	return b.Done(), nil
+}
+
+// GemmVoltaSegmentsGrid is GemmVoltaSegments' launch: the workgroups each
+// segment owns, in order, and the workgroup width. It refuses what the kernel
+// cannot express: one segment, a split or grouped one, segments over
+// different operands (K, NTok, or the activation layout a format reads), or
+// tiles of different widths.
+func GemmVoltaSegmentsGrid(segs []MatVecShape, tiles []VoltaTile) (blocks []int, nth int, err error) {
+	if len(segs) < 2 || len(tiles) != len(segs) {
+		return nil, 0, fmt.Errorf("kernels: GemmVoltaSegments: %d segment(s), %d tile(s)", len(segs), len(tiles))
+	}
+	nth = tiles[0].Threads()
+	for i, sg := range segs {
+		t := tiles[i]
+		switch {
+		case !GemmVoltaOK(sg.T) || qtab[sg.T].float > 0:
+			return nil, 0, fmt.Errorf("kernels: GemmVoltaSegments: segment %d: %v", i, sg.T)
+		case sg.Experts > 1 || max(sg.Split, 1) > 1:
+			return nil, 0, fmt.Errorf("kernels: GemmVoltaSegments: segment %d is split or grouped", i)
+		case sg.K != segs[0].K || sg.NTok != segs[0].NTok || qtab[sg.T].sub != qtab[segs[0].T].sub:
+			return nil, 0, fmt.Errorf("kernels: GemmVoltaSegments: segment %d reads another operand", i)
+		case t.Threads() != nth || t.F16K != tiles[0].F16K:
+			return nil, 0, fmt.Errorf("kernels: GemmVoltaSegments: segment %d's tile is another width", i)
+		case sg.Rows%t.Rows() != 0 || sg.NTok%t.Toks() != 0:
+			return nil, 0, fmt.Errorf("kernels: GemmVoltaSegments: segment %d: tile does not divide it", i)
+		}
+		blocks = append(blocks, GemmVoltaGroups(sg, t))
+	}
+	return blocks, nth, nil
 }

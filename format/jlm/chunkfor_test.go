@@ -97,7 +97,7 @@ func TestABadStoredChunkIsRefused(t *testing.T) {
 		h.Chunk = tc.chunk
 		b := make([]byte, HeaderBytes)
 		h.encode(b)
-		got, err := decodeHeader(b, 4<<20, Version)
+		got, err := decodeHeader(b, 4<<20)
 		switch {
 		case tc.ok && err != nil:
 			t.Errorf("%s: %v", tc.name, err)
@@ -116,7 +116,7 @@ func TestABadStoredChunkIsRefused(t *testing.T) {
 	tower.Chunk = 32 << 10
 	b := make([]byte, HeaderBytes)
 	tower.encode(b)
-	if _, err := decodeHeader(b, 128<<20, Version); err != nil {
+	if _, err := decodeHeader(b, 128<<20); err != nil {
 		t.Errorf("a tower-only container was refused: %v", err)
 	}
 }

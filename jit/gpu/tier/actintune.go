@@ -204,7 +204,6 @@ func (g *devTier) timeActIn(site int, ls []*layer) (float64, bool) {
 		t0 := time.Now()
 		var err error
 		g.dev.Session(func(s backend.Session) {
-			backend.MarkTrial(s) // a profile tells a tuner's trial from the work
 			for i := 0; i < reps && err == nil; i++ {
 				err = arm(s, in)
 			}

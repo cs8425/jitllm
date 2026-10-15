@@ -14,7 +14,6 @@ package ffi
 import (
 	"fmt"
 	"reflect"
-	"sync/atomic"
 	"unsafe"
 
 	gffi "github.com/go-webgpu/goffi/ffi"
@@ -52,77 +51,50 @@ func (l *Lib) Has(name string) bool {
 	return err == nil
 }
 
+// noescape hides a pointer from escape analysis.
+// It keeps the arguments, return slot and pointer array from escaping (three
+// allocations per call without it), because the compiler cannot see that
+// CallFunction does not retain them. It is sound only because every bound
+// entry point is synchronous and never keeps these pointers; the async forms
+// that retain a host pointer (cuMemcpyHtoDAsync, cuLaunchHostFunc) are not
+// bound.
+//
+// The array holding these pointers must stay in the frame too: see
+// prepared.call and TestCallArgumentsStayOnTheStack before adding a wrapper or
+// changing call's signature.
+//
+// `go vet` flags the uintptr round trip as possible misuse of unsafe.Pointer;
+// that pattern is exactly what makes it work, as in the standard library.
+//
+//go:nosplit
+func noescape(p unsafe.Pointer) unsafe.Pointer {
+	x := uintptr(p)
+	return unsafe.Pointer(x ^ 0)
+}
+
 type prepared struct {
 	cif types.CallInterface
 	fn  unsafe.Pointer
 }
 
 // call hands the prepared signature, the return slot and the argument array to
-// goffi. Every one of them is in a heap frame (see frames), never on a stack.
-func (p *prepared) call(rv unsafe.Pointer, av []unsafe.Pointer) {
-	gffi.CallFunction(&p.cif, p.fn, rv, av)
-}
-
-// A call's arguments, its return slot and its argument array live in a frame
-// on the heap, one of a few each binding holds, and are copied in and out by
-// value.
+// goffi. av is the array base and n its length, rather than a slice.
 //
-// goffi takes the address of every argument and of the return slot, and its
-// CallFunction reaches the trampoline through an interface
-// (arch.Registry.Caller), so the compiler must assume it keeps them: built in
-// the wrapper's frame, each call would allocate them. Hiding them from escape
-// analysis (a uintptr round trip) kept them on the stack, and that is unsound,
-// not only on paper: goffi turns some of those addresses into integers before
-// the C call -- a struct over 16 bytes passed by reference on arm64 (Metal's
-// MTLSize), a struct returned through x8 or a hidden first argument, any
-// pointer-valued argument -- and then runs splittable Go (its argument
-// packing, a sync.Pool, a defer) before runtime.cgocall leaves the goroutine
-// stack. A stack moved in that window, grown or shrunk by the collector,
-// leaves C reading and writing the old one. TestCallSurvivesStackGrowthAndGC
-// catches exactly that.
+// A slice parameter escapes, which moved each wrapper's `var ps [N]` array to
+// the heap while it held addresses of the caller's frame locals. A heap object
+// holding a stack pointer is illegal in Go and fails two ways: the collector
+// can scan it after the frame is gone ("found bad pointer in Go heap"), and a
+// stack growth before goffi reads it leaves the driver reading the old stack,
+// silently. Re-forming the slice through noescape keeps ps in the frame, where
+// stack copying adjusts it with the values it points at.
 //
-// A heap object does not move, and a Go pointer an argument carries stays
-// visible to the collector in it. A frame is taken by a compare-and-swap; a
-// call finding every frame busy allocates its own, so concurrency is never
-// refused, only paid for past nframes concurrent calls of one entry point.
-// TestCallArgumentsStayOnTheStack gates the uncontended path at zero
-// allocations.
-const nframes = 8
-
-type frameInit[F any] interface {
-	*F
-	init()
-}
-
-type frames[F any] struct {
-	f    [nframes]F
-	busy [nframes]atomic.Bool
-}
-
-func newFrames[F any, PF frameInit[F]]() *frames[F] {
-	s := new(frames[F])
-	for i := range s.f {
-		PF(&s.f[i]).init()
-	}
-	return s
-}
-
-// take returns a free frame and its index, or a fresh frame and -1.
-func take[F any, PF frameInit[F]](s *frames[F]) (PF, int) {
-	for i := range s.busy {
-		if !s.busy[i].Load() && s.busy[i].CompareAndSwap(false, true) {
-			return &s.f[i], i
-		}
-	}
-	f := PF(new(F))
-	f.init()
-	return f, -1
-}
-
-func (s *frames[F]) release(i int) {
-	if i >= 0 {
-		s.busy[i].Store(false)
-	}
+// It is sound because goffi copies each argument out of avalue[i] before the
+// trampoline and does not retain the slice (internal/arch/amd64/call_unix.go).
+//
+//go:nosplit
+func (p *prepared) call(rv unsafe.Pointer, av *unsafe.Pointer, n int) {
+	gffi.CallFunction(&p.cif, p.fn, rv,
+		unsafe.Slice((*unsafe.Pointer)(noescape(unsafe.Pointer(av))), n))
 }
 
 // desc maps a Go type to goffi's descriptor.
@@ -190,70 +162,218 @@ func prep(l *Lib, name string, ret *types.TypeDescriptor, args ...*types.TypeDes
 
 // Fn0 binds a C function of 0 argument(s).
 func Fn0[R any](l *Lib, name string) func() R {
-	return bind0[R](prep(l, name, descOf[R]()))
+	p := prep(l, name, descOf[R]())
+	return func() R {
+		var r R
+		var ps [1]unsafe.Pointer
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 0)
+		return r
+	}
 }
 
 // Fn1 binds a C function of 1 argument(s).
 func Fn1[R any, A0 any](l *Lib, name string) func(A0) R {
-	return bind1[R, A0](prep(l, name, descOf[R](), descOf[A0]()))
+	p := prep(l, name, descOf[R](), descOf[A0]())
+	return func(a0 A0) R {
+		var r R
+		var ps [1]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 1)
+		return r
+	}
 }
 
 // Fn2 binds a C function of 2 argument(s).
 func Fn2[R any, A0 any, A1 any](l *Lib, name string) func(A0, A1) R {
-	return bind2[R, A0, A1](prep(l, name, descOf[R](), descOf[A0](), descOf[A1]()))
+	p := prep(l, name, descOf[R](), descOf[A0](), descOf[A1]())
+	return func(a0 A0, a1 A1) R {
+		var r R
+		var ps [2]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 2)
+		return r
+	}
 }
 
 // Fn3 binds a C function of 3 argument(s).
 func Fn3[R any, A0 any, A1 any, A2 any](l *Lib, name string) func(A0, A1, A2) R {
-	return bind3[R, A0, A1, A2](prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2]()))
+	p := prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2]())
+	return func(a0 A0, a1 A1, a2 A2) R {
+		var r R
+		var ps [3]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 3)
+		return r
+	}
 }
 
 // Fn4 binds a C function of 4 argument(s).
 func Fn4[R any, A0 any, A1 any, A2 any, A3 any](l *Lib, name string) func(A0, A1, A2, A3) R {
-	return bind4[R, A0, A1, A2, A3](prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3]()))
+	p := prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3]())
+	return func(a0 A0, a1 A1, a2 A2, a3 A3) R {
+		var r R
+		var ps [4]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		ps[3] = noescape(unsafe.Pointer(&a3))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 4)
+		return r
+	}
 }
 
 // Fn5 binds a C function of 5 argument(s).
 func Fn5[R any, A0 any, A1 any, A2 any, A3 any, A4 any](l *Lib, name string) func(A0, A1, A2, A3, A4) R {
-	return bind5[R, A0, A1, A2, A3, A4](prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4]()))
+	p := prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4]())
+	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4) R {
+		var r R
+		var ps [5]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		ps[3] = noescape(unsafe.Pointer(&a3))
+		ps[4] = noescape(unsafe.Pointer(&a4))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 5)
+		return r
+	}
 }
 
 // Fn6 binds a C function of 6 argument(s).
 func Fn6[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any](l *Lib, name string) func(A0, A1, A2, A3, A4, A5) R {
-	return bind6[R, A0, A1, A2, A3, A4, A5](prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5]()))
+	p := prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5]())
+	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5) R {
+		var r R
+		var ps [6]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		ps[3] = noescape(unsafe.Pointer(&a3))
+		ps[4] = noescape(unsafe.Pointer(&a4))
+		ps[5] = noescape(unsafe.Pointer(&a5))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 6)
+		return r
+	}
 }
 
 // Fn7 binds a C function of 7 argument(s).
 func Fn7[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any](l *Lib, name string) func(A0, A1, A2, A3, A4, A5, A6) R {
-	return bind7[R, A0, A1, A2, A3, A4, A5, A6](prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5](), descOf[A6]()))
+	p := prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5](), descOf[A6]())
+	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5, a6 A6) R {
+		var r R
+		var ps [7]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		ps[3] = noescape(unsafe.Pointer(&a3))
+		ps[4] = noescape(unsafe.Pointer(&a4))
+		ps[5] = noescape(unsafe.Pointer(&a5))
+		ps[6] = noescape(unsafe.Pointer(&a6))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 7)
+		return r
+	}
 }
 
 // Fn8 binds a C function of 8 argument(s).
 func Fn8[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any](l *Lib, name string) func(A0, A1, A2, A3, A4, A5, A6, A7) R {
-	return bind8[R, A0, A1, A2, A3, A4, A5, A6, A7](prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5](), descOf[A6](), descOf[A7]()))
+	p := prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5](), descOf[A6](), descOf[A7]())
+	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5, a6 A6, a7 A7) R {
+		var r R
+		var ps [8]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		ps[3] = noescape(unsafe.Pointer(&a3))
+		ps[4] = noescape(unsafe.Pointer(&a4))
+		ps[5] = noescape(unsafe.Pointer(&a5))
+		ps[6] = noescape(unsafe.Pointer(&a6))
+		ps[7] = noescape(unsafe.Pointer(&a7))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 8)
+		return r
+	}
 }
 
 // Fn9 binds a C function of 9 argument(s).
 func Fn9[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any, A8 any](l *Lib, name string) func(A0, A1, A2, A3, A4, A5, A6, A7, A8) R {
-	return bind9[R, A0, A1, A2, A3, A4, A5, A6, A7, A8](prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5](), descOf[A6](), descOf[A7](), descOf[A8]()))
+	p := prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5](), descOf[A6](), descOf[A7](), descOf[A8]())
+	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5, a6 A6, a7 A7, a8 A8) R {
+		var r R
+		var ps [9]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		ps[3] = noescape(unsafe.Pointer(&a3))
+		ps[4] = noescape(unsafe.Pointer(&a4))
+		ps[5] = noescape(unsafe.Pointer(&a5))
+		ps[6] = noescape(unsafe.Pointer(&a6))
+		ps[7] = noescape(unsafe.Pointer(&a7))
+		ps[8] = noescape(unsafe.Pointer(&a8))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 9)
+		return r
+	}
 }
 
 // Fn10 binds a C function of 10 argument(s).
 func Fn10[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any, A8 any, A9 any](l *Lib, name string) func(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9) R {
-	return bind10[R, A0, A1, A2, A3, A4, A5, A6, A7, A8, A9](prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5](), descOf[A6](), descOf[A7](), descOf[A8](), descOf[A9]()))
+	p := prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5](), descOf[A6](), descOf[A7](), descOf[A8](), descOf[A9]())
+	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5, a6 A6, a7 A7, a8 A8, a9 A9) R {
+		var r R
+		var ps [10]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		ps[3] = noescape(unsafe.Pointer(&a3))
+		ps[4] = noescape(unsafe.Pointer(&a4))
+		ps[5] = noescape(unsafe.Pointer(&a5))
+		ps[6] = noescape(unsafe.Pointer(&a6))
+		ps[7] = noescape(unsafe.Pointer(&a7))
+		ps[8] = noescape(unsafe.Pointer(&a8))
+		ps[9] = noescape(unsafe.Pointer(&a9))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 10)
+		return r
+	}
 }
 
 // Fn11 binds a C function of 11 argument(s).
 func Fn11[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any, A8 any, A9 any, A10 any](l *Lib, name string) func(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10) R {
-	return bind11[R, A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10](prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5](), descOf[A6](), descOf[A7](), descOf[A8](), descOf[A9](), descOf[A10]()))
+	p := prep(l, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3](), descOf[A4](), descOf[A5](), descOf[A6](), descOf[A7](), descOf[A8](), descOf[A9](), descOf[A10]())
+	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5, a6 A6, a7 A7, a8 A8, a9 A9, a10 A10) R {
+		var r R
+		var ps [11]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		ps[3] = noescape(unsafe.Pointer(&a3))
+		ps[4] = noescape(unsafe.Pointer(&a4))
+		ps[5] = noescape(unsafe.Pointer(&a5))
+		ps[6] = noescape(unsafe.Pointer(&a6))
+		ps[7] = noescape(unsafe.Pointer(&a7))
+		ps[8] = noescape(unsafe.Pointer(&a8))
+		ps[9] = noescape(unsafe.Pointer(&a9))
+		ps[10] = noescape(unsafe.Pointer(&a10))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 11)
+		return r
+	}
 }
 
+// ---------------------------------------------------------------------------
 // Entry points that are not exported by name.
 
 // Fn3At is Fn4At for a 3-argument entry point, such as
 // vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR.
 func Fn3At[R any, A0 any, A1 any, A2 any](fn unsafe.Pointer, name string) func(A0, A1, A2) R {
-	return bind3[R, A0, A1, A2](prepAt(fn, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2]()))
+	p := prepAt(fn, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2]())
+	return func(a0 A0, a1 A1, a2 A2) R {
+		var r R
+		var ps [3]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 3)
+		return r
+	}
 }
 
 // Fn4At binds a C function of 4 arguments held as an address rather than a
@@ -262,589 +382,15 @@ func Fn3At[R any, A0 any, A1 any, A2 any](fn unsafe.Pointer, name string) func(A
 // (vkGetDeviceProcAddr). The caller vouches for the pointer; a nil fn panics
 // here rather than jumping to zero later.
 func Fn4At[R any, A0 any, A1 any, A2 any, A3 any](fn unsafe.Pointer, name string) func(A0, A1, A2, A3) R {
-	return bind4[R, A0, A1, A2, A3](prepAt(fn, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3]()))
-}
-
-type frame0[R any] struct {
-	r  R
-	ps [0]unsafe.Pointer
-}
-
-func (f *frame0[R]) init() { f.ps = [0]unsafe.Pointer{} }
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame0[R]) clear() {
-	var zr R
-	f.r = zr
-}
-
-func bind0[R any](p *prepared) func() R {
-	s := newFrames[frame0[R]]()
-	return func() R {
-		f, i := take(s)
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame1[R any, A0 any] struct {
-	r  R
-	a0 A0
-	ps [1]unsafe.Pointer
-}
-
-func (f *frame1[R, A0]) init() { f.ps = [1]unsafe.Pointer{unsafe.Pointer(&f.a0)} }
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame1[R, A0]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-}
-
-func bind1[R any, A0 any](p *prepared) func(A0) R {
-	s := newFrames[frame1[R, A0]]()
-	return func(a0 A0) R {
-		f, i := take(s)
-		f.a0 = a0
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame2[R any, A0 any, A1 any] struct {
-	r  R
-	a0 A0
-	a1 A1
-	ps [2]unsafe.Pointer
-}
-
-func (f *frame2[R, A0, A1]) init() {
-	f.ps = [2]unsafe.Pointer{unsafe.Pointer(&f.a0), unsafe.Pointer(&f.a1)}
-}
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame2[R, A0, A1]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-	var z1 A1
-	f.a1 = z1
-}
-
-func bind2[R any, A0 any, A1 any](p *prepared) func(A0, A1) R {
-	s := newFrames[frame2[R, A0, A1]]()
-	return func(a0 A0, a1 A1) R {
-		f, i := take(s)
-		f.a0 = a0
-		f.a1 = a1
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame3[R any, A0 any, A1 any, A2 any] struct {
-	r  R
-	a0 A0
-	a1 A1
-	a2 A2
-	ps [3]unsafe.Pointer
-}
-
-func (f *frame3[R, A0, A1, A2]) init() {
-	f.ps = [3]unsafe.Pointer{unsafe.Pointer(&f.a0), unsafe.Pointer(&f.a1), unsafe.Pointer(&f.a2)}
-}
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame3[R, A0, A1, A2]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-	var z1 A1
-	f.a1 = z1
-	var z2 A2
-	f.a2 = z2
-}
-
-func bind3[R any, A0 any, A1 any, A2 any](p *prepared) func(A0, A1, A2) R {
-	s := newFrames[frame3[R, A0, A1, A2]]()
-	return func(a0 A0, a1 A1, a2 A2) R {
-		f, i := take(s)
-		f.a0 = a0
-		f.a1 = a1
-		f.a2 = a2
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame4[R any, A0 any, A1 any, A2 any, A3 any] struct {
-	r  R
-	a0 A0
-	a1 A1
-	a2 A2
-	a3 A3
-	ps [4]unsafe.Pointer
-}
-
-func (f *frame4[R, A0, A1, A2, A3]) init() {
-	f.ps = [4]unsafe.Pointer{unsafe.Pointer(&f.a0), unsafe.Pointer(&f.a1), unsafe.Pointer(&f.a2), unsafe.Pointer(&f.a3)}
-}
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame4[R, A0, A1, A2, A3]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-	var z1 A1
-	f.a1 = z1
-	var z2 A2
-	f.a2 = z2
-	var z3 A3
-	f.a3 = z3
-}
-
-func bind4[R any, A0 any, A1 any, A2 any, A3 any](p *prepared) func(A0, A1, A2, A3) R {
-	s := newFrames[frame4[R, A0, A1, A2, A3]]()
+	p := prepAt(fn, name, descOf[R](), descOf[A0](), descOf[A1](), descOf[A2](), descOf[A3]())
 	return func(a0 A0, a1 A1, a2 A2, a3 A3) R {
-		f, i := take(s)
-		f.a0 = a0
-		f.a1 = a1
-		f.a2 = a2
-		f.a3 = a3
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame5[R any, A0 any, A1 any, A2 any, A3 any, A4 any] struct {
-	r  R
-	a0 A0
-	a1 A1
-	a2 A2
-	a3 A3
-	a4 A4
-	ps [5]unsafe.Pointer
-}
-
-func (f *frame5[R, A0, A1, A2, A3, A4]) init() {
-	f.ps = [5]unsafe.Pointer{unsafe.Pointer(&f.a0), unsafe.Pointer(&f.a1), unsafe.Pointer(&f.a2), unsafe.Pointer(&f.a3), unsafe.Pointer(&f.a4)}
-}
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame5[R, A0, A1, A2, A3, A4]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-	var z1 A1
-	f.a1 = z1
-	var z2 A2
-	f.a2 = z2
-	var z3 A3
-	f.a3 = z3
-	var z4 A4
-	f.a4 = z4
-}
-
-func bind5[R any, A0 any, A1 any, A2 any, A3 any, A4 any](p *prepared) func(A0, A1, A2, A3, A4) R {
-	s := newFrames[frame5[R, A0, A1, A2, A3, A4]]()
-	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4) R {
-		f, i := take(s)
-		f.a0 = a0
-		f.a1 = a1
-		f.a2 = a2
-		f.a3 = a3
-		f.a4 = a4
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame6[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any] struct {
-	r  R
-	a0 A0
-	a1 A1
-	a2 A2
-	a3 A3
-	a4 A4
-	a5 A5
-	ps [6]unsafe.Pointer
-}
-
-func (f *frame6[R, A0, A1, A2, A3, A4, A5]) init() {
-	f.ps = [6]unsafe.Pointer{unsafe.Pointer(&f.a0), unsafe.Pointer(&f.a1), unsafe.Pointer(&f.a2), unsafe.Pointer(&f.a3), unsafe.Pointer(&f.a4), unsafe.Pointer(&f.a5)}
-}
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame6[R, A0, A1, A2, A3, A4, A5]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-	var z1 A1
-	f.a1 = z1
-	var z2 A2
-	f.a2 = z2
-	var z3 A3
-	f.a3 = z3
-	var z4 A4
-	f.a4 = z4
-	var z5 A5
-	f.a5 = z5
-}
-
-func bind6[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any](p *prepared) func(A0, A1, A2, A3, A4, A5) R {
-	s := newFrames[frame6[R, A0, A1, A2, A3, A4, A5]]()
-	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5) R {
-		f, i := take(s)
-		f.a0 = a0
-		f.a1 = a1
-		f.a2 = a2
-		f.a3 = a3
-		f.a4 = a4
-		f.a5 = a5
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame7[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any] struct {
-	r  R
-	a0 A0
-	a1 A1
-	a2 A2
-	a3 A3
-	a4 A4
-	a5 A5
-	a6 A6
-	ps [7]unsafe.Pointer
-}
-
-func (f *frame7[R, A0, A1, A2, A3, A4, A5, A6]) init() {
-	f.ps = [7]unsafe.Pointer{unsafe.Pointer(&f.a0), unsafe.Pointer(&f.a1), unsafe.Pointer(&f.a2), unsafe.Pointer(&f.a3), unsafe.Pointer(&f.a4), unsafe.Pointer(&f.a5), unsafe.Pointer(&f.a6)}
-}
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame7[R, A0, A1, A2, A3, A4, A5, A6]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-	var z1 A1
-	f.a1 = z1
-	var z2 A2
-	f.a2 = z2
-	var z3 A3
-	f.a3 = z3
-	var z4 A4
-	f.a4 = z4
-	var z5 A5
-	f.a5 = z5
-	var z6 A6
-	f.a6 = z6
-}
-
-func bind7[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any](p *prepared) func(A0, A1, A2, A3, A4, A5, A6) R {
-	s := newFrames[frame7[R, A0, A1, A2, A3, A4, A5, A6]]()
-	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5, a6 A6) R {
-		f, i := take(s)
-		f.a0 = a0
-		f.a1 = a1
-		f.a2 = a2
-		f.a3 = a3
-		f.a4 = a4
-		f.a5 = a5
-		f.a6 = a6
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame8[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any] struct {
-	r  R
-	a0 A0
-	a1 A1
-	a2 A2
-	a3 A3
-	a4 A4
-	a5 A5
-	a6 A6
-	a7 A7
-	ps [8]unsafe.Pointer
-}
-
-func (f *frame8[R, A0, A1, A2, A3, A4, A5, A6, A7]) init() {
-	f.ps = [8]unsafe.Pointer{unsafe.Pointer(&f.a0), unsafe.Pointer(&f.a1), unsafe.Pointer(&f.a2), unsafe.Pointer(&f.a3), unsafe.Pointer(&f.a4), unsafe.Pointer(&f.a5), unsafe.Pointer(&f.a6), unsafe.Pointer(&f.a7)}
-}
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame8[R, A0, A1, A2, A3, A4, A5, A6, A7]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-	var z1 A1
-	f.a1 = z1
-	var z2 A2
-	f.a2 = z2
-	var z3 A3
-	f.a3 = z3
-	var z4 A4
-	f.a4 = z4
-	var z5 A5
-	f.a5 = z5
-	var z6 A6
-	f.a6 = z6
-	var z7 A7
-	f.a7 = z7
-}
-
-func bind8[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any](p *prepared) func(A0, A1, A2, A3, A4, A5, A6, A7) R {
-	s := newFrames[frame8[R, A0, A1, A2, A3, A4, A5, A6, A7]]()
-	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5, a6 A6, a7 A7) R {
-		f, i := take(s)
-		f.a0 = a0
-		f.a1 = a1
-		f.a2 = a2
-		f.a3 = a3
-		f.a4 = a4
-		f.a5 = a5
-		f.a6 = a6
-		f.a7 = a7
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame9[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any, A8 any] struct {
-	r  R
-	a0 A0
-	a1 A1
-	a2 A2
-	a3 A3
-	a4 A4
-	a5 A5
-	a6 A6
-	a7 A7
-	a8 A8
-	ps [9]unsafe.Pointer
-}
-
-func (f *frame9[R, A0, A1, A2, A3, A4, A5, A6, A7, A8]) init() {
-	f.ps = [9]unsafe.Pointer{unsafe.Pointer(&f.a0), unsafe.Pointer(&f.a1), unsafe.Pointer(&f.a2), unsafe.Pointer(&f.a3), unsafe.Pointer(&f.a4), unsafe.Pointer(&f.a5), unsafe.Pointer(&f.a6), unsafe.Pointer(&f.a7), unsafe.Pointer(&f.a8)}
-}
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame9[R, A0, A1, A2, A3, A4, A5, A6, A7, A8]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-	var z1 A1
-	f.a1 = z1
-	var z2 A2
-	f.a2 = z2
-	var z3 A3
-	f.a3 = z3
-	var z4 A4
-	f.a4 = z4
-	var z5 A5
-	f.a5 = z5
-	var z6 A6
-	f.a6 = z6
-	var z7 A7
-	f.a7 = z7
-	var z8 A8
-	f.a8 = z8
-}
-
-func bind9[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any, A8 any](p *prepared) func(A0, A1, A2, A3, A4, A5, A6, A7, A8) R {
-	s := newFrames[frame9[R, A0, A1, A2, A3, A4, A5, A6, A7, A8]]()
-	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5, a6 A6, a7 A7, a8 A8) R {
-		f, i := take(s)
-		f.a0 = a0
-		f.a1 = a1
-		f.a2 = a2
-		f.a3 = a3
-		f.a4 = a4
-		f.a5 = a5
-		f.a6 = a6
-		f.a7 = a7
-		f.a8 = a8
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame10[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any, A8 any, A9 any] struct {
-	r  R
-	a0 A0
-	a1 A1
-	a2 A2
-	a3 A3
-	a4 A4
-	a5 A5
-	a6 A6
-	a7 A7
-	a8 A8
-	a9 A9
-	ps [10]unsafe.Pointer
-}
-
-func (f *frame10[R, A0, A1, A2, A3, A4, A5, A6, A7, A8, A9]) init() {
-	f.ps = [10]unsafe.Pointer{unsafe.Pointer(&f.a0), unsafe.Pointer(&f.a1), unsafe.Pointer(&f.a2), unsafe.Pointer(&f.a3), unsafe.Pointer(&f.a4), unsafe.Pointer(&f.a5), unsafe.Pointer(&f.a6), unsafe.Pointer(&f.a7), unsafe.Pointer(&f.a8), unsafe.Pointer(&f.a9)}
-}
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame10[R, A0, A1, A2, A3, A4, A5, A6, A7, A8, A9]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-	var z1 A1
-	f.a1 = z1
-	var z2 A2
-	f.a2 = z2
-	var z3 A3
-	f.a3 = z3
-	var z4 A4
-	f.a4 = z4
-	var z5 A5
-	f.a5 = z5
-	var z6 A6
-	f.a6 = z6
-	var z7 A7
-	f.a7 = z7
-	var z8 A8
-	f.a8 = z8
-	var z9 A9
-	f.a9 = z9
-}
-
-func bind10[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any, A8 any, A9 any](p *prepared) func(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9) R {
-	s := newFrames[frame10[R, A0, A1, A2, A3, A4, A5, A6, A7, A8, A9]]()
-	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5, a6 A6, a7 A7, a8 A8, a9 A9) R {
-		f, i := take(s)
-		f.a0 = a0
-		f.a1 = a1
-		f.a2 = a2
-		f.a3 = a3
-		f.a4 = a4
-		f.a5 = a5
-		f.a6 = a6
-		f.a7 = a7
-		f.a8 = a8
-		f.a9 = a9
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
-		return r
-	}
-}
-
-type frame11[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any, A8 any, A9 any, A10 any] struct {
-	r   R
-	a0  A0
-	a1  A1
-	a2  A2
-	a3  A3
-	a4  A4
-	a5  A5
-	a6  A6
-	a7  A7
-	a8  A8
-	a9  A9
-	a10 A10
-	ps  [11]unsafe.Pointer
-}
-
-func (f *frame11[R, A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10]) init() {
-	f.ps = [11]unsafe.Pointer{unsafe.Pointer(&f.a0), unsafe.Pointer(&f.a1), unsafe.Pointer(&f.a2), unsafe.Pointer(&f.a3), unsafe.Pointer(&f.a4), unsafe.Pointer(&f.a5), unsafe.Pointer(&f.a6), unsafe.Pointer(&f.a7), unsafe.Pointer(&f.a8), unsafe.Pointer(&f.a9), unsafe.Pointer(&f.a10)}
-}
-
-// clear drops the values so a parked frame holds no caller pointer.
-func (f *frame11[R, A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10]) clear() {
-	var zr R
-	f.r = zr
-	var z0 A0
-	f.a0 = z0
-	var z1 A1
-	f.a1 = z1
-	var z2 A2
-	f.a2 = z2
-	var z3 A3
-	f.a3 = z3
-	var z4 A4
-	f.a4 = z4
-	var z5 A5
-	f.a5 = z5
-	var z6 A6
-	f.a6 = z6
-	var z7 A7
-	f.a7 = z7
-	var z8 A8
-	f.a8 = z8
-	var z9 A9
-	f.a9 = z9
-	var z10 A10
-	f.a10 = z10
-}
-
-func bind11[R any, A0 any, A1 any, A2 any, A3 any, A4 any, A5 any, A6 any, A7 any, A8 any, A9 any, A10 any](p *prepared) func(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10) R {
-	s := newFrames[frame11[R, A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10]]()
-	return func(a0 A0, a1 A1, a2 A2, a3 A3, a4 A4, a5 A5, a6 A6, a7 A7, a8 A8, a9 A9, a10 A10) R {
-		f, i := take(s)
-		f.a0 = a0
-		f.a1 = a1
-		f.a2 = a2
-		f.a3 = a3
-		f.a4 = a4
-		f.a5 = a5
-		f.a6 = a6
-		f.a7 = a7
-		f.a8 = a8
-		f.a9 = a9
-		f.a10 = a10
-		p.call(unsafe.Pointer(&f.r), f.ps[:])
-		r := f.r
-		f.clear()
-		s.release(i)
+		var r R
+		var ps [4]unsafe.Pointer
+		ps[0] = noescape(unsafe.Pointer(&a0))
+		ps[1] = noescape(unsafe.Pointer(&a1))
+		ps[2] = noescape(unsafe.Pointer(&a2))
+		ps[3] = noescape(unsafe.Pointer(&a3))
+		p.call(noescape(unsafe.Pointer(&r)), &ps[0], 4)
 		return r
 	}
 }

@@ -54,9 +54,7 @@ var esc *[1]unsafe.Pointer
 //go:noinline
 func fillThenGrow(dst *[1]unsafe.Pointer) (before, after uintptr) {
 	var local [4]uint64
-	// Stored as an integer so the compiler keeps local in the frame, as the
-	// old wrappers' noescape did.
-	*(*uintptr)(unsafe.Pointer(&dst[0])) = uintptr(unsafe.Pointer(&local[0]))
+	dst[0] = noescape(unsafe.Pointer(&local[0]))
 	before = uintptr(unsafe.Pointer(&local[0]))
 	// Deep enough to exceed the starting stack and force a copy. The result is
 	// consumed so the recursion cannot be optimised away.

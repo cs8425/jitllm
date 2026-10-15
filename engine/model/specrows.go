@@ -47,9 +47,6 @@ type rowsOut struct {
 	// recurrent state after row r of the call: a rejection after row r takes
 	// it back (recSnap). Device blocks keep their own (nn.RecRewinder).
 	snap []recSnap
-	// ngBase is the step's row the chunk the n-gram block is running begins
-	// at, for snapTail.
-	ngBase int
 	// noCap is a gate's break (TestSpecOverAFinalSoftcap): the host's head
 	// over the step's rows skips the final softcap. false in every step a
 	// session makes.
@@ -93,13 +90,11 @@ func (r *rowsOut) foldHead(h *nn.Head, base, n int) (func(), bool) {
 	return nil, false
 }
 
-// stepRows runs src -- rows of slot 0 at the session's next positions, ids
-// their tokens (nil for rows with none: a draft's) -- and fills out (see
-// rowsOut). What reads a row's token past its embedding (Qwen3.8-Flash-Next's
-// n-gram block) reads ids. It is prefill with every output a speculation step
+// stepRows runs src -- rows of slot 0 at the session's next positions -- and
+// fills out (see rowsOut). It is prefill with every output a speculation step
 // reads: one pass over the weights for all the rows, the KV written for each.
 // The caller holds the pager (enterPager), as every inner path assumes.
-func (s *State) stepRows(src []func(dst []float32) error, ids []int32, out *rowsOut) error {
+func (s *State) stepRows(src []func(dst []float32) error, out *rowsOut) error {
 	c := s.c
 	out.token, out.tokens = -1, nil
 	switch {
@@ -123,8 +118,8 @@ func (s *State) stepRows(src []func(dst []float32) error, ids []int32, out *rows
 	// a verification carrying replayed rows ahead of the ones it wants cost
 	// tens of milliseconds as a chunk of five to seven rows, against a few
 	// as rows. Whatever rows it wants (stepRowsDevice).
-	if len(src) >= 2 && !out.prompt && s.rowsVerifiable() && (!c.Q4E() || ids != nil) {
-		err := s.stepRowsDevice(src, ids, out)
+	if len(src) >= 2 && !out.prompt && s.rowsVerifiable() {
+		err := s.stepRowsDevice(src, out)
 		// A refusal (a kernel the ragged path lacks, as a float expert bank)
 		// left positions and every recurrent state where they were, so a
 		// model with no linear block takes the prompt chunk, and its per-row
@@ -142,7 +137,7 @@ func (s *State) stepRows(src []func(dst []float32) error, ids []int32, out *rows
 		h.ArgmaxOnly, h.Token = true, -1
 		defer func() { h.ArgmaxOnly = false }()
 	}
-	lg, err := s.prefillSrc(0, src, ids, nil)
+	lg, err := s.prefillSrc(0, src, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -186,10 +181,7 @@ func (s *State) rowsVerifiable() bool {
 // (tier.ragStep.chain) -- runs every row through the head in position order
 // into s.rowsLog and s.rowsHid, and the tail is copied out: a few rows of
 // head beside a prompt chunk.
-func (s *State) stepRowsDevice(src []func(dst []float32) error, ids []int32, out *rowsOut) error {
-	if s.c.Q4E() {
-		return s.stepRowsStreams(src, ids, out)
-	}
+func (s *State) stepRowsDevice(src []func(dst []float32) error, out *rowsOut) error {
 	if s.c.PLEDim != 0 {
 		// A row here is an embedding without its token, and Gemma 4's
 		// per-layer inputs are built from the token.
@@ -334,80 +326,7 @@ func (r *rowsOut) snapRow(s *State, li, slot, row int) {
 	nc, ns := g.convStateLen(), g.stateStride()
 	sn := &r.snap[row]
 	copy(sn.conv[li], s.rconv[li][slot*nc:(slot+1)*nc])
-	if s.c.NGramAt(li) {
-		// The n-gram block ran every row of the chunk before the delta rule
-		// steps the first: its tail is the chunk's last row's by now, and
-		// snapTail took each row's as the block ran it.
-		ns = g.deltaStateLen()
-	}
-	copy(sn.state[li][:ns], s.rstate[li][slot*g.stateStride():slot*g.stateStride()+ns])
-}
-
-// snapTail copies v into the snapshot after row `row` of the step's chunk
-// that begins at ngBase, at off into block li's recurrent tail: the n-gram
-// block's predecessors (off 0) and convolution history, as each row moves
-// them on (ngramRows, ngramApply).
-func (r *rowsOut) snapTail(s *State, li, row, off int, v []float32) {
-	if r == nil {
-		return
-	}
-	row += r.ngBase
-	if row >= len(r.snap) || r.snap[row].state == nil || r.snap[row].state[li] == nil {
-		return
-	}
-	copy(r.snap[row].state[li][s.dg.deltaStateLen()+off:], v)
-}
-
-// stepRowsStreams is stepRowsDevice for Qwen3.8-Flash-Next: its rows are
-// hyper-connected streams with n-gram rows beside them, which the batched
-// step's altRowsStep builds -- the streams expanded, the n-gram rows hashed
-// from ids, the blocks on the device as rows in position order, the head on
-// the host over the collapsed streams. Every row runs through the head and
-// the wanted tail is copied out.
-func (s *State) stepRowsStreams(src []func(dst []float32) error, ids []int32, out *rowsOut) error {
-	m, c := s.m, s.c
-	n := len(src)
-	p0 := s.bpos[0]
-	if p0+n > s.maxSeq {
-		return errFull{s.maxSeq, s.reqSeq}
-	}
-	s.growDeviceBatch(n)
-	s.growBatch(n)
-	if len(s.rowsPos) < 2*n {
-		s.rowsPos = make([]int, 2*n)
-	}
-	pos, slot := s.rowsPos[:n], s.rowsPos[n:2*n]
-	for i := range n {
-		row := s.bx[i*c.NEmbd : (i+1)*c.NEmbd]
-		if err := src[i](row); err != nil {
-			return err
-		}
-		pos[i] = p0 + i
-		slot[i] = pos[i] // sequence 0's slots are its positions (nn.RowsDevice)
-		if err := m.addPos(row, s.prow, pos[i]); err != nil {
-			return err
-		}
-		s.ropeRow(i, s.ropeOf(0, pos[i]))
-	}
-	s.relocateFor(p0 + n)
-	rd, _ := s.onRowsDevice()
-	nlogit := n
-	if out.noHead {
-		nlogit = 0
-	}
-	s.rowsLog = grow32(s.rowsLog, n*c.NVocab)
-	logits := s.rowsLog[:n*c.NVocab]
-	if err := s.altRowsStep(rd, pos, slot, ids, n, logits, nlogit); err != nil {
-		return err
-	}
-	s.advance(0, n)
-	if !out.noHead {
-		from := out.from
-		s.finishDevLogits(logits[from*c.NVocab:])
-		copy(out.logits[:(n-from)*c.NVocab], logits[from*c.NVocab:])
-		copy(out.hidden[:(n-from)*c.NEmbd], s.bh[from*c.NEmbd:n*c.NEmbd])
-	}
-	return s.kvCheck()
+	copy(sn.state[li], s.rstate[li][slot*ns:(slot+1)*ns])
 }
 
 // newRecSnap allocates one snapshot of every host linear block's state for
@@ -438,22 +357,7 @@ func (s *State) copyRec(sn *recSnap, save bool) {
 	g := s.dg
 	nc, ns := g.convStateLen(), g.stateStride()
 	for li := range s.rconv {
-		if s.rconv[li] == nil || !s.c.LayerKind(li).Recurrent() {
-			continue
-		}
-		if s.devAt(li) {
-			// The device rewinds its block's state, the n-gram block's
-			// convolution history with it; the predecessors the n-gram rows
-			// are hashed from stay the host's whichever side runs the block
-			// (ngramToDevice), so they are saved and restored here.
-			if s.c.NGramAt(li) {
-				prev, _ := s.ngramState(li, 0)
-				if save {
-					copy(sn.state[li][g.deltaStateLen():], prev)
-				} else {
-					copy(prev, sn.state[li][g.deltaStateLen():])
-				}
-			}
+		if s.rconv[li] == nil || !s.c.LayerKind(li).Recurrent() || s.devAt(li) {
 			continue
 		}
 		if save {
