@@ -147,7 +147,11 @@ type File struct {
 // Open reads and validates a container's metadata. No page is read.
 //
 // Every offset in the file is checked before it slices anything (RULE 9).
-func Open(path string) (*File, error) {
+func Open(path string) (*File, error) { return openAt(path, Version) }
+
+// openAt is Open for a container of version want: the current one, or an
+// older one a migration reads (migrate.go).
+func openAt(path string, want uint32) (*File, error) {
 	fh, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -174,7 +178,7 @@ func Open(path string) (*File, error) {
 		closeDirect(direct)
 		return nil, fmt.Errorf("jlm: reading the header of %s: %w", path, err)
 	}
-	h, err := decodeHeader(hb, size)
+	h, err := decodeHeader(hb, size, want)
 	if err != nil {
 		fh.Close()
 		closeDirect(direct)
