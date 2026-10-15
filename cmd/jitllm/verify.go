@@ -36,7 +36,7 @@ func verifyCmd(args []string) error {
 	// 0 asks the device, like run's.
 	vram := bytesFlag(fs, "vram", 0, "device weight budget, bytes or 3G/512M; 0 asks the device")
 	maxmem := bytesFlag(fs, "maxmem", 0, "host weight residency budget, bytes or 3G/512M; 0 works it out")
-	ab := fs.String("ab", "", "instead of verifying, run a paired A/B: split, submit, head, graph, softmax, fuse, actfuse, ropetab, persist, persistdeps, persistdeps-grid, persist-aa, gateup, gateup-aa, attnchunk, attnpair or regs")
+	ab := fs.String("ab", "", "instead of verifying, run a paired A/B: split, submit, head, graph, softmax, fuse, actfuse, ropetab, persist, persistdeps, persistdeps-grid, persist-aa, gateup, gateup-aa, gateup2, gateup2-aa, addnorm, addnorm-aa, attnchunk, attnpair or regs")
 	rounds := fs.Int("rounds", 21, "A/B rounds")
 	verify := fs.Bool("verify", false, "recompute every served matvec on the host and report disagreements")
 	prefill := fs.Int("prefill", 0, "gate the BATCHED device prefill: prefill this many tokens on both tiers and diff")
@@ -892,6 +892,36 @@ func abRun(m *model.Model, g *tier.GPU, which string, n, rounds, depth int) {
 	case "gateup":
 		a = bench.Case{Name: "gate, up, down", Fn: func(it int) { g.GateUpFuse = false; step(it) }}
 		b = bench.Case{Name: "gate+up, down forming act(gate)*up", Fn: func(it int) { g.GateUpFuse = true; step(it) }}
+	case "addnorm", "addnorm-aa":
+		// Prefill: each round four -n token prompts from a fresh history,
+		// the block-end add folded into the next norm or run alone.
+		ids := make([]int32, n)
+		for i := range ids {
+			ids[i] = int32(1 + (i*7919)%(m.Cfg.NVocab-1))
+		}
+		pre := func(noFold bool) func(int) {
+			return func(int) {
+				g.NoAddNormFold = noFold
+				for i := 0; i < 4; i++ {
+					s.Reset()
+					if _, err := s.Prefill(ids); err != nil {
+						panic(err)
+					}
+				}
+			}
+		}
+		a = bench.Case{Name: "block-end add alone", Fn: pre(true)}
+		b = bench.Case{Name: "block-end add folded into the next norm", Fn: pre(false)}
+		if which == "addnorm-aa" {
+			b = bench.Case{Name: "block-end add alone (again)", Fn: pre(true)}
+		}
+		defer func() { fmt.Printf("adds folded: %d\n", g.Stats().AddNormFolded) }()
+	case "gateup2":
+		a = bench.Case{Name: "gate, up gated", Fn: func(it int) { g.GateUp2 = false; step(it) }}
+		b = bench.Case{Name: "gate and up in one Gate2 launch", Fn: func(it int) { g.GateUp2 = true; step(it) }}
+	case "gateup2-aa":
+		a = bench.Case{Name: "gate, up gated", Fn: func(it int) { g.GateUp2 = false; step(it) }}
+		b = bench.Case{Name: "gate, up gated (again)", Fn: func(it int) { g.GateUp2 = false; step(it) }}
 	case "gateup-aa":
 		a = bench.Case{Name: "gate, up, down", Fn: func(it int) { g.GateUpFuse = false; step(it) }}
 		b = bench.Case{Name: "gate, up, down (again)", Fn: func(it int) { g.GateUpFuse = false; step(it) }}
@@ -901,7 +931,7 @@ func abRun(m *model.Model, g *tier.GPU, which string, n, rounds, depth int) {
 		a = bench.Case{Name: "per-op launches", Fn: func(it int) { g.Persist = false; step(it) }}
 		b = bench.Case{Name: "per-op launches (again)", Fn: func(it int) { g.Persist = false; step(it) }}
 	default:
-		panic(fmt.Errorf("jitllm: -ab takes split, submit, head, graph, softmax, fuse, actfuse, ropetab, persist, persistdeps, persistdeps-grid, persist-aa, gateup or gateup-aa, not %q", which))
+		panic(fmt.Errorf("jitllm: -ab takes split, submit, head, graph, softmax, fuse, actfuse, ropetab, persist, persistdeps, persistdeps-grid, persist-aa, gateup, gateup-aa, gateup2, gateup2-aa, addnorm or addnorm-aa, not %q", which))
 	}
 	r := bench.AB(a, b, rounds, n)
 	fmt.Printf("\n%d blocks on device\n%s\n", s.GPULayers(), r)
@@ -909,7 +939,9 @@ func abRun(m *model.Model, g *tier.GPU, which string, n, rounds, depth int) {
 		st := g.Stats()
 		fmt.Printf("%d table(s) built on the device, %d uploaded\n", st.RopeTables, st.RopeTableUploads)
 	}
-	if strings.HasPrefix(which, "gateup") {
+	if strings.HasPrefix(which, "gateup2") {
+		fmt.Printf("gate and up in one Gate2 launch in %d FFNs\n", g.Stats().GateUp2Runs)
+	} else if strings.HasPrefix(which, "gateup") {
 		fmt.Printf("gate/up fused in %d FFNs %s\n", g.Stats().GateUpFused, g.Stats().GateUpWhy)
 	}
 	if strings.HasPrefix(which, "persist") {
