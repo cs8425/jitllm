@@ -199,6 +199,15 @@ func gpuOptions() []tier.Option {
 	if set("JITLLM_GPU_GATEUP") {
 		o = append(o, tier.WithGateUpFuse(str("JITLLM_GPU_GATEUP") != "0"))
 	}
+	// JITLLM_GPU_FFN forces the dense gated FFN's recipe (tier.WithFFNForm):
+	// two, gate2, gate2in or gu; unset leaves it to the per-card trial.
+	if set("JITLLM_GPU_FFN") {
+		f, err := tier.ParseFFNForm(str("JITLLM_GPU_FFN"))
+		if err != nil {
+			panic(err)
+		}
+		o = append(o, tier.WithFFNForm(f))
+	}
 	if str("JITLLM_GPU_PERSIST") == "deps" {
 		o = append(o, tier.WithPersistDeps(true, int(num("JITLLM_GPU_PERSIST_GRID"))))
 	} else if set("JITLLM_GPU_PERSIST") {
@@ -222,6 +231,7 @@ func gpuOptions() []tier.Option {
 		{"JITLLM_NO_GPU_MMA", set("JITLLM_NO_GPU_MMA"), func(c *tier.Config) { c.NoMMA = true }},
 		{"JITLLM_GPU_NO_FUSE", set("JITLLM_GPU_NO_FUSE"), func(c *tier.Config) { c.NoFuse = true }},
 		{"JITLLM_GPU_NO_ACTFUSE", set("JITLLM_GPU_NO_ACTFUSE"), func(c *tier.Config) { c.NoActFuse = true }},
+		{"JITLLM_GPU_QKVGEMM", os.Getenv("JITLLM_GPU_QKVGEMM") == "1", func(c *tier.Config) { c.QKVGemm = true }},
 		{"JITLLM_GPU_NO_ADDNORM", set("JITLLM_GPU_NO_ADDNORM"), func(c *tier.Config) { c.NoAddNormFold = true }},
 		{"JITLLM_GPU_GATEUP2", os.Getenv("JITLLM_GPU_GATEUP2") == "0", func(c *tier.Config) { c.GateUp2 = false }},
 		{"JITLLM_GPU_ACTIN_SITES", set("JITLLM_GPU_ACTIN_SITES"),

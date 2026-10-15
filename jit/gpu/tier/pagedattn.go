@@ -81,7 +81,11 @@ type pagedScratch struct {
 	ragRows int
 	// ragAlone says the table holds every row of the call (ragTable), so the
 	// decode plan does not run.
-	ragAlone                               bool
+	ragAlone bool
+	// ragStaged says the table runs the staged form (raggedprefill.go), and
+	// ragSt is its full and windowed descriptor sets' bases and variants.
+	ragStaged                              bool
+	ragSt                                  [2]ragStaged
 	ragMap                                 []uint32
 	ragOrder                               []int
 	pMap, pRowDec, pRowDecW                backend.Buf

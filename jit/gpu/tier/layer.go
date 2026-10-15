@@ -228,8 +228,13 @@ type layer struct {
 	// fuseGateUp), and guDown the down projection forming act(gate)*up from
 	// their rows and quantizing it in its prologue, with the residual add:
 	// three launches where there were four. nil where declined.
-	gu            *segLaunch
-	guDown        backend.Kernel
+	gu     *segLaunch
+	guDown backend.Kernel
+	// ffnForm is the recipe this block's dense gated FFN runs where
+	// Config.FFNForm leaves it to the tuner (tuneFFN; recipe.go), and ffnKey
+	// the shape key it was decided under.
+	ffnForm       FFNForm
+	ffnKey        string
 	mvo, mvg, mvu mv
 	mvd           mv
 	// MoE only: the F32 router matrix and its matvec. gate/up/down above hold
@@ -1115,6 +1120,10 @@ type mv struct {
 	// gate2 is gated summing the gate's row itself (kernels.MatVecShape.Gate2):
 	// gate and up in one launch (Config.GateUp2). Built beside gated.
 	gate2 backend.Kernel
+	// gate2In is gate2 normalising and quantizing its own operand
+	// (kernels.ActIn with Norm): the FFN norm, gate and up in one launch,
+	// the FFN site's gate2in recipe. Built by fuseActIn beside gate2.
+	gate2In backend.Kernel
 	// resIn, gatedIn and kernIn are res, gated and kern building their own
 	// operand (kernels.ActIn) from the float row: pIn [pNW] in pA/pAX's
 	// place. Built by fuseActIn; nil where the block cannot take them.
@@ -1134,6 +1143,9 @@ type mv struct {
 	// actN threads.
 	act  backend.Kernel
 	actN int
+	// vt is the GemmVolta tile a binary16 twin was built at (stagedGemm), so
+	// a block's q, k and v can be put in one grid (qkvGemm); zero elsewhere.
+	vt kernels.VoltaTile
 }
 
 // kvPair is one sequence's attention history for one block.
@@ -6261,6 +6273,8 @@ type graphKey struct {
 	noFuse bool
 	// noActFuse is Config.NoActFuse, verify -ab actfuse's switch.
 	noActFuse bool
+	// ffnForm is Config.FFNForm, verify -ab ffn's switch.
+	ffnForm FFNForm
 }
 
 // canRecord reports whether this device's sessions can capture a launch
@@ -6741,10 +6755,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	if bs.pkv != nil {
 		// The width, and whether the decode plan runs beside it (ragAlone):
 		// two launch sequences a recording names.
-		ragMap = 2 * bs.pkv.ragRows
-		if bs.pkv.ragAlone {
-			ragMap++
-		}
+		ragMap = bs.pkv.ragKey()
 	}
 	if rag != nil {
 		ragN, ragRuns = len(rag.pos), len(rag.runs)
@@ -6766,7 +6777,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	// home, whose uploads sit between launches.
 	persistOn := R == 1 && rag == nil && !(bs.pkv != nil && bs.pkv.st != nil) && g.ensurePersist()
 	key := graphKey{lo, hi, nCap, R, head != nil, g.TableSplit, g.ScalarSoftmax, g.flashOn(), g.KVF16,
-		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, ragMap, hNormID, persistOn, persistOn && g.PersistDeps, g.GateUpFuse, g.GateUp2, g.GateUp2Force, g.NoAddNormFold, sid, g.NoFuse, g.NoActFuse}
+		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, ragMap, hNormID, persistOn, persistOn && g.PersistDeps, g.GateUpFuse, g.GateUp2, g.GateUp2Force, g.NoAddNormFold, sid, g.NoFuse, g.NoActFuse, g.FFNForm}
 	if lo == hi {
 		// The head alone reads no history, so the capacity is not part of
 		// what it records: keyed by it, prompts on either side of a growth
@@ -7544,6 +7555,39 @@ func (g *devTier) layersSession(s backend.Session) {
 							mvIn(l.mvq, l.mvq.kernIn, l.wq, bs.q, ain, l.nAttn, l.mvq.bias)
 							mvIn(l.mvk, l.mvk.kernIn, l.wk, bs.k, ain, l.nAttn, l.mvk.bias)
 							mvIn(l.mvv, l.mvv.kernIn, l.wv, bs.v, ain, l.nAttn, l.mvv.bias)
+						} else if qs, ok := g.qkvGemm(l, R, rag != nil); ok {
+							// q, k and v as one grid over one binary16 operand
+							// (GemmVoltaSegments); a projection left out runs alone.
+							if qs.act != actMemoK || fsrc != actMemoSrc {
+								lc.la(qs.act, qs.actN, fsrc, g.f16Buf)
+								g.ActF16Launches++
+							}
+							actMemoK, actMemoSrc = qs.act, fsrc
+							all := [3]struct {
+								m   mv
+								r   *resident
+								out backend.Buf
+							}{{l.mvq, l.wq, bs.q}, {l.mvk, l.wk, bs.k}, {l.mvv, l.wv, bs.v}}
+							var arr [16]backend.Buf
+							bufs := append(arr[:0], g.f16Buf)
+							for _, i := range qs.segs {
+								sg := all[i]
+								w := sg.r
+								if qkvGemmSwapped && i > 0 && qs.has(3-i) && all[3-i].r.t == w.t && all[3-i].m.rows == sg.m.rows {
+									w = all[3-i].r
+								}
+								bufs = append(bufs, w.qs, w.d, w.sc, sg.out)
+								if sg.m.bias != nil {
+									bufs = append(bufs, sg.m.bias)
+								}
+							}
+							lc.law(qs.kern, qs.threads, qs.width, bufs...)
+							g.QKVGemmRuns++
+							for i, sg := range all {
+								if !qs.has(i) {
+									mvrun(sg.m, sg.r, sg.out)
+								}
+							}
 						} else {
 							mvrun(l.mvq, l.wq, bs.q)
 							mvrun(l.mvk, l.wk, bs.k)
@@ -7891,7 +7935,11 @@ func (g *devTier) layersSession(s backend.Session) {
 								// nothing of their own.
 								tabRag = dec
 							}
-							err = pk.ragAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk)
+							if pk.ragStaged {
+								err = pk.ragStagedAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk, win)
+							} else {
+								err = pk.ragAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk)
+							}
 							g.RagPrefills++
 						}
 					} else if !skipAttn && useFlash {
@@ -8106,11 +8154,18 @@ func (g *devTier) layersSession(s backend.Session) {
 			// quantize the stream themselves, and the down projection
 			// quantizes act(gate)*up; the FFN norm and its quantize go. Only
 			// on a plain gated FFN, where nothing else reads the normed row.
-			ffnIn := R == 1 && rag == nil && g.actInOn() && l.mvg.kernIn != nil && (l.mvu.gatedIn != nil || l.mvu.kernIn != nil) &&
+			ffnPlain := R == 1 && rag == nil && g.actInOn() &&
 				!voltaOnly && !skipFFN && !skip["norm"] && !skip["quant"] && !skip["actmul"] && bs.normVar == nil &&
 				l.nFFNB == nil && l.nFFN != nil && l.nResid == nil && l.router == nil && l.clampB == nil &&
 				!l.nonCausal && !l.sparse && l.k3 == nil && l.q4e == nil && l.ds4 == nil && l.altRouter == nil && !p.Parallel &&
 				!ungatedFFN(p) && !(g.TableSplit && (l.mvg.alt != nil || l.mvu.alt != nil))
+			ffnIn := ffnPlain && l.mvg.kernIn != nil && (l.mvu.gatedIn != nil || l.mvu.kernIn != nil)
+			// The FFN site's gate2in recipe (recipe.go): Gate2 building its
+			// own operand from the residual the attention output's launch
+			// wrote, so the norm launch goes. Only behind a fused residual:
+			// otherwise the norm's launch is the add too, and stays.
+			g2in := ffnPlain && !ffnIn && attnFused && g.ffnFormOf(l) == FFNGate2In && l.mvu.gate2In != nil &&
+				g.gateUp2On(l, R, false, voltaOnly, false, skip["actmul"])
 			// The FFN norm's fused form where the block runs binary16 GEMMs:
 			// it writes the first FFN projection's operand too.
 			var ffnNorm, ffnConv backend.Kernel
@@ -8183,7 +8238,7 @@ func (g *devTier) layersSession(s backend.Session) {
 				if !skip["add"] && !attnFused {
 					addRes(bs.x, aout, bs.x2)
 				}
-				if ffnIn {
+				if ffnIn || g2in {
 					g.ActInSaved++
 					quantDone = true
 				} else if !voltaOnly && !skip["norm"] && !skip["quant"] && bs.rmsQ != nil && bs.normVar == nil && l.nFFNB == nil &&
@@ -8559,9 +8614,22 @@ func (g *devTier) layersSession(s backend.Session) {
 						lc.la(bs.clampK[9+2*s], R*p.NFFN, pr.out, l.clampB, pr.cl)
 					}
 					gIn, uIn = bs.gClamp, bs.uClamp
+				} else if g2in {
+					// The norm, gate and up in one launch: up's weight, the
+					// residual and the norm weight, the product's row, then the
+					// gate's weight (Gate2 with ActIn's norm).
+					wu, wg := l.up, l.gate
+					if gateUp2Swapped {
+						wu, wg = wg, wu
+					}
+					lamv(l.mvu, l.mvu.gate2In, l.mvu.rows*l.mvu.split, wu.qs, wu.d, wu.sc, bs.x2, l.nFFN, bs.act,
+						wg.qs, wg.d, wg.sc)
+					g.Gate2InRuns++
+					g.ActInLaunches++
+					gu2 = true
 				} else if ffnIn {
 					mvIn(l.mvg, l.mvg.kernIn, l.gate, bs.g, bs.x2, l.nFFN, nil)
-				} else if guOK := g.GateUpFuse && l.gu != nil && l.guDown != nil && R == 1 && rag == nil && !voltaOnly && !ungated &&
+				} else if guOK := (g.GateUpFuse || g.ffnFormOf(l) == FFNGU) && l.gu != nil && l.guDown != nil && R == 1 && rag == nil && !voltaOnly && !ungated &&
 					l.nSubFFN == nil && l.nPostFFN == nil && !resScaled && !skip["add"] && !skip["actmul"] && !skip["quantf"] &&
 					!g.TableSplit && l.mvd.k == nffn && l.k3 == nil && l.q4e == nil && !l.nonCausal && !l.sparse; guOK {
 					// Gate and up in one launch over one operand, and down
@@ -8579,7 +8647,7 @@ func (g *devTier) layersSession(s backend.Session) {
 					g.GateUpFused++
 					ffnFused = true
 					guDone = true
-				} else if gu2 = g.gateUp2On(l, R, rag != nil, voltaOnly, ungated, skip["actmul"]); gu2 {
+				} else if gu2 = g.ffnFormOf(l) != FFNTwo && g.gateUp2On(l, R, rag != nil, voltaOnly, ungated, skip["actmul"]); gu2 {
 					// Gate and up in one launch: up's weight, the operand, the
 					// product's row, then the gate's weight (Gate2).
 					wu, wg := l.up, l.gate
