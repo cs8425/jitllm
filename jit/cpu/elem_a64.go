@@ -453,6 +453,7 @@ func EmitSigmoidMul() []byte      { return EmitA64SigmoidMul() }
 func EmitLayerNorm(n int, bias bool) []byte { return EmitA64LayerNorm(n, bias) }
 func EmitGaussTopK(n int) []byte            { return emitA64RowStat(n, false, RowGauss) }
 func EmitMagMatch(n int) []byte             { return emitA64RowStat(n, false, RowMag) }
+func EmitRowStd(n int) []byte               { return emitA64RowStat(n, false, RowStd) }
 
 func EmitAxpy() []byte    { return EmitA64Axpy() }
 func EmitScale() []byte   { return EmitA64Scale() }

@@ -109,15 +109,24 @@ func emitA64RowStat(n int, bias bool, mode RowMode) []byte {
 		a.FSUB4s(r, r, 30)
 		a.FMUL4s(r, r, r)
 	}, true)
-	a.LDRs(5, X5, 0) // 1/n
+	if mode == RowStd {
+		a.LDRs(5, X5, 12) // 1/(n-1)
+	} else {
+		a.LDRs(5, X5, 0) // 1/n
+	}
 	a.LDRs(6, X5, 4) // eps
 	a.FMULs(0, 0, 5)
-	if mode == RowMag {
+	switch mode {
+	case RowMag:
 		a.FMAX4s(0, 0, 6)
-	} else {
+	case RowStd:
+	default:
 		a.FADD4s(0, 0, 6)
 	}
 	a.FSQRT4s(0, 0)
+	if mode == RowStd {
+		a.FADD4s(0, 0, 6) // the deviation plus eps
+	}
 	a.LDRs(7, X5, 8) // 1.0, or the gaussian's c
 	switch mode {
 	case RowGauss:
@@ -142,6 +151,9 @@ func emitA64RowStat(n int, bias bool, mode RowMode) []byte {
 			a.FSUB4s(r, r, 31)
 			a.FMAX4s(r, r, 28)
 		case RowMag:
+			a.FMUL4s(r, r, 31)
+		case RowStd:
+			a.FSUB4s(r, r, 30)
 			a.FMUL4s(r, r, 31)
 		default:
 			a.FSUB4s(r, r, 30)
