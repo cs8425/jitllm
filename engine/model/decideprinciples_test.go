@@ -43,8 +43,15 @@ func decisionDevices(t *testing.T) []*tier.GPU {
 // migration, so the device attends over nothing it wrote.
 func TestDecisionRelocatesMidPrompt(t *testing.T) {
 	for _, c := range decisionCases {
-		if c.kind == jlm.DecisionLaya {
+		if c.kind == jlm.DecisionLaya || c.kind == jlm.DecisionD1Omni {
 			continue // an encoder has no history: TestDecisionRelocatesBetweenDevices
+		}
+		if c.kind == jlm.DecisionVllmD3 {
+			// A non-causal prompt is one bidirectional run, which no move can
+			// cut: its rows' scores need every row's keys. Its relocation is
+			// between questions (TestDecisionRelocatesBetweenDevices,
+			// TestDecisionMovesBetweenCards).
+			continue
 		}
 		t.Run(c.name, func(t *testing.T) {
 			m := openDecision(t, c.gguf, c.kind)
@@ -128,8 +135,9 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 			// 8.1 off on a V100 at 1200 MiB, worse than losing every summary).
 			// Selected (RULE 10): at least one budget must leave the head home
 			// with blocks placed, the case that walks the release.
+			// The small budgets are the test models' (openjev's is 45 MB).
 			budgeted := 0
-			for _, mb := range []uint64{500, 700, 900, 1200, 1600, 2400} {
+			for _, mb := range []uint64{16, 32, 64, 128, 500, 700, 900, 1200, 1600, 2400} {
 				g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(stepDevices()[0]),
 					tier.WithDeviceTune(tier.TuneOff), tier.WithBudget(mb << 20)}, testTierOpts(t)...)...)
 				if err != nil {
@@ -176,8 +184,12 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 // prompt ran on a device: the f32 reduction-order band of RULE 11c. Measured
 // on the V100 (CUDA, Vulkan): d1 0.029-0.037, with its short convolutions'
 // state lost 0.082-0.095 (three taps of history: a thin but clean margin);
-// lev above 0.3 on CUDA, with its delta-rule state lost 3.2.
-var decisionRelocTol = map[string]float64{"d1-3B": 0.06, "lev": 1.0, "clef": 1.0, "clef-fixture": 0.01}
+// lev above 0.3 on CUDA, with its delta-rule state lost 3.2; the openjev test
+// model 0.0008 on the laptop, its state lost 0.028.
+// vllm-d3 (V100, CUDA and Vulkan): a label logit moves 0.0235 between cards
+// and 0.0299 with the recurrent summaries lost, a thin margin: its attention
+// sees the whole prompt, so the linear blocks' state carries less of it.
+var decisionRelocTol = map[string]float64{"d1-3B": 0.06, "openjev": 0.005, "lev": 1.0, "vllm-d3": 0.026, "clef": 1.0, "clef-fixture": 0.01}
 
 // TestDecisionRelocatesBetweenDevices moves one Decider's blocks from the host
 // onto each device in turn and home, answering the same request at every
@@ -187,7 +199,8 @@ func TestDecisionRelocatesBetweenDevices(t *testing.T) {
 	for _, c := range append([]struct {
 		name, gguf string
 		kind       jlm.DecisionKind
-	}{{"laya-fixture", "laya/fixture/laya-fixture.gguf", jlm.DecisionLaya}}, decisionNames()...) {
+	}{{"laya-fixture", "laya/fixture/laya-fixture.gguf", jlm.DecisionLaya},
+		{"d1-omni", d1OmniModel, jlm.DecisionD1Omni}}, decisionNames()...) {
 		t.Run(c.name, func(t *testing.T) {
 			m := openDecision(t, c.gguf, c.kind, noTune)
 			defer m.Close()
@@ -256,7 +269,7 @@ func decisionNames() []struct {
 		kind       jlm.DecisionKind
 	}
 	for _, c := range decisionCases {
-		if c.kind != jlm.DecisionLaya {
+		if c.kind != jlm.DecisionLaya && c.kind != jlm.DecisionD1Omni {
 			out = append(out, struct {
 				name, gguf string
 				kind       jlm.DecisionKind

@@ -115,7 +115,7 @@ func padPatchK(t *jlm.Tensor, nembd int) error {
 func quantizeTower(ts []jlm.Tensor) error {
 	for i := range ts {
 		t := &ts[i]
-		if !towerMatrix[t.Role] {
+		if !towerMatrix[t.Role] && !jlm.AudioMatrix(t.Role) {
 			continue
 		}
 		if jlm.Packed(t.Type) {
@@ -130,14 +130,21 @@ func quantizeTower(ts []jlm.Tensor) error {
 				"2-D by the time it is quantized", t.Name, t.NDim)
 		}
 		k, rows := int(t.Dims[0]), int(t.Dims[1])
-		if k%q8Elems != 0 {
-			return fmt.Errorf("convert: %s has k=%d, which is not a multiple of %d, so it "+
-				"cannot be quantized; a verbatim tower matrix would reach the source "+
-				"format's layout at inference", t.Name, k, q8Elems)
-		}
 		vals := make([]float32, k*rows)
 		if err := quant.Dequant32(src, t.Data, vals); err != nil {
 			return fmt.Errorf("convert: %s: %w", t.Name, err)
+		}
+		// A k that is not a whole number of blocks (a tower 144 wide) is
+		// padded with zero columns to the next one, which add nothing to a
+		// product; the engine reads the matrix at the tower's width and pads
+		// each activation row to match (model.unpadK, State.padRows).
+		if kp := (k + q8Elems - 1) / q8Elems * q8Elems; kp != k {
+			padded := make([]float32, kp*rows)
+			for r := 0; r < rows; r++ {
+				copy(padded[r*kp:], vals[r*k:(r+1)*k])
+			}
+			vals, k = padded, kp
+			t.Dims[0] = uint64(kp)
 		}
 		t.Data = quantizeQ8Rows(vals, k, rows)
 		t.Type = jlm.TypeQ8
@@ -223,7 +230,9 @@ func f32ToF16(f float32) uint16 {
 //
 // A still image is fed to both planes, so both read the same im2col output and
 // x*W0 + x*W1 = x*(W0+W1). This is exact only for a still image: two video
-// frames differ, and a video path would have to carry both planes.
+// frames differ, so the second plane stays in the container beside the sum
+// (RoleVPatchEmbd, index 1), and a video's pair of frames runs as
+// x0*(W0+W1) + (x1-x0)*W1 = x0*W0 + x1*W1.
 func foldPatchPlanes(s *jlm.Source) error {
 	var base *jlm.Tensor
 	for i := range s.Tensors {
@@ -253,6 +262,7 @@ func foldPatchPlanes(s *jlm.Source) error {
 			return fmt.Errorf("convert: %s + %s: %w", base.Name, t.Name, err)
 		}
 		base.Data = sum
+		keep = append(keep, *t)
 		folded++
 	}
 	s.Tensors = keep

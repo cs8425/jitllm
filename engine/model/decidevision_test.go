@@ -177,7 +177,8 @@ func TestD1PicturesMatchLlamaCpp(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, state, qs, urls, err := ParseDecisionRequest(body)
+			parsed, err := ParseDecisionRequest(body)
+			state, qs, urls := parsed.State, parsed.Questions, parsed.Images
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -206,6 +207,27 @@ func TestD1PicturesMatchLlamaCpp(t *testing.T) {
 			}
 			checkDecisions(t, qs, ans, gold, 0.05, true)
 
+			// The server's path: the picture request in a batch beside a text
+			// request runs alone and answers as Decide did; the text request
+			// answers from the batch.
+			text, tqs := decisionRequest(t, filepath.Join("testdata", "decision", "support.json"))
+			bo, err := d.DecideBatch([]DecisionRequest{{State: state, Questions: qs, Images: imgs},
+				{State: text, Questions: tqs}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bo[0].Err != nil || bo[1].Err != nil {
+				t.Fatalf("the batch: %v, %v", bo[0].Err, bo[1].Err)
+			}
+			for i := range qs {
+				if probDiffBatch(bo[0].Answers[i], ans[i]) != 0 {
+					t.Fatalf("%s: the batch's answer to the picture request is not Decide's", qs[i].ID)
+				}
+			}
+			if len(bo[1].Answers) != len(tqs) {
+				t.Fatalf("the text request has %d answers for %d questions", len(bo[1].Answers), len(tqs))
+			}
+
 			// Paging: the same request under a budget of four text pages and
 			// two tower pages evicts and re-reads, and answers the same to
 			// the bit.
@@ -232,4 +254,16 @@ func TestD1PicturesMatchLlamaCpp(t *testing.T) {
 			t.Logf("under a %d-byte budget: every answer bit-identical", budget)
 		})
 	}
+}
+
+// probDiffBatch is the largest difference between two answers' probabilities,
+// P(true) for a noul.
+func probDiffBatch(a, b DecisionAnswer) float64 {
+	w := math.Abs(a.Noul - b.Noul)
+	for i := range a.Probs {
+		if i < len(b.Probs) {
+			w = math.Max(w, math.Abs(a.Probs[i]-b.Probs[i]))
+		}
+	}
+	return w
 }

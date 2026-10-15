@@ -76,6 +76,7 @@ var sseProbes = []sseProbe{
 	{"Softmax", func(em *Emitters) error { return probe0(em.Softmax) }},
 	{"LogSoftmax", func(em *Emitters) error { return probe0(em.LogSoftmax) }},
 	{"SigmoidMul", func(em *Emitters) error { return probe0(em.SigmoidMul) }},
+	{"Ln", func(em *Emitters) error { return probe0(em.Ln) }},
 	{"XIELU", func(em *Emitters) error { return probe0(em.XIELU) }},
 	{"ActMul", func(em *Emitters) error {
 		for _, k := range Gated {
@@ -96,7 +97,7 @@ var sseProbes = []sseProbe{
 	{"RMSNorm", func(em *Emitters) error { _, err := em.RMSNorm(64); return err }},
 	{"LayerNorm", func(em *Emitters) error { _, err := em.LayerNorm(64, true); return err }},
 	{"RowStat", func(em *Emitters) error {
-		for _, m := range []RowMode{RowGauss, RowMag} {
+		for _, m := range []RowMode{RowGauss, RowMag, RowStd} {
 			if _, err := em.RowStat(64, m); err != nil {
 				return err
 			}

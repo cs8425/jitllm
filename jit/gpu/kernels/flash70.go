@@ -24,6 +24,17 @@ type FlashPrefill70Shape struct {
 	Page, Splits int
 	// F16 reads a paged V packed as binary16 two to a word.
 	F16 bool
+	// Map reads each query slot's row from a run table, pMap after pRow: slot
+	// i is row pMap[i] of pQ, pOut and the descriptors. It is how one launch
+	// takes the prompt chunks of a ragged step (docs/design/ragged-prefill.md):
+	// each sequence's rows, in position order, fill whole workgroups of slots,
+	// the last padded with that sequence's last row, so a workgroup's rows are
+	// one sequence's as the paged form demands, and q and the output stay at
+	// the step's own rows. A padded slot computes its row's output again, the
+	// same arithmetic, and stores the same values. Paged only. With splits
+	// the partials are at the rows, and FlashAttentionMergeWide takes the
+	// same table (FlashShape.Map).
+	Map bool
 }
 
 // flashPrefillSplits is how many key runs a flash prefill workgroup's rows
@@ -33,7 +44,7 @@ func flashPrefillSplits(s FlashPrefill70Shape) int { return max(1, s.Splits) }
 // flashPrefillCheck validates a paged flash prefill shape.
 func flashPrefillCheck(what string, s FlashPrefill70Shape) error {
 	if s.Page == 0 {
-		if s.Splits > 1 || s.F16 {
+		if s.Splits > 1 || s.F16 || s.Map {
 			return fmt.Errorf("kernels: %s: splits and f16 V are the paged form's", what)
 		}
 		return nil
@@ -127,6 +138,9 @@ func FlashPrefill70(s FlashPrefill70Shape) (*ir.Kernel, error) {
 	if P > 0 {
 		name = fmt.Sprintf("flashprefill70paged_d%d_s%d", hd, s.Splits)
 	}
+	if s.Map {
+		name += "_map"
+	}
 	b := ir.New(name, [3]int{FlashPrefill70Threads, 1, 1})
 	pQ := b.Param("pQ", ir.F32)
 	pK := b.Param("pK", ir.F32)
@@ -138,6 +152,12 @@ func FlashPrefill70(s FlashPrefill70Shape) (*ir.Kernel, error) {
 		pTab, pDesc = b.Param("pTab", ir.U32), b.Param("pRow", ir.U32)
 	}
 	c := func(v int64) ir.Value { return b.Const(ir.U32, v) }
+	// rowOf is a query slot's row: itself, or the run table's (Map).
+	rowOf := func(slot ir.Value) ir.Value { return slot }
+	if s.Map {
+		pMap := b.Param("pMap", ir.U32)
+		rowOf = func(slot ir.Value) ir.Value { return b.Load(ir.U32, pMap, slot, 0) }
+	}
 	f := b.ConstF32
 	negInf := b.Bitcast(ir.F32, c(0xFF800000))
 
@@ -169,7 +189,7 @@ func FlashPrefill70(s FlashPrefill70Shape) (*ir.Kernel, error) {
 		// The workgroup's keys, [keyStart of its first row, keyEnd of its
 		// last), in 32-key tiles from a multiple of 32, which lie in one page
 		// each; this split's run of them.
-		span = tileSpanOf(b, pDesc, row0, b.Add(ir.U32, row0, c(wq*qw-1)))
+		span = tileSpanOf(b, pDesc, rowOf(row0), rowOf(b.Add(ir.U32, row0, c(wq*qw-1))))
 		kStart, ntiles = span.tileRun(b, spl, S, tk)
 		hlo = b.Sub(ir.U32, span.hi, span.lo)
 	} else {
@@ -185,7 +205,7 @@ func FlashPrefill70(s FlashPrefill70Shape) (*ir.Kernel, error) {
 		w := b.Add(ir.U32, tid, c(nth*it))
 		qi := b.Div(ir.U32, w, c(int64(hd/2)))
 		p := b.Rem(ir.U32, w, c(int64(hd/2)))
-		src := b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, row0, qi), c(int64(s.Heads))), h),
+		src := b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, rowOf(b.Add(ir.U32, row0, qi)), c(int64(s.Heads))), h),
 			c(int64(hd))), b.Shl(ir.U32, p, c(1)))
 		e := b.LoadV(ir.F32, pQ, src, 0, 2)
 		b.Store(shQ, b.Add(ir.U32, b.Mul(ir.U32, qi, c(int64(qs))), p), b.PackF16(e[0], e[1]), 0)
@@ -201,7 +221,7 @@ func FlashPrefill70(s FlashPrefill70Shape) (*ir.Kernel, error) {
 	for j := 0; j < 2; j++ {
 		for x, i := range slots {
 			if P > 0 {
-				r := b.Add(ir.U32, wrow0, colOf(j, i))
+				r := rowOf(b.Add(ir.U32, wrow0, colOf(j, i)))
 				kst[j][x], cnt[j][x] = pagedDesc(b, pDesc, r, PRowStart), pagedDesc(b, pDesc, r, PRowEnd)
 				continue
 			}
@@ -494,14 +514,14 @@ func FlashPrefill70(s FlashPrefill70Shape) (*ir.Kernel, error) {
 				for _, mk := range []int64{1, 4, 8, 16} {
 					t = b.Add(ir.F32, t, b.ShuffleXor(ir.F32, t, mk))
 				}
-				partialML(b, pOut, pbOf(b.Add(ir.U32, wrow0, colOf(j, i))), b.Max(ir.F32, m[j][x], f(-1e30)), t, rep, hd, 16)
+				partialML(b, pOut, pbOf(rowOf(b.Add(ir.U32, wrow0, colOf(j, i)))), b.Max(ir.F32, m[j][x], f(-1e30)), t, rep, hd, 16)
 			}
 		}
 		for dt := 0; dt < dts; dt++ {
 			for j := 0; j < 2; j++ {
 				for i := 0; i < 8; i++ {
 					dim := b.Add(ir.U32, c(int64(32*dt)), b.Add(ir.U32, q8, v.dRow(i)))
-					b.Store(pOut, b.Add(ir.U32, pbOf(b.Add(ir.U32, wrow0, colOf(j, i))), dim), o[dt][j][i], 0)
+					b.Store(pOut, b.Add(ir.U32, pbOf(rowOf(b.Add(ir.U32, wrow0, colOf(j, i)))), dim), o[dt][j][i], 0)
 				}
 			}
 		}
@@ -521,7 +541,7 @@ func FlashPrefill70(s FlashPrefill70Shape) (*ir.Kernel, error) {
 		for j := 0; j < 2; j++ {
 			for i := 0; i < 8; i++ {
 				dim := b.Add(ir.U32, c(int64(32*dt)), b.Add(ir.U32, q8, v.dRow(i)))
-				qr := b.Add(ir.U32, wrow0, colOf(j, i))
+				qr := rowOf(b.Add(ir.U32, wrow0, colOf(j, i)))
 				at := b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, qr, c(int64(s.Heads))), h), c(int64(hd))), dim)
 				b.Store(pOut, at, b.Mul(ir.F32, o[dt][j][i], lsum[j][slotOf(i)]), 0)
 			}

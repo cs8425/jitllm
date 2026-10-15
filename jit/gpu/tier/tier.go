@@ -34,6 +34,9 @@ type resident struct {
 	k         int
 	t         kernels.Quant
 	ok        bool // false = declined, do not retry
+	// why is the decline's reason, given again to whoever asks for the
+	// declined tensor later, so a second offer names it too.
+	why string
 	// shared says one buffer serves several blocks: a streamed mixture's
 	// compact expert bank, live only between a block's suspension and its own
 	// FFN. The per-block free walk must skip it and must not refund it; see
@@ -105,6 +108,8 @@ type kernKey struct {
 	// one more parameter and a different output, so its own entry.
 	gated bool
 	act   kernels.ActKind
+	// gate2 is a Gate2 matvec: the gate's weight as a second stream.
+	gate2 bool
 }
 
 // chooseSplit picks how many threads share a row: the fallback table when the
@@ -169,6 +174,20 @@ type Config struct {
 	// their prologue (kernels.ActIn): the A/B arm and bisection switch for
 	// the operand prologue alone. NoFuse turns it off too.
 	NoActFuse bool
+	// NoAddNormFold keeps a prompt chunk's block-end residual add a launch
+	// of its own instead of folding it into the next block's attention norm
+	// (the binary16 GEMM path's add-and-norm kernel): the A/B arm.
+	NoAddNormFold bool
+	// GateUp2 runs a dense gated FFN's gate and up as one Gate2 matvec
+	// (kernels.MatVecShape.Gate2): each workgroup sums its rows of both
+	// matrices over the one operand and writes act(gate)*up: the bits the
+	// gate's launch and up's gated launch write on PTX (kernels.Gate2Exact),
+	// the reduction-order band elsewhere. On by default, taken per shape where
+	// this device's tuner finds it faster (tuneGateUp2).
+	GateUp2 bool
+	// GateUp2Force runs Gate2 wherever the shape has it, whatever this
+	// device's tuner chose (gateUp2Pick): the A/B arm and the gates.
+	GateUp2Force bool
 	// ActInPrefetch is how many weight words each thread of an operand-prologue
 	// matvec prefetches before its prologue (kernels.ActIn.Prefetch): 0 is the
 	// default (8), -1 none.
@@ -282,6 +301,10 @@ type Config struct {
 	// kernels.FlashPrefillTile on Metal -- the other arm of those kernels'
 	// gates and measurements.
 	NoFlashPrefill bool
+	// NoRagPrefill keeps a ragged step's prompt chunks on the decode plan, a
+	// row at a time, instead of the run-table flash prefill
+	// (raggedprefill.go) -- the other arm of its gates and measurements.
+	NoRagPrefill bool
 	// SpillingTiles lets the batched GEMM run a tile whose kernel spills
 	// registers to local memory. By default a tile the device's compiler
 	// reports spilling (backend.KernelResources.SpillBytes) is passed over
@@ -487,13 +510,27 @@ type Config struct {
 	// it replaces inside a CUDA graph (gpu-kernels.md, "A persistent decode
 	// block"). CUDA only; elsewhere it is declined (Stats.PersistWhy).
 	Persist bool
+	// PersistDeps orders a persistent kernel's tasks with dependency
+	// counters (ir.PersistDeps): a task waits only for the tasks it reads or
+	// overwrites, a tile of an elementwise task only for the producer tiles
+	// whose elements it touches, and a workgroup with nothing to do in a task
+	// does not wait for it. A mode of Persist; off by default.
+	PersistDeps bool
 	// PersistGrid caps a persistent kernel's grid below the co-residency
 	// limit; zero takes the limit, or the widest launch's groups when fewer.
 	PersistGrid int
+	// GateUpFuse runs a dense gated FFN's gate and up as one launch over
+	// their shared operand (kernels.MatVecSegments) and has down form
+	// act(gate)*up and quantize it in its prologue: three launches where there
+	// were four, every row reduced as before. Off by default.
+	GateUpFuse bool
 	// NoGraph issues the token's launches one driver call at a time instead of
 	// replaying a captured graph: the other arm of that comparison, a field so
 	// both arms can be live in one process.
 	NoGraph bool
+	// NoTowerChunks refuses a picture whose whole non-causal set does not fit
+	// rather than running it row-chunked (chunkTower, LayersPhase).
+	NoTowerChunks bool
 	// NoPickMV runs the label pick as the head's whole matvec and a gather
 	// (the arm before kernels.MatVec's PickOf), for the A/B.
 	NoPickMV bool
@@ -689,13 +726,24 @@ type Stats struct {
 	// launches that carried decode's fusions over every token: q/k/v in one
 	// launch, the residual added by the projection, and act(gate)*up written
 	// by the up projection.
+	// GateUpFused counts dense gated FFNs whose gate and up ran as one
+	// launch and whose down formed act(gate)*up (Config.GateUpFuse).
+	GateUpFused int
+	// GateUpWhy is why the last block's gate and up could not be fused.
+	GateUpWhy                              string
 	RagQKVFused, RagResFused, RagGateFused int
+	// GateUp2Runs counts gated FFNs whose gate and up ran as one Gate2
+	// launch (Config.GateUp2).
+	GateUp2Runs int
 	// PersistLaunches counts persistent kernels launched (Config.Persist),
 	// PersistParts the per-op launches they ran, PersistPhases their
 	// grid-barrier-separated phases, PersistCompiles the compositions built
 	// and PersistFallbacks those that failed and ran per-op; PersistWhy is
 	// why the path is declined on this device.
+	// PersistDepLaunches counts those launched with dependency counters
+	// (Config.PersistDeps), PersistDepTiles their tile-wise edges.
 	PersistLaunches, PersistParts, PersistPhases, PersistCompiles, PersistFallbacks int
+	PersistDepLaunches, PersistDepTiles                                             int
 	PersistWhy                                                                      string
 	// RagHeadOne counts ragged steps whose head ran decode's own projection on
 	// the one row that wanted logits, rather than a batched twin over every
@@ -730,6 +778,9 @@ type Stats struct {
 	// that quantized for the int8 matvec (QuantizeAct). Each is a conversion
 	// launch, and a pass over the float row, that did not run.
 	NormF16, ActF16Fused, QuantActs int
+	// AddNormFolded counts block-end residual adds a prompt chunk folded
+	// into the next block's attention norm (Config.NoAddNormFold).
+	AddNormFolded int
 	// KVPrewarmPages counts pages a pool grew ahead of its history
 	// (PrewarmKV): the growth a State's first prompt no longer pays.
 	KVPrewarmPages int
@@ -953,6 +1004,9 @@ type Stats struct {
 	// RecZeroSource counts the bytes of zeros those copies read, uploaded
 	// once a zeroing.
 	RecZeroSource uint64
+	// RecZeroHost counts seat zeroings written from the host because the
+	// kept zeros could not be had on the device (recZeroLayers).
+	RecZeroHost int
 	// PagedStagedLaunches counts decode attentions that ran the staged
 	// kernels rather than FlashDecodeKV (kernels.ChooseDecodePlan).
 	PagedStagedLaunches int
@@ -968,6 +1022,13 @@ type Stats struct {
 	// kernels.FlashPrefill80, scores, softmax and accumulate in one kernel
 	// on m16n8k16 (sm_80 on).
 	FlashPrefill80 int
+	// RagPrefills counts run-table prefill launches inside ragged steps
+	// (raggedprefill.go): the selection check that a step's prompt chunks
+	// attended as a prefill rather than through the decode plan.
+	RagPrefills int
+	// RagForms counts batched scratches built with a flash prefill that has a
+	// run-table form: where it is 0, ragged steps keep the decode plan.
+	RagForms int
 	// PagedPrefillPasses counts the passes those launches ran over a history
 	// longer than one launch attends -- the selection check for the fold.
 	PagedPrefillPasses int
@@ -978,6 +1039,9 @@ type Stats struct {
 	// HeadFolds counts batched chunks that ran the output projection on
 	// their last row inside their own submission.
 	HeadFolds int
+	// TowerChunked counts non-causal sets built row-chunked (chunkTower), and
+	// TowerPhases the phase calls run over them (LayersPhase).
+	TowerChunked, TowerPhases int
 	// PickRows counts label picks the head ran as the picked rows' own
 	// projection (pickMV) instead of the whole head and a gather.
 	PickRows int
@@ -1140,6 +1204,10 @@ func (s *Stats) add(o Stats) {
 	s.VoltaMV += o.VoltaMV
 	s.SpillRefused += o.SpillRefused
 	s.RagGroupMV += o.RagGroupMV
+	s.GateUpFused += o.GateUpFused
+	if o.GateUpWhy != "" {
+		s.GateUpWhy = o.GateUpWhy
+	}
 	s.RagQKVFused += o.RagQKVFused
 	s.RagResFused += o.RagResFused
 	s.PersistLaunches += o.PersistLaunches
@@ -1147,10 +1215,13 @@ func (s *Stats) add(o Stats) {
 	s.PersistPhases += o.PersistPhases
 	s.PersistCompiles += o.PersistCompiles
 	s.PersistFallbacks += o.PersistFallbacks
+	s.PersistDepLaunches += o.PersistDepLaunches
+	s.PersistDepTiles += o.PersistDepTiles
 	if o.PersistWhy != "" {
 		s.PersistWhy = o.PersistWhy
 	}
 	s.RagGateFused += o.RagGateFused
+	s.GateUp2Runs += o.GateUp2Runs
 	s.RagHeadOne += o.RagHeadOne
 	s.SampleReads += o.SampleReads
 	s.PickReads += o.PickReads
@@ -1176,6 +1247,7 @@ func (s *Stats) add(o Stats) {
 	s.GemmDeep += o.GemmDeep
 	s.GemmInt8 += o.GemmInt8
 	s.NormF16 += o.NormF16
+	s.AddNormFolded += o.AddNormFolded
 	s.ActF16Fused += o.ActF16Fused
 	s.QuantActs += o.QuantActs
 	s.KVPrewarmPages += o.KVPrewarmPages
@@ -1264,12 +1336,17 @@ func (s *Stats) add(o Stats) {
 	s.RecZeroBytes += o.RecZeroBytes
 	s.RecZeroCopies += o.RecZeroCopies
 	s.RecZeroSource += o.RecZeroSource
+	s.RecZeroHost += o.RecZeroHost
 	s.PagedPrefill70 += o.PagedPrefill70
 	s.PagedAccMMA += o.PagedAccMMA
 	s.FlashPrefill80 += o.FlashPrefill80
+	s.RagPrefills += o.RagPrefills
+	s.RagForms += o.RagForms
 	s.PagedPrefillPasses += o.PagedPrefillPasses
 	s.EmbedLaunches += o.EmbedLaunches
 	s.HeadFolds += o.HeadFolds
+	s.TowerChunked += o.TowerChunked
+	s.TowerPhases += o.TowerPhases
 	s.PickRows += o.PickRows
 	s.FlashPrefills += o.FlashPrefills
 	s.VisionAttnChunks += o.VisionAttnChunks
@@ -1554,6 +1631,10 @@ type devShared struct {
 	// visCap is the rows the non-causal set is built for and visMax the
 	// largest grid a tower placed here takes (visrows.go). Guarded by mu.
 	visCap, visMax int
+	// visKeys is the keys the set's k/v pairs and score rows hold when it is
+	// row-chunked (LayersPhase): a picture of visKeys rows runs visCap rows a
+	// call. 0 when the set takes a picture whole (visKeys is visCap).
+	visKeys int
 	// visSmall counts the calls in a row the set was more than twice what
 	// they needed (ReserveRows), which shrinks it at visShrinkCalls.
 	visSmall int
@@ -1637,6 +1718,10 @@ type devShared struct {
 	// device's and not a session's: their calls are one at a time
 	// (GPU.convMu).
 	convTo launchTo
+	// convCall is the convolutional submission's arguments, and convFn its
+	// method value, made once (conv.go).
+	convCall convCallArgs
+	convFn   func(backend.Session)
 	// roomGen moves every time this device may have gained room: a refund, or
 	// a budget raised. A caller that gave blocks up reads it to know when
 	// asking for them back could succeed. See GPU.RoomGen.
@@ -1700,7 +1785,10 @@ type devShared struct {
 	// actInWin is tuneActIn's verdict per operand-prologue site key: true where
 	// the prologue measured faster than the two launches on this card.
 	// actInTrial makes fuseActIn build every candidate for that measurement.
-	actInWin   map[string]bool
+	actInWin map[string]bool
+	// gu2Win is tuneGateUp2's verdict per up-projection shape: Gate2 or
+	// the two launches.
+	gu2Win     map[splitKey]bool
 	actInTrial bool
 	ragKerns   map[moeKernKey]backend.Kernel // a batched mixture's grouped matvecs (moegroup.go)
 	moeVolta   map[moeVoltaKey]moeVoltaMV    // their tensor-core twins; see voltaGroupedMV
@@ -1901,7 +1989,9 @@ type GPU struct {
 	// its submissions, in the scratch every convolutional block there shares
 	// (conv.go), so two sessions' calls go one after the other.
 	convTmp [2][]float32
-	convMu  sync.Mutex
+	// convRuns is ConvLayers' runs, reused under convMu.
+	convRuns []run
+	convMu   sync.Mutex
 	// rowsErr is why the last LayersRows failed, naming the device: the
 	// devices' LastErr summed by Stats is whichever wrote last, not the one
 	// that refused.
@@ -2005,6 +2095,11 @@ func New(slots []Slot, options ...Option) (*GPU, error) {
 	// A jitllmtest build can make the persistent path every tier's default
 	// (PersistByDefaultForTest), so the regression gates run through it.
 	cfg.Persist = persistDefault
+	cfg.PersistDeps = persistDepsDefault
+	// Gate2 is allowed by default; tuneGateUp2 takes it per shape where it
+	// measures faster. On a V100 it read 1.008-1.028 of the two launches on
+	// Llama 1B, 3B and 8B.
+	cfg.GateUp2 = true
 	for _, f := range o.cfg {
 		f(cfg)
 	}
@@ -2278,6 +2373,12 @@ func freeScratch(bs *blockScratch) {
 		}
 	}
 	bs.vwins = nil
+	for _, b := range bs.vsegs { // the packed sequences' buffers, likewise
+		if b != nil {
+			b.Free()
+		}
+	}
+	bs.vsegs = nil
 	freePaged(bs.pkv)
 	bs.mlab.free()
 	bs.ds4.free()
@@ -2765,10 +2866,18 @@ func (g *devTier) resident(block, slot int, q kernels.Quant, w []byte, nrows, k 
 		// resident. Sharing one entry would launch a kernel against a
 		// differently strided payload (a silent out-of-bounds read), and
 		// refusing on a mismatch would stop a bank from ever being placed.
+		if !r.ok && r.why != "" {
+			g.LastErr = r.why
+		}
 		return r
 	}
 	r := &resident{nrows: nrows, k: k, t: q}
 	g.res[key] = r
+	defer func() {
+		if !r.ok {
+			r.why = g.LastErr
+		}
+	}()
 
 	// Price it before packing it: declining after a pack costs a full read and
 	// fresh host memory to learn the answer is no. PackedWords is the same
@@ -3107,7 +3216,7 @@ func (g *devTier) kernel(q kernels.Quant, k, rows, split, rowt int, bias bool) b
 // launch, which wins on small matvecs and loses on big-k ones, so it is chosen
 // per shape by tuneSplit rather than switched on.
 func (g *devTier) kernelMode(q kernels.Quant, k, rows, split, rowt int, bias, groupSplit bool) backend.Kernel {
-	kk := kernKey{q, k, rows, split, bias, rowt, groupSplit, false, 0}
+	kk := kernKey{q, k, rows, split, bias, rowt, groupSplit, false, 0, false}
 	if c, ok := g.kerns[kk]; ok {
 		return c
 	}
@@ -3165,6 +3274,33 @@ func (g *devTier) gatedKernel(q kernels.Quant, k, rows, split int, groupSplit bo
 	}
 	ker, err := kernels.MatVec(kernels.MatVecShape{Center: g.center, T: q, K: k, Rows: rows, Split: split,
 		GroupSplit: groupSplit, Gate: true, GateAct: act})
+	if err != nil {
+		g.kerns[kk], g.LastErr = nil, err.Error()
+		return nil
+	}
+	c, err := g.dev.Compile(ker)
+	if err != nil {
+		g.kerns[kk], g.LastErr = nil, err.Error()
+		g.Failed++
+		return nil
+	}
+	g.kerns[kk] = c
+	return c
+}
+
+// gate2Kernel is the FFN up projection summing the gate's row beside its own
+// and writing act(gate)*up (kernels.MatVecShape.Gate2), or nil where the
+// backend cannot make it exact or the split writes partials.
+func (g *devTier) gate2Kernel(q kernels.Quant, k, rows, split int, groupSplit bool, act kernels.ActKind) backend.Kernel {
+	if split > 1 && !groupSplit || kernels.IsFloat(q) {
+		return nil
+	}
+	kk := kernKey{t: q, k: k, rows: rows, split: split, rowt: 1, group: groupSplit, gate2: true, act: act}
+	if c, ok := g.kerns[kk]; ok {
+		return c
+	}
+	ker, err := kernels.MatVec(kernels.MatVecShape{Center: g.center, T: q, K: k, Rows: rows, Split: split,
+		GroupSplit: groupSplit, Gate2: true, GateAct: act})
 	if err != nil {
 		g.kerns[kk], g.LastErr = nil, err.Error()
 		return nil

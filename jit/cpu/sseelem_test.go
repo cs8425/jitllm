@@ -152,6 +152,7 @@ func sseElemKerns() []sseElemKern {
 		ActSitu:        oracle.Situ,
 		ActIdentity:    func(g, u float64) float64 { return g * u },
 		ActQuickGELU:   refQuickGELUMul,
+		ActReLU2:       func(g, u float64) float64 { r := math.Max(g, 0); return r * r * u },
 	}
 	for _, k := range append(Gated[:], ActQuickGELU) {
 		ks = append(ks, sseElemKern{"actmul/" + k.String(), func() ([]byte, error) { return sse.ActMul(k) },
@@ -325,6 +326,9 @@ func TestEmitActMulSSEMatchesReference(t *testing.T) {
 			return oracle.Situ(g, u)
 		case ActQuickGELU:
 			return quickGELURef(g) * u
+		case ActReLU2:
+			r := math.Max(g, 0)
+			return r * r * u
 		}
 		return oracle.SiLU(g) * u
 	}
@@ -861,6 +865,7 @@ func TestEveryElementwiseOpIsGeneratedSSE(t *testing.T) {
 		{"scale", sse.Scale},
 		{"softcap", sse.Softcap},
 		{"clamp", sse.Clamp},
+		{"ln", sse.Ln},
 	}
 	for _, k := range Gated {
 		rows = append(rows, struct {
@@ -899,6 +904,12 @@ func TestEveryElementwiseOpIsGeneratedSSE(t *testing.T) {
 			full, dst := sseElemBuf(n)
 			sfull, src := sseElemBuf(n)
 			sseElemInputs(dst, src)
+			if r.name == "ln" {
+				// ln's domain: the inputs' magnitudes, kept off zero.
+				for i := range dst {
+					dst[i] = float32(math.Abs(float64(dst[i]))) + 1e-3
+				}
+			}
 			args := Args{Out: &dst[0], AScale: &src[0], Scr: (*byte)(unsafe.Pointer(&consts[0])),
 				W: (*byte)(unsafe.Pointer(&kc[0])), K: n / ElemLanes, Rows: n % ElemLanes}
 			if r.name == "axpy" || r.name == "scale" {

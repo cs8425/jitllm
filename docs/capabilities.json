@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "container": {
-    "version": 29,
+    "version": 30,
     "note": "the engine reads only .jlm containers of exactly this version; anything else is converted with `jitllm convert`"
   },
   "input_formats": [
@@ -71,6 +71,10 @@
     {
       "name": "bert",
       "graph": "bert"
+    },
+    {
+      "name": "bitnet-b1.58",
+      "graph": "bitnet"
     },
     {
       "name": "clef",
@@ -343,6 +347,10 @@
       "graph": "arcee"
     },
     {
+      "name": "BitNetForCausalLM",
+      "graph": "bitnet"
+    },
+    {
       "name": "DeepseekV2ForCausalLM",
       "graph": "deepseek2"
     },
@@ -456,6 +464,7 @@
     }
   ],
   "projectors": [
+    "d1omni_v",
     "gemma3",
     "gemma3nv",
     "gemma4v",
@@ -489,7 +498,10 @@
       "Q6_K",
       "IQ4_NL",
       "BF16",
-      "MXFP4"
+      "TQ1_0",
+      "TQ2_0",
+      "MXFP4",
+      "TQ2_F32"
     ],
     "packed": [
       "Q4_0",
@@ -500,7 +512,9 @@
       "Q4_K",
       "Q5_K",
       "Q6_K",
-      "MXFP4"
+      "MXFP4",
+      "TQ2_0",
+      "TQ2_F32"
     ]
   },
   "backends": [

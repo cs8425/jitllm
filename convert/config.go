@@ -140,6 +140,11 @@ var archOf = map[string]jlm.Arch{
 	"dots1":       jlm.ArchDots1,
 	"phimoe":      jlm.ArchPhiMoE,
 	"apertus":     jlm.ArchApertus,
+	// BitNet b1.58 2B-4T as bitnet.cpp's converter names it (convert/bitnet.go,
+	// jlm.ArchBitNet). llama.cpp's own "bitnet" is 1bitLLM's reproduction, a
+	// SiLU gate, and its converter cannot write transformers' BitNetForCausalLM
+	// at all (it maps none of its inner-norm names); it is not this graph.
+	"bitnet-b1.58": jlm.ArchBitNet,
 	// DeepSeek V4 (text): hyper-connected residual streams, single-key MQA
 	// over a sliding window and a compressed history. See jlm.ArchDeepseek4.
 	"deepseek4": jlm.ArchDeepseek4,
@@ -195,6 +200,15 @@ func ArchitectureGraph(name string) (jlm.Arch, bool) {
 }
 
 func configOf(f *meta.File) (*jlm.Config, error) {
+	if head, ok := d1OmniHead(f); ok {
+		return d1OmniConfig(f, head)
+	}
+	return configOfFile(f)
+}
+
+// configOfFile is configOf for every file but the ones read through a view
+// (d1OmniConfig).
+func configOfFile(f *meta.File) (*jlm.Config, error) {
 	name := f.Arch()
 	arch, ok := archOf[name]
 	if !ok {
@@ -293,6 +307,8 @@ func configOf(f *meta.File) (*jlm.Config, error) {
 	case jlm.ArchLlama:
 		// llama3 is this arch too: it differs only in values the header carries
 		// (rope base, GQA, vocabulary size) and in its BPE tokenizer.
+	case jlm.ArchBitNet:
+		bitnetConfig(c)
 	case jlm.ArchQwen2:
 		// llama's graph with biases on q, k and v, which are tensors.
 		c.Flags |= jlm.FlagRopeNeox
@@ -1095,6 +1111,9 @@ var projectorOf = map[string]jlm.Projector{
 	"kimivl":           jlm.ProjKimiVL,
 	"qwen3vl_merger":   jlm.ProjQwen3VL,
 	"lfm2":             jlm.ProjLFM2,
+	// d1-omni's vision half: LFM2-VL's tower and projector with no input
+	// norm, resampled bilinear (its vision.py).
+	"d1omni_v": jlm.ProjLFM2,
 }
 
 // Projectors is every name in that list, sorted.

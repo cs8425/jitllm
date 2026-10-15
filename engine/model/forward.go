@@ -77,7 +77,12 @@ func ResetProfile() {
 // State is one generation session: the KV cache plus the scratch buffers the
 // forward pass reuses. One State is one conversation; it is not safe to share.
 type State struct {
-	m *Model
+	// bidirAll makes a mixed prompt's every row one bidirectional run
+	// (bidirRuns): a non-causal decoder's prompt with pictures in it.
+	bidirAll bool
+	// rlBases and rlEnds are relocateRows' per-sequence spans.
+	rlBases, rlEnds []int
+	m               *Model
 	// pending is the move between devices PrepareMove started and no Commit
 	// or Cancel has ended (moveblocks.go).
 	pending *PendingMove
@@ -131,6 +136,9 @@ type State struct {
 	fuseOff   bool
 	fused     bool
 	FusedRuns int64
+	// ServedOnE counts the times a prefill was placed on the E-cores' pool beside a
+	// decoding session (serving.go): what a gate reads to know the split ran.
+	ServedOnE int64
 	// grp is groupOf's call, reused; groupOff keeps a fused run's matvecs
 	// one region each (SetMatVecGroups); Grouped counts the group calls.
 	grp      nn.MVGroup
@@ -406,6 +414,14 @@ type State struct {
 	tailPos []int
 	// rtTook, rtStart and rtSeen are rowsTake's scratch, kept from step to step.
 	rtTook, rtStart []int
+	// retireRow is Retire's one row, handed to the device without a slice
+	// made each time; rrBases, rrEnds and rrFlat are relocateRows' and
+	// flatSlots', and rrSD the device relocateRows reserves on.
+	retireRow       [1]int
+	rrBases, rrEnds []int
+	rrFlat          []int
+	rrSD            nn.SeqKVDevice
+	rrFits          func() bool
 	rtSeen          []bool
 	// relocate hands the device's highest block to the host when its history
 	// cannot grow, rather than letting the token fail. See SetRelocate.
@@ -539,7 +555,10 @@ type State struct {
 	ldSpill nn.Spiller
 	ldStep  nn.SessionStepper
 	ldRows  nn.RowsDevice
-	ldNamed nn.NamedDevice
+	// roomHome counts batch steps whose device had no room for them, so the
+	// blocks came home before the step (relocateRows, forwardRows).
+	roomHome int
+	ldNamed  nn.NamedDevice
 	// The lists a step this State leads reuses (step.go): Step's runs, the
 	// rows' sessions and positions, the wanted rows' logits and the result.
 	stepRuns   []Run
@@ -582,7 +601,11 @@ type State struct {
 	// HostPicked says the last prefill did. A decision readout sets them.
 	HostPick     []int32
 	HostPickVals []float32
-	HostPicked   bool
+	// pickView and pickTmp are pickOnHost's view of a slot's rows and their
+	// projections, kept here so a warm pick allocates nothing.
+	pickView   nn.Packed
+	pickTmp    [8]float32
+	HostPicked bool
 	// cs is the rotary table for the current position: NRot floats, filled once
 	// per token and read by every head and by the device blocks.
 	cs []float32
@@ -628,6 +651,10 @@ type State struct {
 	// first. Nil in every session but a gate's: it is how a comparison sees
 	// every position of a prompt rather than only the last row's logits.
 	rowTap func(base int, rows []float32)
+
+	// ranAt is when this State last started a decode token, in nanoseconds
+	// past servingEpoch plus one (0: never); see serving.go.
+	ranAt atomic.Int64
 }
 
 // NewState allocates a session able to hold maxSeq positions.
@@ -669,6 +696,7 @@ func (m *Model) newStateRange(nseq, maxSeq, lo, hi int) *State {
 		fuseOff: m.opt.noFuse, groupOff: m.opt.noGroups, lookOff: m.opt.noLook,
 		residFold: m.opt.residFold}
 	s.holdHostRuns()
+	m.live.add(s)
 	// A State over a prediction block projects through that block's head.
 	if lo < len(m.layers) {
 		if w := m.layers[lo].mtp; w != nil {
@@ -929,6 +957,7 @@ func (s *State) dev() nn.LayerDevice {
 // State must be closed before its Model (`defer m.Close()` then
 // `defer st.Close()` gives that order).
 func (s *State) Close() error {
+	s.m.live.remove(s)
 	// A move prepared and never committed gives its target's copies back.
 	if s.pending != nil {
 		s.pending.Cancel()
@@ -1118,8 +1147,10 @@ func (s *State) SetDeviceLayers(d nn.Device, max int) error {
 		DS4: ds4PlanOf(c),
 		// Read off the loaded weights, not the architecture name: the
 		// post-norms are optional per-layer roles.
-		PostNorm:    s.m.hasPostNorm(),
-		NoPreNorm:   s.m.hasNoPreNorm(),
+		PostNorm:  s.m.hasPostNorm(),
+		NoPreNorm: s.m.hasNoPreNorm(),
+		// BitNet's inner norms, read off the weights as the post-norms are.
+		SubNorm:     s.m.hasSubNorm(),
 		AttnSoftcap: c.AttnSoftcap,
 		ActWin:      s.jit.ActWindow(),
 		// Zero for a dense model, which is what makes every existing plan
@@ -1513,6 +1544,7 @@ func (s *State) layerWeightsAt(li int) nn.LayerWeights {
 	w := nn.LayerWeights{
 		AttnNorm: l.attnNorm, FFNNorm: l.ffnNorm,
 		PostAttnNorm: l.postAttnNorm, PostFFNNorm: l.postFFNNorm,
+		AttnSubNorm: l.attnSubNorm, FFNSubNorm: l.ffnSubNorm,
 		QNorm: qn, KNorm: kn,
 		Bq: l.bq, Bk: l.bk, Bv: l.bv, Bo: l.bo,
 		Wq: wt(l.wq), Wk: wt(l.wk), Wv: wt(l.wv), Wo: wt(l.wo),
@@ -2022,6 +2054,17 @@ func (s *State) planFor(li int) *nn.LayerPlan {
 	}
 	s.k3Plan(li, &plan)
 	s.q4ePlan(li, &plan)
+	if c.NonCausal {
+		// A bidirectional decoder (EmbeddingGemma): its blocks are non-causal
+		// blocks, as an encoder's are -- the sequence one call, every row over
+		// the call's rows, a sliding layer inside each row's symmetric window
+		// (nn.RowWindowDevice; embedstate.go's embedTell). The row windows
+		// are the window, so the causal one (SWAWindow) is off: with both, a
+		// 600-row sequence read NaN past the causal window's 512 rows.
+		plan.NonCausal = true
+		plan.Windowed = c.SWA(li)
+		plan.SWAWindow = 0
+	}
 	return &plan
 }
 
@@ -2518,8 +2561,14 @@ func (m *Model) bankWeight(t tensor) nn.Weight {
 		Packed: &nn.Packed{Sheet: sheet, Sheets: sheets}}
 }
 
+// wt is t for a device: K is the width it was packed at, which is k but for
+// a ragged tower's matrices (tensor.kp; nn.LayerPlan.KPad).
 func wt(t tensor) nn.Weight {
-	return nn.Weight{T: t.typ, Data: t.data, Rows: t.rows, K: t.k, Packed: t.packed}
+	k := t.k
+	if t.kp != 0 {
+		k = t.kp
+	}
+	return nn.Weight{T: t.typ, Data: t.data, Rows: t.rows, K: k, Packed: t.packed}
 }
 
 // SetHeadOnDevice chooses whether the output norm and the vocabulary projection
@@ -2919,6 +2968,7 @@ func (s *State) PrewarmGPU(n int) <-chan struct{} {
 			w := nn.LayerWeights{
 				AttnNorm: l.attnNorm, FFNNorm: l.ffnNorm,
 				PostAttnNorm: l.postAttnNorm, PostFFNNorm: l.postFFNNorm,
+				AttnSubNorm: l.attnSubNorm, FFNSubNorm: l.ffnSubNorm,
 				QNorm: qn, KNorm: kn,
 				Bq: l.bq, Bk: l.bk, Bv: l.bv, Bo: l.bo,
 				Wq: wt(l.wq), Wk: wt(l.wk), Wv: wt(l.wv), Wo: wt(l.wo),
@@ -3215,7 +3265,11 @@ func (s *State) Reset() {
 			}
 		}
 		if rr, ok := s.ld.(nn.RecRowsDevice); !ok || !rr.ResetRecRows(s.allRows) {
-			s.retireErr = fmt.Errorf("model: the recurrent state on the device could not be reset")
+			why := ""
+			if er, ok := s.ld.(nn.ErrReporter); ok && er.Err() != "" {
+				why = ": " + er.Err()
+			}
+			s.retireErr = fmt.Errorf("model: the recurrent state on the device could not be reset%s", why)
 		}
 	}
 	s.kv.reset()
@@ -3237,7 +3291,8 @@ func (s *State) Retire(i int) {
 	if s.recurrent() {
 		s.ResetRecurrent(i)
 		if s.devLinear() {
-			if rr, ok := s.ld.(nn.RecRowsDevice); !ok || !rr.ResetRecRows([]int{i}) {
+			s.retireRow[0] = i
+			if rr, ok := s.ld.(nn.RecRowsDevice); !ok || !rr.ResetRecRows(s.retireRow[:]) {
 				s.retireErr = fmt.Errorf("model: row %d's recurrent state on the device could not be reset", i)
 			}
 		}
@@ -3405,6 +3460,7 @@ func (s *State) ForwardSample(token int32, smp *Sampler) (int32, error) {
 // fill is a closure because the device-failure path calls it again to restart
 // the token on the host (Layers may have written part of s.x).
 func (s *State) forward(fill func() error) ([]float32, error) {
+	s.touch()
 	// Brackets one decode step for the host tuners, which time real tokens.
 	// Not when the device ran the whole token: no CPU matvec ran, and a
 	// settled answer would be cached under the CPU's key for later runs.
@@ -3850,6 +3906,13 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 					s.jit.NewInput()
 					src = s.ogate
 				}
+				// BitNet's norm over the attention output, before wo.
+				if l.attnSubNorm != nil {
+					t0 = s.tick()
+					s.rmsnorm(src[:c.QDimAt(li)], src[:c.QDimAt(li)], l.attnSubNorm, c.RMSEps)
+					s.jit.NewInput()
+					s.tock(opRMSNorm, t0)
+				}
 				// With nothing between the projection and the residual, the
 				// add rides the projection's rows (fuse.go).
 				plain := s.residFold && l.bo == nil && !kind.Recurrent() && l.postAttnNorm == nil &&
@@ -3998,13 +4061,25 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 				s.grp.Resid, s.grp.Alpha = s.x, float32(c.ResidualScale)
 			}
 			s.aheadNext(li)
-			grouped := s.groupOf(gate, [nn.MaxGroup]*tensor{&l.down}, [nn.MaxGroup][]float32{s.h}, 1)
+			if l.ffnSubNorm != nil {
+				// BitNet normalises act(gate)*up before down, so the product
+				// is formed whole rather than inside down's group.
+				s.grp.ActUp, s.grp.Act = nil, 0
+			}
+			grouped := l.ffnSubNorm == nil &&
+				s.groupOf(gate, [nn.MaxGroup]*tensor{&l.down}, [nn.MaxGroup][]float32{s.h}, 1)
 			ffnResid = grouped && s.grp.Resid != nil
 			s.grp.ActUp, s.grp.Resid = nil, nil
 			if !grouped {
 				s.actmulAll(gate, up, act)
 				s.jit.NewInput()
 				s.tock(opAct, t0)
+				if l.ffnSubNorm != nil {
+					t0 = s.tick()
+					s.rmsnorm(gate, gate, l.ffnSubNorm, c.RMSEps)
+					s.jit.NewInput()
+					s.tock(opRMSNorm, t0)
+				}
 				if err := s.mv(s.h, l.down, gate); err != nil {
 					return nil, err
 				}

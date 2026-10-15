@@ -70,6 +70,7 @@ type elemSet struct {
 	clamp   *cpu.Code
 	pflines *cpu.Code // the fused runs' lookahead (lookahead.go)
 	xielu   *cpu.Code // Apertus's ungated activation, its numbers a buffer
+	ln      *cpu.Code // x = ln(x), a log-mel feature's log
 }
 
 var (
@@ -160,6 +161,7 @@ func (s *elemSet) init(em *cpu.Emitters) {
 	}
 	s.sigMul = mustEmit("sigmoidmul")(em.SigmoidMul())
 	s.xielu = mustEmit("xielu")(em.XIELU())
+	s.ln = mustEmit("ln")(em.Ln())
 }
 
 // mustEmit maps an emitter's result or stops the process, naming the kernel:
@@ -252,6 +254,23 @@ func ActMul32JIT(dst, up []float32, k ActKind) {
 		Rows:   int64(n % cpu.ElemLanes),
 	}
 	e.actMul[i].Call(&args)
+}
+
+// Ln32JIT replaces x with ln(x), every element, with generated code; x must be
+// positive and finite (a log-mel feature with its floor added).
+func Ln32JIT(x []float32) {
+	e := elemFor()
+	n := len(x)
+	if n == 0 {
+		return
+	}
+	args := cpu.Args{
+		Out:  &x[0],
+		Scr:  (*byte)(unsafe.Pointer(&elemConsts[0])),
+		K:    int64(n / cpu.ElemLanes),
+		Rows: int64(n % cpu.ElemLanes),
+	}
+	e.ln.Call(&args)
 }
 
 // SigmoidMul32JIT computes gate[i] = sigma(gate[i]) * val[i] with generated
@@ -611,6 +630,27 @@ func MagMatch32JIT(y, x, ref []float32, eps float64) {
 	})
 }
 
+// RowStd32JIT standardises x over its unbiased deviation, with generated code:
+// y = (x - mean) / (sqrt(sum((x - mean)^2)/(n-1)) + eps), a one-element row's
+// deviation 0. NeMo's per-feature normalisation (d1-omni's audio front end).
+// y may be x.
+func RowStd32JIT(y, x []float32, eps float64) {
+	n := len(x)
+	if n == 0 {
+		return
+	}
+	if len(y) < n {
+		lengthPanic("rowstd", n, len(y))
+	}
+	code, kc := lnCode(lnKey{cpu.HostTier(), n, false, cpu.RowStd}, lnKons{n, eps, 1})
+	code.Call(&cpu.Args{
+		Out: &y[0],
+		A:   (*int8)(unsafe.Pointer(&x[0])),
+		Scr: (*byte)(unsafe.Pointer(&kc[0])),
+		K:   int64(n),
+	})
+}
+
 // lnFill is normFill for LayerNorm; see its comment.
 func lnFill(n int, k lnKey, nk lnKons) (*cpu.Code, []float32) {
 	lns.mu.Lock()
@@ -641,7 +681,12 @@ func lnFill(n int, k lnKey, nk lnKons) (*cpu.Code, []float32) {
 		next.code[k] = c
 	}
 	if !okk {
-		kc = []float32{1 / float32(n), float32(nk.eps), float32(nk.c)}
+		// The fourth is 1/(n-1), RowStd's (0 for one element).
+		var unb float32
+		if n > 1 {
+			unb = 1 / float32(n-1)
+		}
+		kc = []float32{1 / float32(n), float32(nk.eps), float32(nk.c), unb}
 		next.kons[nk] = kc
 	}
 	lns.snap.Store(next)

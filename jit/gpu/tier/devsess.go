@@ -43,6 +43,11 @@ type devSess struct {
 	cur, last *lane
 	depth     int
 	view, v0  *devTier
+	// ncPhase and ncKeys run the session's non-causal call as one phase of a row-chunked
+	// block (LayersPhase): 1 writes the chunk's k and v at its rows and runs
+	// nothing after them, 2 runs the chunk's queries over the ncKeys keys
+	// phase 1 wrote and the rest of the block. 0 is a whole call.
+	ncPhase, ncKeys int
 	// inSub says the session's submission is running outside g.mu: what it
 	// builds on the way (a kernel, a grown staging buffer) takes g.mu for the
 	// build (subLock; subHeld while it does), and nothing it calls may
@@ -76,6 +81,9 @@ type devSess struct {
 	// the set is the device's, and another session's picture may have been
 	// staged in it since.
 	winRuns []nn.KeyRun
+	// seqRuns is the packed sequences SetSeqRuns gave this session, staged
+	// with the windows at each of its non-causal calls.
+	seqRuns []nn.KeyRun
 	// winPerRow says winRuns is one window a row (SetRowWindows: a symmetric
 	// sliding window, whose rows' windows overlap) rather than runs
 	// partitioning the rows.
@@ -157,6 +165,9 @@ type lane struct {
 	// exactWs are the prompt chunk widths built for a chunk's own width
 	// (layersFor), least recently used first (keepExact).
 	exactWs []int
+	// noRoom is the batched widths prepBatch built and then refused for the
+	// budget, by geometry set, with the budget as it stood (noRoomFor).
+	noRoom map[noRoomKey]budgetAt
 	// planeCap narrows the vision score planes below planeBudget's when a
 	// picture's set does not fit the budget at the default (resizeTower);
 	// 0 is no cap.
@@ -550,7 +561,7 @@ func (g *devTier) cloneLane() (*lane, bool) {
 		sets[k] = s
 	}
 	for k, s := range sets {
-		if s.bs == nil || k == geoNonCausal {
+		if s.bs == nil || k&geoNonCausal != 0 {
 			continue
 		}
 		v.useGeom(k)

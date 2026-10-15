@@ -51,6 +51,18 @@ type pagedPrefill struct {
 	// flash is the one-kernel form, and fmerge its merge where the plan has
 	// sinks (the kernel's one split writes partials; the merge adds the sink).
 	flash, fmerge backend.Kernel
+	// fs is the flash forms' shape; ragBuild builds the flash form's run
+	// table (raggedprefill.go) at a shape, ragGroups and ragThreads are its
+	// launch and ragWG the rows a workgroup takes, nil where the form has
+	// none; ragK is it compiled, by slot count.
+	fs         kernels.FlashPrefill70Shape
+	ragBuild   func(kernels.FlashPrefill70Shape) (*ir.Kernel, error)
+	ragGroups  func(kernels.FlashPrefill70Shape) int
+	ragThreads int
+	ragWG      int
+	ragK       map[int]backend.Kernel
+	// ragMerge is the mapped wide merge by slot count, with sinks.
+	ragMerge map[int]backend.Kernel
 	// flash80 says flash is kernels.FlashPrefill80, the m16n8k16 form, or
 	// its m16n8k8 twin on sm_75 (FlashPrefill80K8).
 	flash80         bool
@@ -137,6 +149,7 @@ func (g *devTier) initPagedPrefill(bs *blockScratch) error {
 	if p.AttnSinks {
 		fs.Splits = 1
 	}
+	pf.fs = fs
 	// The flash forms and the m16n8k16 scores read no latent row (MLA): the
 	// FMA tiles and sm_70's pair do.
 	if !g.NoFlashPrefill && !p.MLA() {
@@ -144,6 +157,9 @@ func (g *devTier) initPagedPrefill(bs *blockScratch) error {
 			if t, ok := kernels.FlashTileFor(hd); ok && t.SG >= 4 && rows%t.Rows() == 0 && 32%t.TK == 0 {
 				if pf.flash = comp(kernels.FlashPrefillTile(fs, t)); pf.flash != nil {
 					pf.fGroups, pf.fWidth = kernels.FlashPrefillTileGroups(fs, t), t.Threads()
+					pf.ragBuild = func(s kernels.FlashPrefill70Shape) (*ir.Kernel, error) { return kernels.FlashPrefillTile(s, t) }
+					pf.ragGroups = func(s kernels.FlashPrefill70Shape) int { return kernels.FlashPrefillTileGroups(s, t) }
+					pf.ragThreads, pf.ragWG = t.Threads(), t.Rows()
 				}
 			}
 		}
@@ -155,6 +171,8 @@ func (g *devTier) initPagedPrefill(bs *blockScratch) error {
 			if pf.flash = comp(kernels.FlashPrefill80(fs)); pf.flash != nil {
 				pf.fGroups, pf.fWidth = kernels.FlashPrefill80Groups(fs), kernels.FlashPrefill80Threads
 				pf.flash80 = true
+				pf.ragBuild, pf.ragGroups = kernels.FlashPrefill80, kernels.FlashPrefill80Groups
+				pf.ragThreads, pf.ragWG = kernels.FlashPrefill80Threads, kernels.FlashPrefill80Rows(fs)
 			}
 		case !g.kb.noAttnMMA && g.f16GemmK() == 8 && kernels.FlashPrefill80WhyNot(fs) == "":
 			// sm_75: the same kernel on m16n8k8, two products for each of
@@ -162,6 +180,8 @@ func (g *devTier) initPagedPrefill(bs *blockScratch) error {
 			if pf.flash = comp(kernels.FlashPrefill80K8(fs)); pf.flash != nil {
 				pf.fGroups, pf.fWidth = kernels.FlashPrefill80Groups(fs), kernels.FlashPrefill80Threads
 				pf.flash80 = true
+				pf.ragBuild, pf.ragGroups = kernels.FlashPrefill80K8, kernels.FlashPrefill80Groups
+				pf.ragThreads, pf.ragWG = kernels.FlashPrefill80Threads, kernels.FlashPrefill80Rows(fs)
 			}
 		case g.tileF32():
 			// The collective tiles where they lower and FlashPrefill80 does
@@ -170,8 +190,13 @@ func (g *devTier) initPagedPrefill(bs *blockScratch) error {
 		case !g.NoVolta && (hd == 64 || hd == 128) && rows%kernels.FlashPrefill70Rows == 0 && g.sm70():
 			if pf.flash = comp(kernels.FlashPrefill70(fs)); pf.flash != nil {
 				pf.fGroups, pf.fWidth = kernels.FlashPrefill70Groups(fs), kernels.FlashPrefill70Threads
+				pf.ragBuild, pf.ragGroups = kernels.FlashPrefill70, kernels.FlashPrefill70Groups
+				pf.ragThreads, pf.ragWG = kernels.FlashPrefill70Threads, kernels.FlashPrefill70Rows
 			}
 		}
+	}
+	if pf.ragBuild != nil {
+		g.RagForms++
 	}
 	if pf.flash != nil && p.AttnSinks {
 		ms := kernels.FlashShape{Heads: p.NHead, KVHeads: p.NKVHead, Dim: hd, Rows: rows, Splits: 1, Sink: true}
@@ -422,6 +447,12 @@ func (pf *pagedPrefill) free() {
 		if k != nil {
 			closeKern(k)
 		}
+	}
+	for _, k := range pf.ragK {
+		closeKern(k)
+	}
+	for _, k := range pf.ragMerge {
+		closeKern(k)
 	}
 	bufs := []backend.Buf{pf.sc, pf.wt, pf.part, pf.run[0], pf.run[1], pf.buf[0], pf.buf[1]}
 	bufs = append(append(bufs, pf.pass[0]...), pf.pass[1]...)

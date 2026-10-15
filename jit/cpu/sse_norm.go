@@ -144,7 +144,10 @@ func EmitLayerNormSSE(n int, bias bool) ([]byte, error) { return emitRowStatSSE(
 // EmitGaussTopKSSE and EmitMagMatchSSE are EmitGaussTopK and EmitMagMatch
 // (layernorm.go) on legacy SSE.
 func EmitGaussTopKSSE(n int) ([]byte, error) { return emitRowStatSSE(n, false, RowGauss) }
-func EmitMagMatchSSE(n int) ([]byte, error)  { return emitRowStatSSE(n, false, RowMag) }
+
+// EmitRowStdSSE is EmitRowStd on legacy SSE.
+func EmitRowStdSSE(n int) ([]byte, error)   { return emitRowStatSSE(n, false, RowStd) }
+func EmitMagMatchSSE(n int) ([]byte, error) { return emitRowStatSSE(n, false, RowMag) }
 
 // emitRowStatSSE is emitRowStat on legacy SSE. XMM15 holds the match's
 // target, and the gaussian's zero in pass 3.
@@ -215,9 +218,20 @@ func emitRowStatSSE(n int, bias bool, mode RowMode) ([]byte, error) {
 		a.SUBSS(t, t, XMM12)
 		a.MULSS(t, t, t)
 	})
-	bcastSS(&a, XMM14, At(RBX, 0)) // 1/n
+	if mode == RowStd {
+		bcastSS(&a, XMM14, At(RBX, 12)) // 1/(n-1)
+	} else {
+		bcastSS(&a, XMM14, At(RBX, 0)) // 1/n
+	}
 	a.MULPS(XMM0, XMM0, XMM14)
 	switch mode {
+	case RowStd:
+		a.SQRTPS(XMM0, XMM0)
+		bcastSS(&a, XMM15, At(RBX, 4)) // eps
+		a.ADDPS(XMM0, XMM0, XMM15)
+		bcastSS(&a, XMM14, At(RBX, 8)) // 1.0
+		a.DIVPS(XMM14, XMM14, XMM0)
+		a.SHUFPS(XMM13, XMM14, XMM14, 0)
 	case RowMag:
 		bcastSS(&a, XMM14, At(RBX, 4)) // eps
 		a.MAXPS(XMM0, XMM0, XMM14)
@@ -251,6 +265,9 @@ func emitRowStatSSE(n int, bias bool, mode RowMode) ([]byte, error) {
 			a.MAXPS(t, t, XMM15)
 		case RowMag:
 			a.MULPS(t, t, XMM13)
+		case RowStd:
+			a.SUBPS(t, t, XMM12)
+			a.MULPS(t, t, XMM13)
 		default:
 			a.SUBPS(t, t, XMM12)
 			a.MULPS(t, t, XMM13)
@@ -280,6 +297,9 @@ func emitRowStatSSE(n int, bias bool, mode RowMode) ([]byte, error) {
 			a.SUBSS(XMM8, XMM8, XMM13)
 			a.MAXSS(XMM8, XMM8, XMM15)
 		case RowMag:
+			a.MULSS(XMM8, XMM8, XMM13)
+		case RowStd:
+			a.SUBSS(XMM8, XMM8, XMM12)
 			a.MULSS(XMM8, XMM8, XMM13)
 		default:
 			a.SUBSS(XMM8, XMM8, XMM12)
@@ -423,7 +443,7 @@ func EmitPackedRowSSE(q kernels.Quant) ([]byte, error) {
 	perSuper, _ := kernels.ScaleLayout(q)
 	signed := kernels.SignedPayload(q)
 	codes := kernels.Codes(q) != nil
-	if sub%8 != 0 || (bits != 4 && bits != 8) || perSuper < 1 {
+	if sub%8 != 0 || (bits != 2 && bits != 4 && bits != 8) || perSuper < 1 || bits == 2 && (sub != 32 || hi != 0 || codes) {
 		return nil, fmt.Errorf("jit: EmitPackedRowSSE: %v has no row kernel shape", q)
 	}
 	pw, hw := sub*bits/32, sub*hi/32
@@ -479,6 +499,8 @@ func EmitPackedRowSSE(q kernels.Quant) ([]byte, error) {
 			a.PXOR(XMM4, XMM4, XMM4)
 			a.PINSRBLoad(XMM4, XMM4, At(R9, 0), 0)
 			a.PSLLD(XMM6, XMM4, 23)
+		} else if kernels.D32(q) {
+			a.MOVSSLoad(XMM6, At(R9, 0)) // TQ2_F32: the word is the scale
 		} else {
 			a.PINSRWLoad(XMM4, XMM4, At(R9, 0), 0)
 			halfToFloatSSE(&a, XMM6, XMM4, XMM2, XMM3, XMM12)
@@ -560,13 +582,26 @@ func EmitPackedRowSSE(q kernels.Quant) ([]byte, error) {
 			}
 			base = 32
 		}
+		if bits == 2 {
+			// TQ2: eight-element group g is field g of the sub-block's eight
+			// bytes (packSub), so its two halves widen bytes 0..3 and 4..7 and
+			// shift the field down; XMM5 holds 3 in every dword.
+			a.PSRLD(XMM5, XMM9, 6)
+		}
 		for g := 0; g < sub/8; g++ {
 			for h := 0; h < 2; h++ {
 				gq := 2*g + h // this 4-element group's l/4
 				src := At(RAX, base+int32(8*g+4*h))
-				if signed {
+				switch {
+				case bits == 2:
+					a.PMOVZXBDLoad(XMM1, At(RAX, int32(4*h)))
+					if g > 0 {
+						a.PSRLD(XMM1, XMM1, byte(2*g))
+					}
+					a.PAND(XMM1, XMM1, XMM5)
+				case signed:
 					a.PMOVSXBDLoad(XMM1, src)
-				} else {
+				default:
 					a.PMOVZXBDLoad(XMM1, src)
 				}
 				if hi > 0 {

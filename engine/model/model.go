@@ -32,6 +32,12 @@ import (
 // that loads, runs, and produces confident nonsense.
 type Config struct {
 	Arch string
+	// TokenAct says every projection input is quantized to int8 per token
+	// by its absolute maximum, as BitNet's BitLinear does: the session's
+	// activation window is the widest row (nn.WithActWindow), so each 32-wide
+	// block of a row carries the row's one scale. A property of the graph,
+	// read from the arch.
+	TokenAct bool
 	// Pooling is how an EMBEDDING model reads its vector out of the last
 	// residual, and PoolNone for every generator. NonCausal is an encoder's
 	// attention: every position sees every other. Both come off the
@@ -900,6 +906,8 @@ func configFrom(c *jlm.Config) (*Config, error) {
 	case c.Flags.Has(jlm.FlagSwiGLUOAI):
 		out.Act = nn.ActSwiGLUOAI
 	}
+	// BitNet quantizes every projection input per token (jlm.ArchBitNet).
+	out.TokenAct = c.Arch == jlm.ArchBitNet
 	// Apertus's activation is its arch's: a file states it only through the
 	// per-block numbers (jlm.RoleXIELU).
 	if c.Arch == jlm.ArchApertus {
@@ -966,6 +974,12 @@ type tensor struct {
 	data []byte
 	rows int // ne1, output features
 	k    int // ne0, input features
+	// kp is the width the weight was packed at when its k is not a whole
+	// number of quantization blocks (a tower 144 wide): the converter pads
+	// it with zero columns to kp, and every product quantizes its k-wide
+	// activation as kp with a zero tail (nn's ragged quantizer on the host,
+	// kernels.QuantizePadded on a device). Zero where k is the packed width.
+	kp int
 	// packed is this weight in the device layout, set for a packed container
 	// type; nil for a verbatim one.
 	packed *nn.Packed
@@ -997,7 +1011,11 @@ type layer struct {
 	// to the attention and FFN outputs before each is folded into the residual.
 	// nil everywhere else.
 	postAttnNorm, postFFNNorm []float32
-	wq, wk, wv, wo            tensor
+	// attnSubNorm and ffnSubNorm are BitNet's inner RMSNorms: over the
+	// attention output before wo, and over act(gate)*up before down. nil
+	// everywhere else.
+	attnSubNorm, ffnSubNorm []float32
+	wq, wk, wv, wo          tensor
 	// vFromK says the block has no v projection and v is k's (Gemma 4's
 	// global layers): wv is unbound and every path copies k's projection
 	// before k's norm and rotary run.
@@ -1163,8 +1181,12 @@ type expert struct{ gate, up, down tensor }
 
 // Model is a loaded transformer.
 type Model struct {
-	Cfg   *Config
-	Vocab *tok.Vocab
+	// kpadViolation is a gate's violation of a ragged tower on a device: its
+	// plans state no padded width (nn.LayerPlan.KPad), so the device
+	// quantizes the rows at their own width under weights packed wider.
+	kpadViolation bool
+	Cfg           *Config
+	Vocab         *tok.Vocab
 
 	// pager serialises decode when the container evicts; see pagelock.go.
 	pager sync.Mutex
@@ -1296,6 +1318,8 @@ type Model struct {
 	// states counts the sessions built, so AddJITOptions can refuse to be late.
 	// Sessions are built concurrently (a server's requests), so it is atomic.
 	states atomic.Int64
+	// live is the open States, which a prefill asks whether another decodes.
+	live live
 	// enc is the BERT-family encoder graph, and nil for every decoder. A model
 	// with one has no layers, no output and no State: see encoder.go.
 	enc *encoder
@@ -1305,6 +1329,8 @@ type Model struct {
 	// tower is the vision tower, nil for a container with no vision section.
 	// It shares this model's container, budget and pager.
 	tower *Tower
+	// audio is the container's audio tower (audio.go), nil without one.
+	audio *audioTower
 	// imgCache is the vision segment's output rows by picture (imagekey.go),
 	// shared by every State of the model.
 	imgCache imageCache
@@ -1635,6 +1661,16 @@ func openContainer(path string, options ...Option) (*Model, error) {
 		}
 		m.tower = tw
 		m.imgCache.budget = defaultImageCache
+		if m.audio, err = buildAudio(c, m); err != nil {
+			c.Close()
+			return nil, err
+		}
+		// The audio blocks take their places in the block space after the
+		// vision blocks, as the container pages them; their weights are the
+		// tower's own (audioPageIn).
+		if m.audio != nil {
+			m.layers = append(m.layers, make([]layer, len(m.audio.blocks))...)
+		}
 		if tw.mn != nil && tw.mn.hard != nil {
 			m.hardEmbd = tw.mn.hardRows(m.Cfg.EmbdScale)
 		}
@@ -1930,8 +1966,13 @@ func (m *Model) pageIn(li int) error {
 	if m.container == nil || li >= len(m.layers) || li >= m.container.NPages() {
 		return nil
 	}
-	// An encoder's blocks are its own structs (encoder.go, modernbert.go).
-	if m.enc != nil {
+	// An encoder's blocks are its own structs (encoder.go, modernbert.go);
+	// a tower's after them (d1-omni's) are layers like any model's, and an
+	// audio tower's its own (audio.go).
+	if m.audio != nil && li >= m.audioFirst() {
+		return m.audioPageIn(li - m.audioFirst())
+	}
+	if m.enc != nil && li < m.encBlocks() {
 		return m.encBlockPageIn(li)
 	}
 	// The block's own weights, not its experts: moe() ensures those after the
@@ -3264,6 +3305,21 @@ func build(c *jlm.File, options ...tok.Option) (*Model, error) {
 		if l.postAttnNorm, err = optVec(jlm.RolePostAttnNorm, bi); err != nil {
 			return nil, err
 		}
+		// BitNet's two inner norms: both on every block of a BitNet, and on
+		// no other model, each as wide as what it normalises.
+		if l.attnSubNorm, err = optVec(jlm.RoleAttnSubNorm, bi); err != nil {
+			return nil, err
+		}
+		if l.ffnSubNorm, err = optVec(jlm.RoleFFNSubNorm, bi); err != nil {
+			return nil, err
+		}
+		if (l.attnSubNorm != nil || l.ffnSubNorm != nil) != cfg.TokenAct ||
+			cfg.TokenAct && (len(l.attnSubNorm) != cfg.QDimAt(i) || len(l.ffnSubNorm) != cfg.NFFNAt(i) ||
+				l.gate.e == nil || cfg.MoEAt(i) || cfg.Parallel) {
+			return nil, fmt.Errorf("model: block %d: inner norms %d and %d wide on %s (a gated dense FFN of %d, "+
+				"attention %d wide, per-token activations %v)", bi, len(l.attnSubNorm), len(l.ffnSubNorm),
+				cfg.Arch, cfg.NFFNAt(i), cfg.QDimAt(i), cfg.TokenAct)
+		}
 		// Gemma 4's per-block output scalar, when the file carries one.
 		if sc, err := optVec(jlm.RoleLayerOutScale, bi); err != nil {
 			return nil, err
@@ -4008,6 +4064,16 @@ func (m *Model) hasNoPreNorm() bool {
 	return false
 }
 
+// hasSubNorm reports whether some block carries BitNet's inner norms.
+func (m *Model) hasSubNorm() bool {
+	for i := range m.layers {
+		if l := &m.layers[i]; l.attnSubNorm != nil || l.ffnSubNorm != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // hasPostNorm reports whether some block carries gemma2's post-norms.
 func (m *Model) hasPostNorm() bool {
 	// By index: a copy of each layer would read its bindings, which another
@@ -4048,5 +4114,10 @@ func (m *Model) newJIT() *nn.JIT {
 	if m.tower != nil {
 		add(quant.F32)
 	}
-	return nn.NewJIT(maxK, maxRows, types, m.jit...)
+	opts := append(m.jit[:len(m.jit):len(m.jit)], nn.WithServingSplit(!m.opt.noServingSplit))
+	if m.Cfg.TokenAct {
+		// One window over the widest row: each row's blocks share its scale.
+		opts = append(append([]nn.Option(nil), opts...), nn.WithActWindow((maxK+31)/32*32))
+	}
+	return nn.NewJIT(maxK, maxRows, types, opts...)
 }

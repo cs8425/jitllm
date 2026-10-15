@@ -25,6 +25,7 @@ type embedMode struct {
 	total int       // positions in the sequence
 	out   []float32 // NEmbd: the pooled vector, before any dense head
 	row   []float32 // NEmbd scratch for one normed row
+	wins  []nn.KeyRun
 }
 
 // collect folds a chunk's final rows into the pooled vector. It runs once per
@@ -71,16 +72,48 @@ func symmetricWindow(pos, total, window int) (w0, an int) {
 	return w0, end - w0
 }
 
+// callTell readies the device for a chunk's call: a bidirectional embedding
+// run's windows (embedTell), or the key runs of the prompt's bidirectional
+// spans (bidirTell).
+func (s *State) callTell(p0, n int) bool {
+	if s.emb != nil && s.emb.bidir {
+		return s.embedTell(n)
+	}
+	return s.bidirTell(p0, n)
+}
+
+// embedTell hands the device a bidirectional embedding run's n rows, the
+// whole sequence in one call: the non-causal set sized for them
+// (nn.RowsReserver), and each row's symmetric window on the sliding layers
+// (nn.RowWindowDevice), every row's keys the call's on the others. false is
+// a device that cannot take them; the caller does not run the call.
+func (s *State) embedTell(n int) bool {
+	if rr, ok := s.ld.(nn.RowsReserver); ok && !rr.ReserveRows(n) {
+		return false
+	}
+	rw, ok := s.ld.(nn.RowWindowDevice)
+	if !ok {
+		return false
+	}
+	c := s.c
+	if cap(s.emb.wins) < n {
+		s.emb.wins = make([]nn.KeyRun, n)
+	}
+	wins := s.emb.wins[:n]
+	for i := range wins {
+		lo, an := 0, n
+		if c.SWAWindow > 0 {
+			lo, an = symmetricWindow(i, n, int(c.SWAWindow))
+		}
+		wins[i] = nn.KeyRun{Lo: lo, Hi: lo + an}
+	}
+	return rw.SetRowWindows(wins)
+}
+
 // embedPrefill runs ids from position zero and leaves the pooled, normed (but
 // not yet L2-normalised) vector in out.
 func (s *State) embedPrefill(ids []int32, out []float32) ([]float32, error) {
 	c := s.c
-	if c.NonCausal && s.devCount() > 0 {
-		// The device tier's attention is causal, so a non-causal block is
-		// declined rather than run with the wrong mask.
-		return nil, fmt.Errorf("model: %s attends bidirectionally, which the device tier does not "+
-			"implement; embed it on the host", c.Arch)
-	}
 	if len(ids) > s.maxSeq {
 		return nil, fmt.Errorf("model: %d tokens, and this session holds %d", len(ids), s.maxSeq)
 	}

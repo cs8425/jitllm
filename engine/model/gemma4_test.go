@@ -68,6 +68,17 @@ var gemma4Fixtures = []struct {
 		}
 		return ok
 	}},
+	// The E-model block at a per-layer input 40 wide: not a whole number of
+	// the activation quantizer's blocks, so every tier's quantizer takes its
+	// ragged tail (nn's on the host, kernels.QuantizePadded on a device).
+	{"synth-gemma4-e-ragged", func(m *Model) bool {
+		c := m.Cfg
+		ok := c.Arch == "gemma4" && c.PLEDim == 40 && c.NKVShared == 2 && m.pleProj.rows == 6*40
+		for i := range m.layers {
+			ok = ok && m.layers[i].pleGate.rows == 40 && m.layers[i].pleProj.k == 40
+		}
+		return ok
+	}},
 	{"synth-gemma4-moe", func(m *Model) bool {
 		c := m.Cfg
 		ok := c.Arch == "gemma4" && c.GeomSplit() && c.DenseMoE && c.NExpert == 8 &&
@@ -107,8 +118,9 @@ var gemma4Violations = map[string][]c6Violation{
 		{"no v norm", func(m *Model) func() { return cfgMut(m, func(c *Config) { c.VNorm = false }) }},
 		{"the global layers' rotary without its proportional factors", noRopeFreqs},
 	},
-	"synth-gemma4-moe": gemma4MoEViolations,
-	"synth-gemma4-e":   gemma4EViolations,
+	"synth-gemma4-moe":      gemma4MoEViolations,
+	"synth-gemma4-e":        gemma4EViolations,
+	"synth-gemma4-e-ragged": gemma4EViolations,
 }
 
 // gemma4EViolations are the E-models' features, one at a time.
@@ -230,8 +242,9 @@ var gemma4DevViolations = map[string][]c6Violation{
 	"synth-gemma4-wide": {
 		{"no v norm", func(m *Model) func() { return cfgMut(m, func(c *Config) { c.VNorm = false }) }},
 	},
-	"synth-gemma4-moe": gemma4MoEViolations,
-	"synth-gemma4-e":   gemma4EViolations,
+	"synth-gemma4-moe":      gemma4MoEViolations,
+	"synth-gemma4-e":        gemma4EViolations,
+	"synth-gemma4-e-ragged": gemma4EViolations,
 }
 
 // TestGemma4OnEveryDevice runs each fixture with every block and the head on

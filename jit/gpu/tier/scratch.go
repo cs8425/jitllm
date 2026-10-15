@@ -380,6 +380,10 @@ func freeRagOut(bs *blockScratch) {
 // pool grown into the rest, every width after was refused and a 64-row decode
 // step ran padded to the 512-row scratch, eight times its rows.
 func (g *devTier) batchFor(w int) int {
+	if w > 64 && (roomFaulted("narrow") || roomFaulted("narrow-lie")) {
+		g.LastErr = fmt.Sprintf("a %d-row batched scratch does not fit the budget (roomFault)", w)
+		return 0
+	}
 	if g.bbs[w] != nil && g.prepBatch(w) {
 		return w
 	}
@@ -469,4 +473,47 @@ func (g *devTier) prewarmHeadKernels() {
 			g.LastErr = "the folded head's row copy: " + err.Error()
 		}
 	}
+}
+
+// noRoomKey is a batched width of one geometry set.
+type noRoomKey struct {
+	geo   geoKey
+	width int
+}
+
+// budgetAt is a device's budget when a batched width did not fit it: the bytes
+// charged, the limit and the history promised to admitted rows.
+type budgetAt struct{ used, limit, promised uint64 }
+
+// markNoRoom records that the batched width did not fit the budget as it now
+// stands. Callers hold g.mu.
+func (g *devTier) markNoRoom(width int) {
+	if g.noRoom == nil {
+		g.noRoom = map[noRoomKey]budgetAt{}
+	}
+	g.noRoom[noRoomKey{g.geoCur, width}] = budgetAt{g.used, g.limit, g.promisedBytes()}
+}
+
+// noRoomFor reports that the batched width was refused for the budget and
+// nothing has given room back since: no fewer bytes charged, no higher limit,
+// no less history promised. Building it again would compile every kernel of
+// the width and allocate its buffers only to drop them, and a step that runs
+// at the reserved width (batchFor) did that every step on a card the width
+// did not fit. Callers hold g.mu.
+//
+// A wider width than one refused is refused with it: a scratch grows with its
+// rows, and a bidirectional prompt asks for its own length every time (a
+// width a prompt), which rebuilt and dropped a scratch per prompt.
+func (g *devTier) noRoomFor(width int) bool {
+	for k, at := range g.noRoom {
+		if k.geo != g.geoCur || k.width > width {
+			continue
+		}
+		if g.used < at.used || g.limit > at.limit || g.promisedBytes() < at.promised {
+			delete(g.noRoom, k)
+			continue
+		}
+		return true
+	}
+	return false
 }

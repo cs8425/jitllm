@@ -93,7 +93,7 @@ func (s *State) rowsTake(seq, pos []int) ([]int, error) {
 
 // relocateRows is relocateFor for a step in which slot q takes took[q] rows:
 // what has to fit is each stepping sequence's next took[q] positions.
-func (s *State) relocateRows(took []int) {
+func (s *State) relocateRows(took []int, rows int) {
 	if s.ld == nil {
 		return
 	}
@@ -103,24 +103,37 @@ func (s *State) relocateRows(took []int) {
 			end = max(end, s.bpos[q]+k)
 		}
 	}
+	room := func() bool { return true }
+	if rr, ok := s.ld.(nn.RowsRoomer); ok && s.devCount() > 0 {
+		room = func() bool { return rr.RowsRoom(rows, s.nseq) }
+		// Counted once a step: blocks go home for the step's room here,
+		// or all at once in forwardRows when relocation is off.
+		if !room() {
+			s.roomHome++
+		}
+	}
 	sd, ok := s.ld.(nn.SeqKVDevice)
 	if !ok || !sd.PerSequenceKV() || s.nseq == 1 {
 		s.relocateFor(end)
+		s.relocateUntil(end, room)
 		return
 	}
-	var bases, ends []int
+	// The State's own slices, so a warm step allocates nothing.
+	bases, ends := s.rlBases[:0], s.rlEnds[:0]
 	for q, k := range took {
 		if k > 0 {
 			bases, ends = append(bases, q*s.maxSeq), append(ends, s.bpos[q]+k)
 		}
 	}
-	s.relocateUntil(end, func() bool { return sd.ReserveKVSeqs(bases, ends) })
+	s.rlBases, s.rlEnds = bases, ends
+	s.relocateUntil(end, func() bool { return room() && sd.ReserveKVSeqs(bases, ends) })
 }
 
 // flatSlots is each row's place in the device's flat history, sequence q's
 // position p at q*maxSeq+p (nn.RowsDevice).
 func (s *State) flatSlots(seq, pos []int) []int {
-	slot := make([]int, len(seq))
+	s.rrFlat = slices.Grow(s.rrFlat[:0], len(seq))[:len(seq)]
+	slot := s.rrFlat
 	for r, q := range seq {
 		slot[r] = q*s.maxSeq + pos[r]
 	}
@@ -215,23 +228,19 @@ func (s *State) rowsRefusal() error {
 	case s.ldRows == nil:
 		return errStepNoRows
 	case !s.headWithLastBlock():
-		return errStepHeadElsewhere
+		return errStepNoHead
 	case s.devCount() != s.hi-s.lo:
 		return errStepSplit
 	}
 	return nil
 }
 
-// headWithLastBlock is the head on the device that runs the last block, the
-// only place a rows step takes it (tier.GPU.LayersRows): a placement that put
-// the projection on another card runs it on the host instead.
+// headWithLastBlock is the head on a device and the last block on one, which
+// is what a rows step takes the projection with (tier.GPU.LayersRows): on the
+// last block's device it rides that block's step, and on another -- the card
+// holding the blocks had no room for it -- it is a step of its own there.
 func (s *State) headWithLastBlock() bool {
-	last := s.hi - 1
-	if s.head == nil || !s.devAt(last) {
-		return false
-	}
-	d := s.ldNamed
-	return d == nil || d.HeadWith(last) // without it, one device
+	return s.head != nil && s.devAt(s.hi-1)
 }
 
 // rowsRun runs device blocks [lo, hi) of a split placement for the rows at

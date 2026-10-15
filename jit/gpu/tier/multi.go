@@ -963,14 +963,6 @@ func (g *GPU) HeadDeviceName() (string, bool) {
 	return "", false
 }
 
-// HeadWith reports that the projection is on the device holding block li --
-// the one place a rows step can take it (LayersRows).
-func (g *GPU) HeadWith(li int) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.head != nil && g.own[li] == g.head
-}
-
 // Pin keeps block li where it is: the pager never picks it as a victim, and a
 // budget below what the pinned blocks charge is refused. False when no device
 // holds the block.
@@ -1433,9 +1425,12 @@ func (g *GPU) migrateKV(sid uint64, li int, k, v []float32, pos int, toDevice bo
 // (nn.SeqKVDevice); a mixed tier answers false and migrates in the flat layout.
 func (g *GPU) PerSequenceKV() bool {
 	g.mu.Lock()
-	ds := make([]*devTier, 0, len(g.devs))
+	// On the stack for any machine's count of devices.
+	var arr [16]*devTier
+	ds := arr[:0]
+	// g.own is by block: each device once.
 	for _, d := range g.own {
-		if d != nil {
+		if d != nil && !slices.Contains(ds, d) {
 			ds = append(ds, d)
 		}
 	}

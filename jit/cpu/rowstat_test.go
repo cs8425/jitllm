@@ -27,6 +27,23 @@ func rowStatRef(mode RowMode, x, ref []float32, c, eps float64) []float64 {
 		for i, e := range x {
 			out[i] = math.Max(float64(e)-cut, 0)
 		}
+	case RowStd:
+		var mean, v float64
+		for _, e := range x {
+			mean += float64(e)
+		}
+		mean /= n
+		for _, e := range x {
+			d := float64(e) - mean
+			v += d * d
+		}
+		sd := 0.0
+		if n > 1 {
+			sd = math.Sqrt(v / (n - 1))
+		}
+		for i, e := range x {
+			out[i] = (float64(e) - mean) / (sd + eps)
+		}
 	case RowMag:
 		var sr, sx float64
 		for i := range x {
@@ -90,8 +107,9 @@ func TestRowStatsMatchReference(t *testing.T) {
 		}{
 			{RowGauss, hostBytes(t)(hostTable().RowStat(n, RowGauss)), []float32{1 / float32(n), 0, c}, nil},
 			{RowMag, hostBytes(t)(hostTable().RowStat(n, RowMag)), []float32{1 / float32(n), eps, 1}, ref},
+			{RowStd, hostBytes(t)(hostTable().RowStat(n, RowStd)), rowStdKons(n, eps), nil},
 		} {
-			name := map[RowMode]string{RowGauss: "gausstopk", RowMag: "magmatch"}[m.mode]
+			name := map[RowMode]string{RowGauss: "gausstopk", RowMag: "magmatch", RowStd: "rowstd"}[m.mode]
 			code := onHost(t)(m.code, nil)
 			got := runRowStat(t, code, name, x, m.ref, m.kc)
 			code.Close()
@@ -118,4 +136,14 @@ func TestRowStatsMatchReference(t *testing.T) {
 			}
 		}
 	}
+}
+
+// rowStdKons is RowStd's constants: [1/n, eps, 1, 1/(n-1)], the last 0 for
+// one element.
+func rowStdKons(n int, eps float32) []float32 {
+	var unb float32
+	if n > 1 {
+		unb = 1 / float32(n-1)
+	}
+	return []float32{1 / float32(n), eps, 1, unb}
 }

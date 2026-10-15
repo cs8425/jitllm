@@ -105,6 +105,10 @@ type LayerWeights struct {
 	// the same op as AttnNorm with a different weight. LayerPlan.PostNorm says
 	// the model has them so a tier can decline before uploading anything.
 	PostAttnNorm, PostFFNNorm []float32
+	// AttnSubNorm and FFNSubNorm are BitNet's inner RMSNorms (LayerPlan.SubNorm):
+	// over the attention output (QDim wide) before wo, and over act(gate)*up
+	// (NFFN wide) before down. nil elsewhere.
+	AttnSubNorm, FFNSubNorm []float32
 	// ResidNorm and ResidNormB are a post-norm block's last LayerNorm, over x
 	// + mlp(x) (LayerPlan.PostResidNorm): BERT's output norm. nil elsewhere.
 	ResidNorm, ResidNormB []float32
@@ -713,6 +717,13 @@ func (d *DS4Plan) EntRowAt(comp, hd int) int {
 // wrong text when ignored, so a tier that cannot apply one must decline the
 // block by name (see RULE 8a in AGENTS.md).
 type LayerPlan struct {
+	// KPad is the width the block's matrices that read the residual or the
+	// attention's output were packed at, when NEmbd is not a whole number of
+	// 32-element blocks (a tower 144 wide, packed at 160 with zero columns
+	// past 144); their Weight.K is KPad, and the device quantizes those
+	// activations as rows of KPad with zero tails (kernels.QuantizePadded),
+	// as the host pads them. Zero everywhere else.
+	KPad                                               int
 	NEmbd, NHead, NKVHead, HeadDim, NRot, NFFN, MaxSeq int
 	RMSEps, RopeBase                                   float64
 
@@ -760,6 +771,10 @@ type LayerPlan struct {
 	// PostNorm says the block RMSNorms the attention output and the FFN output
 	// before each residual add -- gemma2 and gemma3's two extra norms.
 	PostNorm bool
+	// SubNorm says the block RMSNorms the attention output before wo and the
+	// gated FFN's product before down (LayerWeights.AttnSubNorm/FFNSubNorm) --
+	// BitNet's two inner norms. A tier runs both or declines the block.
+	SubNorm bool
 	// PostResidNorm says the block's norms come after its residual adds, on
 	// the residual itself (BERT's post-norm order): x = LN(x + attn(x)) with
 	// FFNNorm, whose output is both the FFN's input and the residual, then
@@ -886,6 +901,11 @@ type LayerPlan struct {
 	// the call was handed (KeyRunDevice) rather than over every row
 	// (Qwen2.5-VL's tower, every block but each n'th).
 	Windowed bool
+	// HeadSet says a NonCausal block is a decision head's that attends and
+	// norms otherwise than the encoder before it (d1-omni: LayerNorm and 16
+	// key heads after an RMSNorm trunk of 8): a device runs it in a scratch
+	// set of its own rather than declining it for the trunk's geometry.
+	HeadSet bool
 	// AttnOutGate says the q projection is double width and its second half,
 	// interleaved per head, gates the attention output through a sigmoid.
 	AttnOutGate bool
@@ -1025,7 +1045,13 @@ type RecurrentPlan struct {
 	// heads and no state beside the convolution's window over Chans channels.
 	// Wq is x, SSMWeights.Gate is B and SSMWeights.BA is C, and the block is
 	// out_proj(C * conv(B * x)).
-	ShortConv              bool
+	ShortConv bool
+	// Centred is a ShortConv over a whole non-causal call (LFM2's encoder,
+	// d1-omni's trunk): three taps on the rows before, at and after each
+	// row, zero past either end, and no state. A tap reads a neighbour only
+	// where the row's window holds it (nn.RowWindowDevice), so a media
+	// prefix's last row does not read the text's first.
+	Centred                bool
 	NormGroups             int
 	NormBeforeGate, NoNorm bool
 	// SigmoidGate gates the output norm by sigmoid(z) where the gated delta
@@ -1176,6 +1202,20 @@ const (
 	// stride-2 depthwise downsample of it with a norm, scores at
 	// 1/sqrt(KD), then the output projection.
 	ConvAttention
+	// ConvConformer is a FastConformer block (d1-omni's audio tower): half a
+	// SiLU feed-forward, Transformer-XL relative-position attention with
+	// per-head u and v biases, the convolution module (LayerNorm, a GLU, a
+	// depthwise convolution of KMid taps centred on the row, a folded
+	// BatchNorm, SiLU, pointwise), the other half feed-forward and a
+	// LayerNorm, every norm a LayerNorm with a bias and every matrix with a
+	// bias. Rows are positions: HIn is the most a call takes, and a call of
+	// fewer rows reads only its own (the keys and the convolution stop at the
+	// call's rows). CIn is the width, CExp the feed-forward's, Heads of KD.
+	// The matrices ride the slots: Wq, Wk, Wv, Wo, Gate (linear_pos), Up and
+	// Down (the first feed-forward), ShGate (the GLU's value), ShUp and
+	// ShDown (the second feed-forward), SSM.Gate (the GLU's gate) and SSM.BA
+	// (the pointwise convolution).
+	ConvConformer
 )
 
 // ConvPlan is one convolutional block's geometry at its picture's size. Rows
@@ -1215,6 +1255,33 @@ type ConvWeights struct {
 	DwMid, DwMidNorm     []float32
 	KDown, KDownNorm     []float32
 	VDown, VDownNorm     []float32
+	// Conformer is a ConvConformer block's vectors, nil for every other.
+	Conformer *ConformerVecs
+}
+
+// ConformerVecs is a FastConformer block's vectors: its norms and biases,
+// the attention's u and v (heads x head width), the depthwise taps
+// (tap-major), the BatchNorm folded into a scale and a shift (the depthwise
+// bias folded into the shift), and PE, the relative positions' sinusoids
+// from HIn-1 down to -(HIn-1): 2*HIn-1 rows of the width.
+type ConformerVecs struct {
+	FF1Norm, FF1NormB, FF1UpB, FF1DownB []float32
+	AttnNorm, AttnNormB                 []float32
+	QB, KB, VB, OB, U, V                []float32
+	ConvNorm, ConvNormB                 []float32
+	GLUValB, GLUGateB                   []float32
+	DW, BNScale, BNShift, PW2B          []float32
+	FF2Norm, FF2NormB, FF2UpB, FF2DownB []float32
+	OutNorm, OutNormB                   []float32
+	PE                                  []float32
+}
+
+// List is the vectors in a fixed order, the tier's.
+func (c *ConformerVecs) List() [27][]float32 {
+	return [27][]float32{c.FF1Norm, c.FF1NormB, c.FF1UpB, c.FF1DownB, c.AttnNorm, c.AttnNormB,
+		c.QB, c.KB, c.VB, c.OB, c.U, c.V, c.ConvNorm, c.ConvNormB, c.GLUValB, c.GLUGateB,
+		c.DW, c.BNScale, c.BNShift, c.PW2B, c.FF2Norm, c.FF2NormB, c.FF2UpB, c.FF2DownB,
+		c.OutNorm, c.OutNormB, c.PE}
 }
 
 // ConvDevice is a LayerDevice that runs a convolutional tower's blocks.
@@ -1249,6 +1316,18 @@ type RowWindowDevice interface {
 	SetRowWindows(wins []KeyRun) bool
 }
 
+// SeqRunsDevice is an optional LayerDevice that takes several sequences
+// packed into the rows of the NonCausal calls that follow, until replaced:
+// runs partition the rows, and every row of every non-causal block attends
+// inside its run -- an encoder answering several questions in one pass. A
+// windowed block's row windows (RowWindowDevice) are the caller's, inside
+// the runs. nil or empty is one sequence over the call's rows. It is kept
+// apart from SetRowWindows and SetKeyRuns, which it does not replace; false is
+// a device that cannot take them.
+type SeqRunsDevice interface {
+	SetSeqRuns(runs []KeyRun) bool
+}
+
 // RowsReserver is an optional LayerDevice whose NonCausal blocks are built for
 // the rows of the calls they run rather than for their plan's MaxSeq (the
 // tower's largest grid): ReserveRows makes them able to take a call of n rows,
@@ -1258,6 +1337,17 @@ type RowWindowDevice interface {
 // implement it is built for MaxSeq.
 type RowsReserver interface {
 	ReserveRows(n int) bool
+}
+
+// RowChunker is an optional RowsReserver whose non-causal set may take a
+// picture in row chunks when the whole does not fit (paging is the design):
+// TowerChunk, read after ReserveRows, is the rows a call takes (0: the
+// picture goes whole). Such a picture runs block by block, every chunk's
+// phase 1 (its k and v written at its rows of keys) before any chunk's phase
+// 2 (its queries over every key, and the rest of the block on its rows).
+type RowChunker interface {
+	TowerChunk() int
+	LayersPhase(lo, hi, pos, n, keys, phase int, x, cs, csSWA []float32) bool
 }
 
 // LayerInputDevice is an optional LayerDevice that takes a per-layer input
@@ -1311,6 +1401,25 @@ type TokenDevice interface {
 // says why.
 type RowsDevice interface {
 	LayersRows(lo, hi int, pos, slot []int, seqLen int, x, cs, csSWA []float32, head *Head) bool
+}
+
+// RowsWidther is a RowsDevice that states how many rows one LayersRows call
+// can take: RowsWidth(want) is the widest step of at most want rows whose
+// batched scratch every device holding a block holds or can build in its
+// budget now, 0 when not even the narrowest fits. A caller filling steps
+// (model.Scheduler) keeps under it, since a step wider than the scratch is
+// refused rather than split.
+type RowsWidther interface {
+	RowsWidth(want int) int
+}
+
+// RowsRoomer is a RowsDevice that says, before a step runs, whether every
+// device holding a block has room for it: the batched scratch for rows rows
+// and a recurrent state for each of seqs sequences, built or grown now. A step
+// it has no room for is refused before anything runs, so a caller asks first
+// and brings its blocks home rather than fail the step.
+type RowsRoomer interface {
+	RowsRoom(rows, seqs int) bool
 }
 
 // SeqKVDevice is a LayerDevice that keeps attention history per sequence --
@@ -1398,9 +1507,6 @@ type NamedDevice interface {
 	// DeviceOf is the name of the device holding block li, and whether one does.
 	DeviceOf(li int) (string, bool)
 	HeadDeviceName() (string, bool)
-	// HeadWith is the head on the device holding block li: the one place a
-	// rows step takes it.
-	HeadWith(li int) bool
 	// Pin keeps block li on its device through seam moves, budget shrinks
 	// and eviction; it reports false when no device holds the block.
 	Pin(li int, on bool) bool

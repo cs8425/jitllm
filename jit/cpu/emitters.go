@@ -48,6 +48,9 @@ type Emitters struct {
 	ActMul     func(k ActKind) ([]byte, error) // every kind in Gated
 	Act        func(k ActKind) ([]byte, error) // every kind in Ungated
 	SigmoidMul func() ([]byte, error)
+	// Ln is x = ln(x) in place over positive finite x, Scr = ActConsts()
+	// (EmitLn): a log-mel feature's log.
+	Ln func() ([]byte, error)
 	// XIELU is Apertus's ungated activation over a runtime length, its four
 	// numbers a buffer (xielu_const.go has the contract).
 	XIELU func() ([]byte, error)
@@ -78,7 +81,8 @@ type Emitters struct {
 	RMSNorm   func(n int) ([]byte, error)
 	LayerNorm func(n int, bias bool) ([]byte, error)
 	// RowStat is the layer norm's passes turned to Gemma 3n's two row ops
-	// (mode RowGauss or RowMag; see EmitGaussTopK and EmitMagMatch).
+	// (mode RowGauss, RowMag or RowStd; see EmitGaussTopK, EmitMagMatch and
+	// EmitRowStd).
 	RowStat func(n int, mode RowMode) ([]byte, error)
 	RoPE    func(hd, nrot int, neox bool) ([]byte, error)
 	// RoPESplit is XD-RoPE's rotation (HunyuanVL): NEOX pairs whose halves
@@ -315,6 +319,7 @@ var primaryEmitters = Emitters{
 	ActMul:     func(k ActKind) ([]byte, error) { return must("actmul", EmitActMul(k)) },
 	Act:        func(k ActKind) ([]byte, error) { return must("act", EmitAct(k)) },
 	SigmoidMul: func() ([]byte, error) { return must("sigmoidmul", EmitSigmoidMul()) },
+	Ln:         func() ([]byte, error) { return must("ln", EmitLn()) },
 	XIELU:      func() ([]byte, error) { return must("xielu", EmitXIELU()) },
 
 	RMSNorm:   func(n int) ([]byte, error) { return must("rmsnorm", EmitRMSNorm(n)) },
@@ -325,6 +330,8 @@ var primaryEmitters = Emitters{
 			return must("gausstopk", EmitGaussTopK(n))
 		case RowMag:
 			return must("magmatch", EmitMagMatch(n))
+		case RowStd:
+			return must("rowstd", EmitRowStd(n))
 		}
 		return nil, fmt.Errorf("jit: row statistic %d", mode)
 	},
@@ -417,6 +424,7 @@ var sseEmitters = Emitters{
 	ActMul:        EmitActMulSSE,
 	Act:           EmitActSSE,
 	SigmoidMul:    EmitSigmoidMulSSE,
+	Ln:            EmitLnSSE,
 	XIELU:         EmitXIELUSSE,
 
 	RMSNorm:   EmitRMSNormSSE,
@@ -427,6 +435,8 @@ var sseEmitters = Emitters{
 			return EmitGaussTopKSSE(n)
 		case RowMag:
 			return EmitMagMatchSSE(n)
+		case RowStd:
+			return EmitRowStdSSE(n)
 		}
 		return nil, fmt.Errorf("jit: row statistic %d", mode)
 	},

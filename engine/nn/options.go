@@ -18,6 +18,11 @@ type Config struct {
 	// drains through (BeginPrefill); "" takes the host default, and "p" -- or
 	// any set no wider than the decode pool -- builds none. See prefillCoreSet.
 	PrefillCores string
+	// ServingSplit lets a prefill run on the E-cores' own pool while another
+	// session decodes on the P-cores (BeginPrefillE): where there are E-cores
+	// to give (sched.CanSplitE, macOS) and the caller says another session is
+	// busy. Off, BeginPrefillE does nothing.
+	ServingSplit bool
 
 	// Profile arms the quantize/kernel/widen nanosecond counters inside MatVec.
 	// MatMulProf does the same for the batched path, splitting it into
@@ -59,6 +64,12 @@ type Config struct {
 	// MatVec loop -- the pre-GEMM engine, kept as the A/B arm it was built as.
 	NoGEMM bool
 
+	// ActWindow, when not zero, is the activation amax window in place of
+	// the one the weight types decide (cpu.WideActWindow): a model whose
+	// graph quantizes every projection input per token (BitNet) asks for a
+	// window at least as wide as its widest row, so every 32-element block
+	// of a row shares the row's one scale. A multiple of 32.
+	ActWindow int
 	// ChunkBytes caps the weight slice one pool chunk of a batched matmul
 	// covers, in bytes, 0 meaning no locality cap (the GC-preemption budget
 	// alone sizes the chunk). Batched path only; see batchedChunk.
@@ -177,6 +188,9 @@ func WithPrefillChunk(n int) Option { return func(c *Config) { c.Chunk = n } }
 // WithPrefillCoreSet names the core set prefill runs on; see Config.PrefillCores.
 func WithPrefillCoreSet(name string) Option { return func(c *Config) { c.PrefillCores = name } }
 
+// WithServingSplit allows the E-core prefill pool; see Config.ServingSplit.
+func WithServingSplit(on bool) Option { return func(c *Config) { c.ServingSplit = on } }
+
 // WithParticipants pins how many pool threads drain a region; 0 duels for it.
 func WithParticipants(n int) Option { return func(c *Config) { c.Part = n } }
 
@@ -216,3 +230,7 @@ func WithGEMMRows(n int) Option { return func(c *Config) { c.GEMMRows = n } }
 // WithChunkBytes caps the weight slice one pool chunk of a batched matmul
 // covers. Zero is the default: no locality cap, the GC budget alone.
 func WithChunkBytes(n int) Option { return func(c *Config) { c.ChunkBytes = n } }
+
+// WithActWindow sets the activation amax window in place of the one the
+// weight types decide; see Config.ActWindow.
+func WithActWindow(n int) Option { return func(c *Config) { c.ActWindow = n } }

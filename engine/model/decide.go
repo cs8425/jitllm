@@ -1,6 +1,8 @@
 package model
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
 	"slices"
@@ -54,6 +56,10 @@ type DecisionAnswer struct {
 	Choice     string
 	Score      float64
 	Confidence float64
+	// CanonicalLegend says a score's legend gives a description that is not
+	// text as its sorted-key JSON in a string (vllm-d3's, as llama.cpp's
+	// server writes it).
+	CanonicalLegend bool
 }
 
 // Decision is the model's readout, DecisionNone for a model that is not a
@@ -105,9 +111,21 @@ type Decider struct {
 	// allocates nothing.
 	one [1]Span
 
+	// vids is the request in flight's videos, each its run of the prompt
+	// (cutVideos); nil between requests.
+	vids [][]Span
+
 	// pics is the request in flight's pictures, each its run of the prompt
 	// (cutPictures); nil between requests and for a text request.
 	pics [][]Span
+	// omniPre is d1-omni's picture prefix for the request in flight, rows of
+	// NEmbd (none for text), and omniVis the vision segment that encodes it.
+	omniPre []float32
+	// omniSpoken says the prefix is a voice clip's (DecideAudio), and
+	// omniClip is the clip as the tower reads it.
+	omniSpoken bool
+	omniClip   []float32
+	omniVis    *State
 	// vscores is each variant's scores (variantScores): a question's
 	// variants are answered together, so each keeps its own.
 	vscores [][]float32
@@ -121,6 +139,11 @@ type Decider struct {
 	jobs []*batchJob
 	// batchN is how many of jobs the last batch ran.
 	batchN int
+	// packIDs and packMarks are a packed encoder pass's ids and marker rows
+	// (layaPacked), and packs counts the passes run.
+	packIDs   []int32
+	packMarks []int
+	packs     int
 
 	// clef is Clef's head and its working memory (decideclef.go), and
 	// clefEmb the prefill mode its prompt runs under: the residual of every
@@ -157,7 +180,7 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 	}
 	d := &Decider{m: m, cfg: m.container.Config(), kind: kind, tpl: tpl, maxOptions: 255}
 	switch kind {
-	case jlm.DecisionLev:
+	case jlm.DecisionLev, jlm.DecisionVllmD3:
 		// Codes A..Z then AA..ZZ; only those that are one token are used, up
 		// to 255 (lev's serving code, ADR-028).
 		var codes []string
@@ -180,6 +203,17 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 		}
 		d.maxOptions = len(d.labels)
 	case jlm.DecisionLFM2D1:
+	case jlm.DecisionOpenJev:
+		// One letter per option, each of which must be one token
+		// (server-decision.cpp).
+		for _, c := range "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" {
+			id, ok := d.single(string(c))
+			if !ok {
+				return nil, fmt.Errorf("model: openjev's label %q is not one token", c)
+			}
+			d.labels = append(d.labels, id)
+		}
+		d.maxOptions = len(d.labels)
 	case jlm.DecisionClef:
 		d.st = m.NewState(maxSeq)
 		if err := d.clefInit(); err != nil {
@@ -187,9 +221,9 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 			return nil, err
 		}
 		return d, nil
-	case jlm.DecisionLaya:
+	case jlm.DecisionLaya, jlm.DecisionD1Omni:
 		if m.encMB() == nil || m.encMB().head == nil {
-			return nil, fmt.Errorf("model: a laya readout wants a ModernBERT encoder with its head")
+			return nil, fmt.Errorf("model: a %v readout wants an encoder with its head", kind)
 		}
 		d.emb = &Embedder{m: m}
 		if err := d.emb.encoderJIT(); err != nil {
@@ -207,6 +241,9 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 // Close releases the Decider's State.
 func (d *Decider) Close() error {
 	if d.emb != nil {
+		if d.omniVis != nil {
+			d.omniVis.Close()
+		}
 		d.emb.Close()
 		return nil
 	}
@@ -224,7 +261,15 @@ func (d *Decider) Close() error {
 // (Embedder.SetDevice).
 func (d *Decider) SetDevice(dev nn.Device, max int) error {
 	if d.emb != nil {
-		return d.emb.SetDeviceLayers(dev, max)
+		if err := d.emb.SetDeviceLayers(dev, max); err != nil {
+			return err
+		}
+		// An audio tower's blocks go where the encoder's do, every one the
+		// device takes (d1-omni's).
+		if max != 0 {
+			return d.emb.setAudioDevice(dev)
+		}
+		return d.emb.setAudioDevice(nil)
 	}
 	if err := d.st.SetDeviceLayers(dev, max); err != nil {
 		return err
@@ -263,7 +308,11 @@ func (d *Decider) Prepare(state jinja.Value, qs []DecisionQuestion, images int) 
 	if len(qs) == 0 {
 		return fmt.Errorf("questions must be a non-empty object")
 	}
-	if (state.IsNone() || state.IsUndefined()) && d.kind != jlm.DecisionLFM2D1 {
+	// d1, d1-omni and Clef read a null state (pictures alone): d1's runner,
+	// d1-omni's system_one ("" for None) and
+	// llama.cpp allow it, and Clef's systemone renders it as JSON null.
+	if (state.IsNone() || state.IsUndefined()) && d.kind != jlm.DecisionLFM2D1 && d.kind != jlm.DecisionClef &&
+		d.kind != jlm.DecisionD1Omni && d.kind != jlm.DecisionVllmD3 {
 		return fmt.Errorf("state must be provided")
 	}
 	for i := range qs {
@@ -297,12 +346,26 @@ func (d *Decider) Prepare(state jinja.Value, qs []DecisionQuestion, images int) 
 // the request's questions in its order; the answers come back in the same
 // order. imgs are the request's pictures, in its order (d1 only).
 func (d *Decider) Decide(state jinja.Value, qs []DecisionQuestion, imgs []image.Image) ([]DecisionAnswer, error) {
+	return d.DecideMedia(state, qs, imgs, nil)
+}
+
+// DecideMedia is Decide for a request that carries videos too (Clef's).
+func (d *Decider) DecideMedia(state jinja.Value, qs []DecisionQuestion, imgs []image.Image,
+	vids []VideoFrames) ([]DecisionAnswer, error) {
 	if err := d.Prepare(state, qs, len(imgs)); err != nil {
 		return nil, err
 	}
+	if err := d.checkVideos(len(vids), len(imgs)); err != nil {
+		return nil, err
+	}
 	d.input = 0
-	d.pics = nil
-	if len(imgs) > 0 {
+	d.pics, d.vids = nil, nil
+	if len(imgs) > 0 && d.kind == jlm.DecisionD1Omni {
+		if err := d.d1OmniPrefix(imgs); err != nil {
+			return nil, err
+		}
+		defer func() { d.omniPre = d.omniPre[:0] }()
+	} else if len(imgs) > 0 {
 		pics, err := d.cutPictures(imgs)
 		if err != nil {
 			return nil, err
@@ -310,6 +373,14 @@ func (d *Decider) Decide(state jinja.Value, qs []DecisionQuestion, imgs []image.
 		d.pics = pics
 		defer func() { d.pics = nil }()
 		state = replaceText(state, decisionMarker, " ")
+	}
+	if len(vids) > 0 {
+		v, err := d.cutVideos(vids)
+		if err != nil {
+			return nil, err
+		}
+		d.vids = v
+		defer func() { d.vids = nil }()
 	}
 	out := make([]DecisionAnswer, len(qs))
 	if d.kind == jlm.DecisionClef {
@@ -344,6 +415,13 @@ func (d *Decider) Decide(state jinja.Value, qs []DecisionQuestion, imgs []image.
 	return out, nil
 }
 
+// nonCausal reports whether the decoder's attention sees the whole prompt
+// (jlm.FlagNonCausal on a decoder readout); a gate's violation runs it
+// causally.
+func (d *Decider) nonCausal() bool {
+	return d.cfg.Flags.Has(jlm.FlagNonCausal) && !d.m.IsEncoder() && d.violation != "causal"
+}
+
 // variants is how many times a question is asked: lev shows a choice's options
 // in two orders, to cancel its preference for the first label.
 func (d *Decider) variants(q *DecisionQuestion) int {
@@ -356,7 +434,7 @@ func (d *Decider) variants(q *DecisionQuestion) int {
 // order is the question's options in the order the prompt shows them: d1
 // shows a noul true first.
 func (d *Decider) order(q *DecisionQuestion) []DecisionOption {
-	if (d.kind == jlm.DecisionLFM2D1 || d.kind == jlm.DecisionClef) && q.Type == jlm.QuestionNoul && d.violation != "false-first" {
+	if (d.kind == jlm.DecisionLFM2D1 || d.kind == jlm.DecisionClef || d.kind == jlm.DecisionOpenJev) && q.Type == jlm.QuestionNoul && d.violation != "false-first" {
 		return []DecisionOption{q.Options[1], q.Options[0]}
 	}
 	return q.Options
@@ -383,6 +461,13 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 		}
 		return d.layaForward(ids, q.Type, markers, v)
 	}
+	if d.kind == jlm.DecisionD1Omni {
+		ids, markers, err := d.d1OmniSequence(state, q, d.d1OmniMaxLen())
+		if err != nil {
+			return nil, err
+		}
+		return d.d1OmniForward(ids, q.Type, markers, v)
+	}
 	if len(d.pics) > 0 {
 		spans, groups, err := d.promptSpans(state, q, v)
 		if err != nil {
@@ -402,7 +487,10 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 // makes no heap allocation once warm (TestDecisionDoesNotAllocate). Writing
 // the prompt is text work before it.
 func (d *Decider) forward(ids []int32, groups [][]int32, v int) ([]float32, error) {
-	d.one[0] = Span{Tokens: ids}
+	// A non-causal decoder's prompt (vllm-d3: attention.causal false) is one
+	// bidirectional run: its attention blocks see the whole prompt, as
+	// llama.cpp's mask does, and its recurrent blocks scan it in order.
+	d.one[0] = Span{Tokens: ids, Bidir: d.nonCausal()}
 	return d.forwardSpans(d.one[:], groups, v)
 }
 
@@ -449,10 +537,14 @@ func (d *Decider) forwardSpans(spans []Span, groups [][]int32, v int) ([]float32
 	}
 	var lg []float32
 	var err error
-	if len(spans) == 1 && spans[0].Picture == nil && spans[0].Embd == nil {
+	if len(spans) == 1 && spans[0].Picture == nil && spans[0].Embd == nil && !spans[0].Bidir {
 		lg, err = d.st.Prefill(spans[0].Tokens)
+	} else if len(spans) == 1 && spans[0].Picture == nil && spans[0].Embd == nil {
+		lg, err = d.st.prefillBidir(spans[0].Tokens)
 	} else {
+		d.st.bidirAll = d.nonCausal()
 		lg, err = d.st.PrefillMixed(spans...)
+		d.st.bidirAll = false
 	}
 	if err != nil {
 		return nil, err
@@ -539,6 +631,16 @@ func (d *Decider) promptText(state jinja.Value, q *DecisionQuestion, v int) (str
 		for _, id := range d.labels[:n] {
 			groups = append(groups, []int32{id})
 		}
+	case jlm.DecisionVllmD3:
+		labels = d.labelTexts
+		for _, id := range d.labels[:len(opts)] {
+			groups = append(groups, []int32{id})
+		}
+	case jlm.DecisionOpenJev:
+		// The template writes the letters itself.
+		for _, id := range d.labels[:len(opts)] {
+			groups = append(groups, []int32{id})
+		}
 	case jlm.DecisionLFM2D1:
 		var err error
 		if labels, groups, err = d.d1Labels(q.Type, opts); err != nil {
@@ -613,7 +715,11 @@ func (d *Decider) render(state jinja.Value, q *DecisionQuestion, opts []Decision
 	// models that read an absent one ask by the question's id (Clef's
 	// encode_record, lev's template); llama.cpp refuses the request instead.
 	ins := q.Instructions
-	if ins.IsUndefined() || ins.IsNone() {
+	if ins.IsUndefined() {
+		ins = jinja.None()
+	}
+	// d3's template asks its own default question for none (d3_format.py).
+	if ins.IsNone() && d.kind != jlm.DecisionVllmD3 {
 		ins = jinja.NewString(q.ID)
 	}
 	in := jinja.NewDict()
@@ -787,6 +893,9 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 	shown := d.order(q)
 	n := len(variants[0])
 	t := d.cfg.Temperature(q.Type, len(q.Options))
+	if d.kind == jlm.DecisionD1Omni && len(d.omniPre) > 0 {
+		t = 1 // the reference calibrates text alone (calibrate, modeling_d1.py)
+	}
 	if d.violation == "uncalibrated" {
 		t = 1
 	}
@@ -812,7 +921,7 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 			copy(p, s)
 		}
 		nn.Scale32JIT(p, 1/t)
-		if d.kind == jlm.DecisionLaya {
+		if d.kind == jlm.DecisionLaya || d.kind == jlm.DecisionVllmD3 {
 			copy(row, p) // the scaled scores, for the entropy below
 		}
 		nn.Softmax32JIT(p, n)
@@ -822,7 +931,7 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 		}
 		nn.Axpy32JIT(acc, p, w)
 	}
-	a := DecisionAnswer{Type: q.Type}
+	a := DecisionAnswer{Type: q.Type, CanonicalLegend: d.kind == jlm.DecisionVllmD3}
 	if q.Type == jlm.QuestionNoul {
 		if d.kind == jlm.DecisionLev {
 			// The expected rating over 0..n-1, as a probability of yes.
@@ -879,12 +988,13 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 		}
 		a.Confidence = confidenceScore(float64(dist), uni, n)
 	}
-	if d.kind == jlm.DecisionClef && d.violation != "typesafe-confidence" {
+	if (d.kind == jlm.DecisionClef || d.kind == jlm.DecisionD1Omni) && d.violation != "typesafe-confidence" {
 		// Clef's own (systemone_answer): the chosen option's probability, and
 		// a score's largest; llama.cpp gives TypeSafe's formula.
 		a.Confidence = top
 	}
-	if d.kind == jlm.DecisionLaya {
+	if d.kind == jlm.DecisionLaya || (d.kind == jlm.DecisionVllmD3 && q.Type != jlm.QuestionNoul &&
+		d.violation != "typesafe-confidence") {
 		// One minus the entropy over log n: -sum p log p, with log p the
 		// log-softmax of the same scaled scores (one variant on Laya).
 		nn.LogSoftmax32JIT(row, n)
@@ -1066,6 +1176,23 @@ func DecisionResponse(modelID string, qs []DecisionQuestion, answers []DecisionA
 				}
 				b.WriteString(jsonString(o.Key))
 				b.WriteByte(':')
+				if a.CanonicalLegend && !o.Description.IsString() {
+					// vllm-d3's: a description that is not text is given
+					// as its JSON with every object's keys sorted, a string
+					// (server-decision.cpp, canonical_legend).
+					desc := o.Description
+					if desc.IsUndefined() {
+						desc = jinja.None()
+					}
+					// Compact, as nlohmann's dump() writes it.
+					var c bytes.Buffer
+					if err := json.Compact(&c, []byte(sortKeys(desc).JSON())); err != nil {
+						c.Reset()
+						c.WriteString(sortKeys(desc).JSON())
+					}
+					b.WriteString(jsonString(c.String()))
+					continue
+				}
 				b.WriteString(o.Description.JSON())
 			}
 			b.WriteByte('}')
@@ -1096,11 +1223,51 @@ func jsonString(s string) string { return jinja.NewString(s).JSON() }
 
 func jsonFloat(f float64) string { return strconv.FormatFloat(f, 'g', -1, 64) }
 
-// ParseDecisionRequest reads a /v1/systemone body: the model it names (""
-// when none), the state and the questions, every object's keys in the order
-// the body wrote them, and the pictures' data URLs in request order
-// (DecisionMedia, which takes them out of the state).
-func ParseDecisionRequest(body []byte) (string, jinja.Value, []DecisionQuestion, []string, error) {
+// DecisionBody is a /v1/systemone body as ParseDecisionRequest reads it.
+type DecisionBody struct {
+	// Model is the model it names, "" when none.
+	Model     string
+	State     jinja.Value
+	Questions []DecisionQuestion
+	// Images are the pictures' data URLs in request order (DecisionMedia,
+	// which takes them out of the state); Videos the videos'
+	// (DecisionVideos).
+	Images []string
+	Videos []VideoURLs
+	// Audio is the voice clips' data URLs (data:audio/...): at most one, and
+	// never beside a picture (d1-omni's).
+	Audio []string
+}
+
+// ParseDecisionRequest reads a /v1/systemone body, every object's keys in the
+// order the body wrote them.
+func ParseDecisionRequest(body []byte) (DecisionBody, error) {
+	var out DecisionBody
+	var err error
+	out.Model, out.State, out.Questions, out.Images, err = parseDecisionRequest(body)
+	if err != nil {
+		return out, err
+	}
+	// A voice clip rides "files" beside the pictures (llama.cpp's server
+	// tells them apart by content; here by the URL's media type).
+	pics := out.Images[:0]
+	for _, u := range out.Images {
+		if strings.HasPrefix(u, "data:audio/") {
+			out.Audio = append(out.Audio, u)
+		} else {
+			pics = append(pics, u)
+		}
+	}
+	out.Images = pics
+	if len(out.Audio) > 1 || len(out.Audio) == 1 && len(out.Images) > 0 {
+		return out, fmt.Errorf("a request has images or one audio clip, not both")
+	}
+	v, _ := jinja.FromJSON(body)
+	out.Videos, err = DecisionVideos(v.AsDict())
+	return out, err
+}
+
+func parseDecisionRequest(body []byte) (string, jinja.Value, []DecisionQuestion, []string, error) {
 	v, err := jinja.FromJSON(body)
 	if err != nil {
 		return "", jinja.None(), nil, nil, fmt.Errorf("the request is not JSON: %w", err)

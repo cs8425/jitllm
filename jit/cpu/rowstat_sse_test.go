@@ -15,13 +15,16 @@ func TestRowStatsSSEMatchReference(t *testing.T) {
 	em := EmittersFor(TierSSE)
 	for _, n := range append(f2Widths(), 2048, 8192) {
 		x, ref := rowStatInputs(n)
-		for _, mode := range []RowMode{RowGauss, RowMag} {
+		for _, mode := range []RowMode{RowGauss, RowMag, RowStd} {
 			name := fmt.Sprintf("rowstat%d_sse_%d", mode, n)
 			b, err := em.RowStat(n, mode)
 			code := f2SSEKernel(t, name, b, err)
 			kc, r, avx := []float32{1 / float32(n), 0, c}, []float32(nil), EmitGaussTopK(n)
-			if mode == RowMag {
+			switch mode {
+			case RowMag:
 				kc, r, avx = []float32{1 / float32(n), eps, 1}, ref, EmitMagMatch(n)
+			case RowStd:
+				kc, avx = rowStdKons(n, eps), EmitRowStd(n)
 			}
 			got := runRowStat(t, code, name, x, r, kc)
 			code.Close()

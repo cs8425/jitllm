@@ -18,8 +18,7 @@ func openQ4E(t *testing.T, name string) (*Model, *c6Golden) {
 }
 
 // q4eFixtures names each fixture and what its container must carry: four
-// hyper-connection streams at rank 32 (a device quantizes activations in
-// blocks of 32); linear, attention, linear, attention;
+// hyper-connection streams at rank 32 (40 on the ragged fixture); linear, attention, linear, attention;
 // QSA on both attention blocks (budget 8 at a ratio of 4, so from position 12
 // a query reads a subset of its keys); the n-gram block on block 2 (3-grams,
 // two heads each, rows of 16); the delta rule's gate a sigmoid.
@@ -35,6 +34,12 @@ var q4eFixtures = []struct {
 			c.DeltaSigmoidGate && c.NRot == 16 && c.RopeNeox && c.AttnOutGate &&
 			c.LayerKind(0).Recurrent() && !c.LayerKind(1).Recurrent() &&
 			c.LayerKind(2).Recurrent() && !c.LayerKind(3).Recurrent() && m.ngram != nil
+	}},
+	// The hyper-connections' rank 40: not a whole number of the activation
+	// quantizer's blocks, so every tier quantizes it with a ragged tail.
+	{"synth-qwen4exp-ragged", func(m *Model) bool {
+		c := m.Cfg
+		return c.Arch == "qwen4exp" && c.HCMult == 4 && c.HCLowRank == 40 && m.ngram != nil
 	}},
 }
 

@@ -7827,6 +7827,101 @@ int8 activations of the two hosts' kernels round differently, and 16% apart at
 the output norm. Every other position of the prompt agrees with llama.cpp or
 ties within the gate's 0.5 on both hosts (18 of 20 teacher-forced on each).
 
+## BitNet b1.58: ternary weights, int8 activations per token
+
+BitNet b1.58 2B-4T (transformers' `BitNetForCausalLM`) is llama's block with
+two more RMSNorms -- one over the attention output before wo
+(`attn_sub_norm`), one over the gated product before down (`ffn_sub_norm`) --
+squared ReLU on the gate, NEOX rotary and a tied embedding. Every projection
+is `AutoBitLinear`: the activation is quantized to int8 by its absmax over the
+whole row, per token, and the weight is ternary, {-1, 0, 1} times one scale per
+tensor. The arch is `jlm.ArchBitNet` (56); the inner norms are
+`jlm.RoleAttnSubNorm` and `RoleFFNSubNorm`, uploaded with the block on every
+device and moved with it.
+
+**The weight type.** One ternary type on TQ2_0's block (256 codes, one scale):
+the codes sit in a 2-bit plane, four a byte a quarter sub-block apart
+(`kernels.Fields`), with a bias of one, and the dot is ternary x int8 -- an
+unsigned dot of the codes with the activation sum subtracted -- on AVX2, VNNI,
+SSE, NEON and the device IR, never dequantized to f32. The scale's precision is
+a parameter of the type, not a rounding: `TQ2_0` carries an f16 scale,
+`TQ2_F32` (an engine type, `quant.EngineTypes`) an f32 one. TQ1_0 and
+bitnet.cpp's I2_S (type 36: 2-bit codes in 128-element groups, one f32 scale in
+a 32-byte tail) re-pack into it exactly; the decoders are held to gguf-py's
+(`quant.TestTernaryMatchesGGUFPy`).
+
+Why the f32 form exists: Microsoft's I2_S file stores each tensor's scale as an
+f32 mean that is not f16-exact (worst relative error 4.6e-4). Rounding it to
+f16 moved the fixture's logits by 4e-4..3.6e-3 in NMSE against the f32 golden,
+and transformers fed the same rounded scales reproduced exactly that number. So
+a scale that is f16-exact (the release's bf16 `weight_scale`, the F16 GGUF's)
+converts to TQ2_0 and any other to TQ2_F32.
+
+**Three inputs, one graph.** The release (uint8 codes packed four a byte plus a
+bf16 `weight_scale` the output is multiplied by) converts byte for byte; the
+bf16 master checkpoint is ternarized at conversion as the class does (absmean,
+in bf16 under its torch_dtype: 98-99% of each projection agrees with the
+release's codes, so it has its own golden); a GGUF from bitnet.cpp's converter
+(I2_S, F16 or F32) folds each tensor's scale in. llama.cpp's converter cannot
+write this class at all: it maps neither inner norm.
+
+**Activations per token.** transformers quantizes each row by its own absmax.
+The engine's int8 activation quantizer took its scale per 32 elements; a
+session of a TokenAct arch widens the window to the widest row
+(`nn.WithActWindow`), the host clamps it to the row, and the device quantizes a
+window wider than one 128-thread group in a loop (`kernels.quantizeWide`).
+llama.cpp's TQ2_0 dot reads its activations as q8_K, one scale per 256.
+
+**Rounding-boundary flips are the gate's noise floor.** An activation within a
+few ulps of an int8 rounding boundary rounds the other way under another
+summation order, and the logits after that one step move: synth-bitnet-i2s
+(F16 embedding) reads 9.4e-5 at its worst position with 17 of 44 positions
+exact. The fixture gates take NMSE 2e-3 with exact positions at 1e-9, and every
+violation must read at least ten times the bound.
+
+Fixtures (scripts/bitnetgold.py: transformers' own BitNetForCausalLM with every
+parameter and buffer drawn, the packed release form and the online latent
+form, plus bitnet.cpp's converter's I2_S and F16 GGUFs of the latter), laptop,
+host, decode and prefill at every length and the batch:
+
+    synth-bitnet-hf (TQ2_0)            2.9e-13
+    synth-bitnet-online-hf (TQ2_F32)   4.1e-13
+    synth-bitnet-f16.gguf (TQ2_0)      7.0e-13
+    synth-bitnet-i2s.gguf (TQ2_F32)    9.4e-5 (an int8 boundary flip)
+
+Violations, host: no attention inner norm 0.92, no FFN inner norm 1.29, SiLU
+for squared ReLU 0.51, NORM rotary 2.22, activations per 32 rather than per
+token 3.5e-2, every weight's scale one 1.13, wo's scale inverted 1.74. On CUDA
+and Vulkan with every block placed: decode ~1e-13; prefill with f32 attention
+~1e-13; the default CUDA prefill, whose QK^T tiles are binary16, 5e-3 to
+9.5e-3 (pinned to f32 attention it reads 5e-14, so the gap is the tiles, not
+the ternary path); violations 0.38 to 2.2, and per-32 4e-2 to 6.7e-2.
+
+**Not llama.cpp's graph.** llama.cpp's `bitnet` architecture is 1bitLLM's
+reproduction -- a SiLU gate, NORM rotary -- and bitnet.cpp's `bitnet-b1.58`
+runs SiLU too. transformers on the release reads NLL 1.70 with squared ReLU and
+2.51 with SiLU, so the class is the oracle and `bitnet` is not converted. The
+real checkpoints are held to transformers on their own weights
+(`scripts/bitnetreal.py`), teacher-forced through three prompts of 32 greedy
+tokens.
+
+Teacher-forced on the 2B-4T, three prompts of 32 tokens (214 positions),
+laptop (CUDA and Vulkan on the RTX 3050 Ti, every block placed unless said):
+
+    the release (TQ2_0)       host 212/214, 0 confident flips, NMSE 1.5e-2
+                              cuda 212/214 (5.5e-2), vulkan 214/214 (8.2e-2)
+    the bf16 master (TQ2_0)   host 206/214, cuda 208/214, vulkan 205/214;
+                              0 confident flips, every parting position a tie
+    I2_S GGUF (TQ2_F32)       host 212/214 (2.1e-2), cuda 213/214 with one
+                              block placed, 214/214 with three
+
+The free-running continuations match the reference's token for token on two of
+the three prompts; the third parts at a tie and stays fluent ("Paris. Paris is
+a city in the Île-de-France region..."). Microsoft's GGUF states no
+`tokenizer.ggml.pre`, so its tokenizer splits "def fibonacci(n):\n" as
+llama.cpp's default does and not as the release's tokenizer.json; the gate
+logs that and runs the golden's ids.
+
 ## Gemma 4 vision: clamped matrices, a pooling head, and image rows bidirectional on half the layers
 
 Gemma 4's tower is an RMSNorm ViT at the picture's own size, and it is the
@@ -9368,11 +9463,28 @@ CUDA and Vulkan; M4 mini, arm64 host and Metal):
 | `TestWarmImageEncodeDoesNotAllocate/lfm2` | 0 allocations |
 | `TestEveryTowerRunsSSE/lfm2` | pixels bit-identical, encode NMSE 9.6e-4 against AVX2 |
 
-Not yet run: the decision gate with every text block on a card (the 4 GB
-laptop card holds 7 of 30 under CUDA and 2 under Vulkan beside the tower;
-the V100s were busy with another agent's measurement), and a randomised
-LFM2-VL fixture through llama.cpp's own converter (the gates above run the
-real checkpoint).
+The fixture (`scripts/lfm2visiongold.py --fixture`, `synth-lfm2vl`):
+transformers' Lfm2VlForConditionalGeneration at toy size, every parameter and
+buffer randomised, with the projector LayerNorm d1 lacks, both GGUFs from
+llama.cpp's converter (the text model as the Lfm2ForCausalLM it is, the tower
+renamed to the published checkpoints' `vision_tower.vision_model.*`, three
+tower blocks because the converter names `linear_2` by a block index), and a
+1100x700 picture cut into 3x2 tiles and a thumbnail. Against transformers at
+the engine's arithmetic (Q8 weights and q8 activations in the reference): the
+tower 3.8e-5, the projector 1.3e-4, the projector alone 5.7e-8; every prompt
+position the processor's (markers, picture rows, text); logits from the pixels
+7.8e-7 with no argmax flip; every text and tower block on CUDA 7.0e-10 and
+Vulkan 2.0e-12 against the host. Each feature removed is seen by the projector
+alone: no LayerNorm 0.23, the tanh GELU 1.5e-6 (26x the clean arm, the fixture
+being where the erf form is visible), the transposed unshuffle 2.9e-2; the
+transposed position table 1.9e-3 from the pixels.
+
+Relocation and paging: `TestTowerEncodeResumesAcrossARelocation/lfm2` (the
+tower's first blocks on the card, then home mid-encode, under a two-page
+budget) is bit-identical on CUDA and Vulkan, and `TestD1PicturesMatchLlamaCpp`
+answers both picture requests to the bit under a budget of four text pages
+and two tower pages.
+
 ### Clef-Flash
 
 Clef-Flash is qwen35 with a joint schema head (`jlm.DecisionClef`): one prompt
@@ -9391,6 +9503,229 @@ so the in-memory model the first goldens came from was one no checkpoint can
 hold (0.16 of a logit off, every row but the first matching the reloaded
 backbone to 2e-5). The goldens now come from the checkpoint as written, read
 back as the release is read, and only persistent tensors are randomised.
+
+### Clef's pictures and videos
+
+A Clef request may carry `images` and `videos` (the request shape d1's
+takes; a video is Clef's "frame array", here an array of frame data URLs or
+`{"frames": [...], "fps": rate}`). Clef's own code (`encode_record`) puts
+the processor's expansion of `"<|vision_start|><|image_pad|><|vision_end|>"`
+per picture and `"<|vision_start|><|video_pad|><|vision_end|>"` per video,
+then a newline, between `STATE:\n` and the state; the head's spans are row
+indexes, so a picture's rows count as the processor's pads do
+(`clefPrompt`). A picture is the Qwen3.5 tower's one Picture between its
+markers. A video is Qwen3VLVideoProcessor's: frames sampled at 2 a second
+(`np.linspace`, rounded half to even) -- at the 24 frames a second the
+reference assumes when frames come with no rate --, every frame resized to
+one size by the video smart_resize over all frames (torchvision's 8-bit
+bicubic), paired by temporal_patch_size 2 with the last repeated, each pair
+one Picture whose patches attend only to each other (the reference's
+per-frame cu_seqlens), laid out as `<t seconds>` (the pair's two frames'
+mean time, `%.1f`) and its rows between markers, all inside the
+placeholder's own markers.
+
+A pair is two different frames, which a container whose patch embedding was
+folded to the planes' sum cannot read; `convert.foldPatchPlanes` now keeps
+the second plane beside the sum (`RoleVPatchEmbd` index 1), and a pair's
+row is x0*(W0+W1) + (x1-x0)*W1 (`State.patchPair`, generated gather,
+difference and add). A container converted before carries no second plane
+and refuses a video by name.
+
+Gates (`TestClefMediaMatchesReference`, laptop host, RTX 3050 Ti under CUDA
+and Vulkan): a fixture like Clef's random one but with the release's 48x48
+position table (`clefgold.py fixture-vl`; the 8x8 table of the text
+fixture reads a picture at 128 pixels where the processor reads 384), its
+goldens with the reference's tower inputs and matrices rounded as the
+container's are (`logits_a8`). Every row and span is the reference's. Two
+pictures: 5.5e-4 from the reference's logits (8.1e-3 against its f32 tower),
+5.2e-4 on CUDA and 5.5e-4 on Vulkan with every block; the pictures left out
+move 0.126. A video of ten frames (four sampled, two pairs): 1.4e-4 (2.3e-3
+against the f32 tower), 2.0e-4 on CUDA; the media left out move 0.066, and
+each pair's second frame read as its first 0.081.
+
+Two places Clef's processor and this engine's tower part, recorded rather
+than built: Clef's image bounds are 65536 to 16777216 pixels where every
+Qwen-VL tower here is bounded by the mmproj's image_size squared (768 for
+Clef, llama.cpp's convention), so a picture over 768x768 pixels is read
+smaller than Clef reads it; and a video frame larger than the tower's
+bound is refused by name rather than shrunk.
+
+### d1-omni: an LFM2 encoder under Laya's head
+
+LiquidAI's d1-omni-600M is LFM2.5-Encoder-350M (LFM2's sixteen blocks made
+bidirectional) with Laya's decision head on top: two pre-norm torch
+TransformerEncoderLayers with a ReLU MLP, the question type's row added to
+every row first, and a LayerNorm-Linear-GELU-Linear scorer at each option's
+`<|mask|>`. llama.cpp's converter writes it as an `lfm2` file whose
+block_count counts the head's two blocks and whose per-layer arrays run over
+all eighteen; `convert/d1omni.go` reads the trunk through a view of the file
+cut to sixteen blocks and states it as `jlm.ArchLFM2Enc`, so a reader that
+knows only the decoder refuses the container rather than running it under a
+causal mask. The head's fused, biased q|k|v is split in thirds of the
+residual (nn.MultiheadAttention's in_proj), whatever the trunk's GQA.
+
+What separates the trunk from LFM2's decoder, each removed by
+`TestD1OmniFeaturesAreLoadBearing` (worst logit 12.3, 12.3 and 1.1 off):
+
+- the short convolution is centred, `w0 bx[t-1] + w1 bx[t] + w2 bx[t+1]`
+  with zeros past either end, where the decoder's is causal over three past
+  rows. On the host it is three generated multiplies of `B*x` by each tap
+  repeated over the rows, two of them added one row shifted;
+- no causal mask on the attention;
+- a media prefix's rows attend to the prefix alone, and the prefix's last
+  row does not read the text's first through the convolution (encoder.py's
+  `keep_right`); both are in the code, and the pictures' gate, which comes
+  next, holds them.
+
+`prompt.encode` is transcribed as written: each piece tokenized alone after
+`<|name|>` is rewritten to `<¦name¦>`, the option block given
+max(96, min(24k+32, max_len/2)) tokens shared evenly, the question cut to
+that block and the state to what is left. A noul is read as [false, true],
+and the answer's confidence is the chosen option's probability.
+
+The GGUF stores every matrix in F16 and the checkpoint is F32, so a golden
+from the checkpoint as it is puts the engine 1.2e-2 off on the trunk -- the
+weights, not the graph. `scripts/d1omnigold.py` with `D1OMNI_F16=1` rounds
+each 2-D weight but the type table to f16 first, as the GGUF does, and the
+engine then sits at f32 order: 4.6e-5 on the trunk at the markers, 2.8e-5 on
+a logit, 5.5e-6 on a probability (`TestD1OmniMatchesReference`).
+
+A warm pass over every prompt makes no engine allocation, and half the
+blocks' pages give the same scores to the bit (`TestD1OmniKeepsThePrinciples`).
+On a device the trunk is the encoder segment's non-causal blocks
+(`engine/model/encdev.go`): RMSNorm, SwiGLU, GQA with the per-head q/k norm
+and NEOX rotary on the attention blocks, and on the convolution blocks a
+short convolution with no state, `nn.RecurrentPlan.Centred`, run by
+`kernels.Conv3Centred` -- three taps on the row before, at and after, each
+read only where the row's window holds it. The windows are the ones the
+attention's mask reads (`nn.RowWindowDevice`, one a row: a prefix row's the
+prefix, a text row's the whole call), copied whole into one buffer for the
+convolution (`blockScratch.vwinAll`), so the prefix's last row's cut and the
+zeros past either end are the same fact on both. The convolution and
+attention blocks share one set, built from the union of their plans. The
+head attends at 16 key heads with LayerNorm after a trunk of 8 with RMSNorm,
+and every kernel of a set bakes those, so the head runs in a non-causal set
+of its own (`nn.LayerPlan.HeadSet`, the tier's `geoNCHead`), resized with the
+trunk's and never row-chunked.
+
+`TestD1OmniOnEveryDevice` places every block, three, and eight (a seam that
+leaves the trunk's rest home) and compares the text and the picture
+questions' scores with the host's: CUDA 8.6e-3, 2.8e-3 and 3.9e-3 on the
+laptop's RTX 3050 Ti, Vulkan 1.7e-5. With the prefix reading the text on the
+device the scores move 1.0. The kernel alone against its loop, the prefix
+windows included: `backend.TestConv3CentredMatchesTheLoop`, which fails when
+the right tap ignores the window. A warm question makes no allocation on
+either device at a seam or with every block placed.
+
+#### d1-omni's pictures
+
+The mmproj's vision half (`d1omni_v`) is LFM2-VL's: SigLIP2 NaFlex with its
+post-LayerNorm, the 2x2 unshuffle, mm.1, erf GELU, mm.2, no input norm, and
+vision.py's plan -- LFM2-VL's tiles and thumbnail, resampled bilinear with
+antialias (no image_resize_algo in the file, so the class default). It
+converts as `jlm.ProjLFM2`. The mmproj also carries the audio encoder
+(`d1omni_a`), which this converter does not build yet: its `a.*` and `mm.a.*`
+tensors are set aside (`withoutAudio`), so a request with a voice clip finds
+no audio encoder and is refused rather than run without one.
+
+A picture is not marked in the prompt: every piece of every picture goes
+through the tower, and the projected rows in order are a prefix in front of
+the prompt's embeddings. The prefix rows attend to the prefix alone, the
+prefix's last row does not read the text through the convolution, the head
+reads the text rows, the prompt is cut to image_text_length (896) and the
+noul's default wording is the reference's YES_NO ("no", "yes"). The
+reference calibrates text alone: an answer over pictures takes no
+temperature. The trunk's context is max_length (16384), stated at conversion
+(`decision.max_length`, D1OmniConfig's default) where the GGUF says 128000.
+
+The encoder's Decider runs the tower on its own JIT through a vision
+segment (`Tower.newState`), so the encoder's JIT is built with the tower's
+formats and widths, and `Model.pageIn` sends a tower block through the
+layers' bind rather than the encoder's.
+
+The tower is stored Q8_0 and runs on int8 activations (convert/vision.go,
+the converter's one lossy step), and the reference reads F16 weights: the
+prefix rows sit at NMSE 1.6e-3 against the reference's (an outlier channel
+near -110 is 26 off), the head's logits 0.21 and the probabilities 5.2e-3
+away (`TestD1OmniDecidesOverPicturesAsItsReference`). The prefix length and
+the prompt after it are exact. Letting the prefix read the text moves a logit
+0.91, and swapping the two pictures 1.53.
+
+#### d1-omni's voice: the first audio tower
+
+The mmproj's audio half (`d1omni_a`) is audio.py's: NeMo's log-mel front
+end, an 8x convolutional subsampling, 17 FastConformer blocks and an adapter
+with a residual correction. It is carried as tower blocks after the vision
+blocks in the one tower page array (`jlm.Audio`, an optional tail of the
+Vision record, so a container with no audio is the bytes it was). The
+converter reads what the file states and writes what audio.py hardcodes
+(16 kHz, a 512-point transform of 400-sample windows every 160); it cuts
+pointwise_conv1 into the GLU's halves, makes the depthwise convolutions
+tap-major, and reorders the subsampling's output matrix to read its 4096
+inputs channel-last, the layout the engine's activations take.
+
+On the host every product is the generated matmul and every elementwise step
+a generated kernel:
+
+- the |STFT|^2 is two matmuls of the centred frames (one strided copy)
+  against the Hann-windowed cos and sin bases, built once at load; the mel
+  filterbank is librosa's Slaney one, transcribed; the log is a new
+  elementwise kernel (`nn.Ln32JIT`, the log-softmax's ln on every lane, on
+  AVX2, SSE and NEON); each feature's normalising scale is one scalar from
+  the generated sums;
+- the subsampling's first convolution is nine strided copies and a matmul,
+  its depthwise ones the tower's existing depthwise rows (`DWConvRow`), each
+  layer's input cut at the frames still valid, and only the valid rows go on:
+  the conformer's mask is exactly that cut, and a relative position does not
+  depend on the length;
+- the relative-position term of row i is the score kernel over the projected
+  position table read from row t-1-i, so the reference's rel-shift is an
+  offset, not a gather;
+- the convolution module's depthwise convolution is its taps' shifted
+  multiply-adds, BatchNorm folded into a scale and a shift by the converter.
+
+A voice clip arrives as a data:audio WAV in "files" (16 kHz mono 16-bit PCM;
+any other is refused, the engine does not resample), at most one and never
+beside a picture, as llama.cpp's server takes it. The prompt after it is
+written as the audio questions were trained (a choice's options as
+`option_000: <description>`, a noul as plain no and yes, a null state as
+{}), cut to audio_text_length (15360), with no temperature.
+
+Against audio.py with the F16-rounded weights (`TestD1OmniHearsAsItsReference`,
+on the repo's 3.3-second clip): the log-mel features 1.7e-6 off, the 41
+prefix rows at NMSE 1.2e-4 (the tower at Q8_0), the prompt token for token,
+the logits 0.039 and the probabilities 0.012 away. Removing the
+relative-position term moves the answers 0.32, the convolution module 0.63,
+writing the questions as text 0.11 (`TestD1OmniAudioFeaturesAreLoadBearing`);
+a warm clip's encoding allocates nothing. llama.cpp's d1-omni server reads
+the same 251 positions and answers within 0.012
+(`TestD1OmniVoiceMatchesLlamaCpp`).
+
+On a device each FastConformer block is a convolutional-tower block
+(`nn.ConvConformer`), a program of generated kernels as Gemma 3n's
+MobileNet blocks are (`jit/gpu/tier/conv.go`): LayerNorm in three passes,
+the matrices' batched twins with a bias launch after each, the macaron
+halves as `AddHalf`, the relative-position scores in one kernel
+(`kernels.RelPosScores`: both terms, the position table's row picked by the
+offset), the row softmax, the weighted sum (`AttnAccRows`), the GLU's
+`SigmoidMul`, the depthwise convolution (`DWConv1dRows`), the folded
+BatchNorm (`AffineRows`, the depthwise bias folded into its shift at load)
+and SiLU. The program is built for the 30 seconds' 375 rows and a call
+writes its own row count to a one-word buffer: the keys, the weighted sum
+and the convolution stop there by SELECTING, not by multiplying by zero, since
+the rows past it hold whatever the scratch held. The projected
+position table is a matmul of a constant sinusoid table, 2R-1 rows, per
+block per call. The audio blocks are placed through their own encoder
+segment State (`audState`), the one placement path; the front end, the
+subsampling, the adapter and the residual stay on the host.
+
+`TestD1OmniHearsOnEveryDevice` places every audio block: the prefix rows sit
+at NMSE 1.3e-4 against the host's on the laptop's RTX 3050 Ti under CUDA and
+Vulkan, the answers 0.008-0.012 from the reference, and a warm clip makes no
+allocation (the convolutional submission's closure and its run list were
+made per call; they are the devTier's now). Swapping the attention's u and v
+on the device moves the rows to NMSE 0.097. The kernels against their loops,
+rows past the call poisoned NaN: `backend.TestConformerKernelsMatchTheLoops`.
 
 ## qwen4exp: Qwen3.8-Flash-Next (plan, before the code)
 

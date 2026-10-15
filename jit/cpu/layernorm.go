@@ -27,6 +27,10 @@ func EmitGaussTopK(n int) []byte { return emitRowStat(n, false, RowGauss) }
 // Scr = [1/n, eps, 1].
 func EmitMagMatch(n int) []byte { return emitRowStat(n, false, RowMag) }
 
+// EmitRowStd generates a row standardised over its unbiased deviation
+// (RowStd).
+func EmitRowStd(n int) []byte { return emitRowStat(n, false, RowStd) }
+
 func emitRowStat(n int, bias bool, mode RowMode) []byte {
 	var a Buf
 	a.MOVLoad(RCX, At(RDI, 0))  // Out -> y
@@ -76,15 +80,24 @@ func emitRowStat(n int, bias bool, mode RowMode) []byte {
 		a.VMULPS(reg, reg, reg)
 		a.VPBLENDD(reg, Y10, reg, 0x01)
 	})
-	a.VBROADCASTSS(Y5, At(RBX, 0)) // 1/n
+	if mode == RowStd {
+		a.VBROADCASTSS(Y5, At(RBX, 12)) // 1/(n-1)
+	} else {
+		a.VBROADCASTSS(Y5, At(RBX, 0)) // 1/n
+	}
 	a.VBROADCASTSS(Y6, At(RBX, 4)) // eps
 	a.VMULPS(Y0, Y0, Y5)
-	if mode == RowMag {
+	switch mode {
+	case RowMag:
 		a.VMAXPS(Y0, Y0, Y6) // max(mean(x^2), eps)
-	} else {
+	case RowStd:
+	default:
 		a.VADDPS(Y0, Y0, Y6)
 	}
 	a.VSQRTPS(Y0, Y0)
+	if mode == RowStd {
+		a.VADDPS(Y0, Y0, Y6) // the deviation plus eps
+	}
 	a.VBROADCASTSS(Y7, At(RBX, 8)) // 1.0, or the gaussian's c
 	switch mode {
 	case RowGauss:
@@ -106,6 +119,9 @@ func emitRowStat(n int, bias bool, mode RowMode) []byte {
 			a.VSUBPS(src, src, Y9)
 			a.VMAXPS(src, src, Y10)
 		case RowMag:
+			a.VMULPS(src, src, Y9)
+		case RowStd:
+			a.VSUBPS(src, src, Y8)
 			a.VMULPS(src, src, Y9)
 		default:
 			a.VSUBPS(src, src, Y8)
@@ -133,6 +149,9 @@ func emitRowStat(n int, bias bool, mode RowMode) []byte {
 			a.VSUBPS(Y4, Y4, Y9)
 			a.VMAXPS(Y4, Y4, Y10)
 		case RowMag:
+			a.VMULPS(Y4, Y4, Y9)
+		case RowStd:
+			a.VSUBPS(Y4, Y4, Y8)
 			a.VMULPS(Y4, Y4, Y9)
 		default:
 			a.VSUBPS(Y4, Y4, Y8)

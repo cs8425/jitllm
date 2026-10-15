@@ -160,8 +160,8 @@ var tuneTrials, bgTuneTrials atomic.Int64
 // device's work, not on its path.
 func BackgroundTuneTrials() int64 { return bgTuneTrials.Load() }
 
-// bgTrial is one background candidate; a gate swaps it.
-var bgTrial = (*devTier).timeSplitOn
+// bgTrial is one round of a background candidate's trial; a gate swaps it.
+var bgTrial = (*devTier).timeSplitRound
 
 // tuneJob is one shape the background tuner measures.
 type tuneJob struct {
@@ -271,24 +271,43 @@ func (g *devTier) runTuneJob(j tuneJob) {
 	}
 	best, bestRate, bestGroup := 0, 0.0, false
 	for _, c := range j.cands {
-		if !g.waitQuiet() {
-			return
-		}
-		g.mu.Lock()
-		// No submission may be in flight under a trial (trialQuiet).
-		g.trialQuiet()
-		if g.tuneStop || g.closed || !j.r.ok {
+		// The candidate is timed a round at a time, each round under g.mu
+		// after the device has been quiet: a whole trial is ten rounds, and
+		// on an output head (Q6_K 128256x4096) it held g.mu for 21 ms, which
+		// a prompt arriving meanwhile waited for -- 64-token prompts on a
+		// V100 read 830 and 520 tok/s against 1550 beside them. Between
+		// rounds the lock is free and a prompt goes first.
+		rates := make([]float64, 0, splitRounds)
+		ok := true
+		for round := 0; ok && round < splitRounds+1; round++ {
+			if !g.waitQuiet() {
+				return
+			}
+			g.mu.Lock()
+			// No submission may be in flight under a trial (trialQuiet).
+			g.trialQuiet()
+			if g.tuneStop || g.closed || !j.r.ok {
+				g.mu.Unlock()
+				return
+			}
+			d := j.r.d
+			if xf != nil {
+				d = xf
+			}
+			if round == 0 {
+				bgTuneTrials.Add(1)
+			}
+			var rate float64
+			rate, ok = bgTrial(g, c.kern, c.red, j.r, d, out, part, rows, c.split, c.grp)
 			g.mu.Unlock()
-			return
+			if ok && round > 0 { // the first round pays first-touch
+				rates = append(rates, rate)
+			}
 		}
-		d := j.r.d
-		if xf != nil {
-			d = xf
+		if !ok {
+			continue
 		}
-		bgTuneTrials.Add(1)
-		rate, ok := bgTrial(g, c.kern, c.red, j.r, d, out, part, rows, c.split, c.grp)
-		g.mu.Unlock()
-		if ok && rate > bestRate {
+		if rate, ok := medianRate(rates); ok && rate > bestRate {
 			best, bestRate, bestGroup = c.split, rate, c.grp
 		}
 	}
@@ -391,39 +410,28 @@ func (g *devTier) timeSplitMode(kern, red backend.Kernel, r *resident, d, out ba
 
 // timeSplitOn is one timed candidate writing its partial sums to part.
 func (g *devTier) timeSplitOn(kern, red backend.Kernel, r *resident, d, out, part backend.Buf, rows, split int, grp bool) (float64, bool) {
-	if g.bs == nil {
-		return 0, false // no activation to read: a scratch rebuilt or closed
-	}
-	const rounds, iters = 9, 4
-	rates := make([]float64, 0, rounds)
-	for round := 0; round < rounds+1; round++ {
-		t0 := time.Now()
-		var err error
-		g.dev.Session(func(s backend.Session) {
-			for i := 0; i < iters; i++ {
-				dst := out
-				if split > 1 && !grp {
-					dst = part
-				}
-				if err = s.Launch(kern, groupsOf(rows*split, split, grp), widthOf(split, grp),
-					r.qs, d, r.sc, g.bs.a, g.bs.ax, dst); err != nil {
-					return
-				}
-				if split > 1 && !grp {
-					if err = s.Launch(red, (rows+127)/128, 128, part, out); err != nil {
-						return
-					}
-				}
-			}
-			err = s.Sync()
-		})
-		if err != nil {
+	rates := make([]float64, 0, splitRounds)
+	for round := 0; round < splitRounds+1; round++ {
+		rate, ok := g.timeSplitRound(kern, red, r, d, out, part, rows, split, grp)
+		if !ok {
 			return 0, false
 		}
-		if round == 0 {
-			continue // the first round pays compilation and first-touch
+		if round > 0 { // the first round pays compilation and first-touch
+			rates = append(rates, rate)
 		}
-		rates = append(rates, float64(iters)/time.Since(t0).Seconds())
+	}
+	return medianRate(rates)
+}
+
+// splitRounds is how many timed rounds a split trial takes, after one
+// untimed.
+const splitRounds = 9
+
+// medianRate is a trial's verdict over its rounds' rates: the median, or
+// false when they spread past splitTuneIQR.
+func medianRate(rates []float64) (float64, bool) {
+	if len(rates) == 0 {
+		return 0, false
 	}
 	sort.Float64s(rates)
 	med := rates[len(rates)/2]
@@ -432,6 +440,39 @@ func (g *devTier) timeSplitOn(kern, red backend.Kernel, r *resident, d, out, par
 		return 0, false
 	}
 	return med, true
+}
+
+// timeSplitRound times one round of a split trial: four launches of the
+// candidate and a synchronise, as launches a second.
+func (g *devTier) timeSplitRound(kern, red backend.Kernel, r *resident, d, out, part backend.Buf, rows, split int, grp bool) (float64, bool) {
+	if g.bs == nil {
+		return 0, false // no activation to read: a scratch rebuilt or closed
+	}
+	const iters = 4
+	t0 := time.Now()
+	var err error
+	g.dev.Session(func(s backend.Session) {
+		for i := 0; i < iters; i++ {
+			dst := out
+			if split > 1 && !grp {
+				dst = part
+			}
+			if err = s.Launch(kern, groupsOf(rows*split, split, grp), widthOf(split, grp),
+				r.qs, d, r.sc, g.bs.a, g.bs.ax, dst); err != nil {
+				return
+			}
+			if split > 1 && !grp {
+				if err = s.Launch(red, (rows+127)/128, 128, part, out); err != nil {
+					return
+				}
+			}
+		}
+		err = s.Sync()
+	})
+	if err != nil {
+		return 0, false
+	}
+	return float64(iters) / time.Since(t0).Seconds(), true
 }
 
 // retuneDecode re-picks each dense decode matvec's split once every block is
@@ -573,6 +614,7 @@ func (g *devTier) retuneDecode() {
 			}
 			if u.m.gated != nil || u.m.wantGated {
 				u.m.gated = g.gatedKernel(key.q, key.k, key.rows, best, bestGrp, g.bs.p.Act)
+				u.m.gate2 = g.gate2Kernel(key.q, key.k, key.rows, best, bestGrp, g.bs.p.Act)
 			}
 		}
 		g.splits[key], g.groupSplit[key] = best, bestGrp
@@ -592,6 +634,7 @@ func (g *devTier) retuneDecode() {
 	// After the splits settle: the operand prologue is timed at the split
 	// each matvec now runs.
 	g.tuneActIn()
+	g.tuneGateUp2()
 	g.tuneGemm()
 }
 
@@ -1131,6 +1174,7 @@ func (g *devTier) fuseQKV(l *layer) {
 	if l.shGate != nil && l.shUp != nil {
 		l.shGU = g.fuseSegs([]mv{l.mvsg, l.mvsu})
 	}
+	g.fuseGateUp(l)
 	l.qkv = nil
 	if l.mla || l.linear || l.nonCausal || l.wq == nil || l.wk == nil || l.wv == nil {
 		return
@@ -1178,3 +1222,58 @@ func (g *devTier) fuseQKV(l *layer) {
 	// count; it runs this kernel only while these still match.
 	l.qkvBias = [3]bool{segs[0].Bias, segs[1].Bias, segs[2].Bias}
 }
+
+// fuseGateUp builds block l's dense gate/up launch and the down kernel that
+// forms act(gate)*up from their rows (Config.GateUpFuse), or leaves both nil.
+// The two must run at one split and one reduction form, so each row's sum is
+// the one its own launch computed; down's prologue is QuantizeAct's
+// arithmetic, the same element and the same rounding as up's gated store
+// followed by down's quantize.
+func (g *devTier) fuseGateUp(l *layer) {
+	l.gu, l.guDown = nil, nil
+	why := func(w string) { g.GateUpWhy = w }
+	// Built whether or not the launch takes it, so the switch can be thrown
+	// between tokens (an A/B) without a retune.
+	if g.bs == nil || l.router != nil || l.mla || l.linear || l.nonCausal ||
+		l.gate == nil || l.up == nil || l.down == nil || ungatedFFN(&g.bs.p) || lnBlock(&g.bs.p) {
+		return
+	}
+	mg, mu, md := l.mvg, l.mvu, l.mvd
+	switch {
+	case mg.split != mu.split || mg.group != mu.group:
+		why(fmt.Sprintf("gate split %d/%v, up %d/%v", mg.split, mg.group, mu.split, mu.group))
+		return
+	case mg.bias != nil || mu.bias != nil:
+		why("a biased gate or up")
+		return
+	case md.res == nil || md.bias != nil || md.slots > 0 || md.groups > 0 || md.threads > 0 || md.act != nil:
+		why("down is not a plain residual matvec")
+		return
+	case g.pickLanes() != ir.SubgroupLanes || kernels.WideWindow(g.bs.p.ActWin):
+		why("no 32-lane subgroup, or a wide quantization window")
+		return
+	}
+	gu := g.fuseSegs([]mv{mg, mu})
+	if gu == nil {
+		why(fmt.Sprintf("gate and up cannot share a launch at split %d/%v (rowt %d/%d)", mg.split, mg.group, mg.rowt, mu.rowt))
+		return
+	}
+	in := kernels.ActIn{On: true, Gated: true, Act: g.bs.p.Act, Window: max(g.bs.p.ActWin, 32), Prefetch: 8}
+	if g.ActInPrefetch != 0 {
+		in.Prefetch = max(g.ActInPrefetch, 0)
+	}
+	s := kernels.MatVecShape{Center: g.center, T: md.q, K: md.k, Rows: md.rows, Split: md.split,
+		GroupSplit: md.group, Rowt: max(md.rowt, 1), Bias: true, In: in}
+	down, err := g.idKernel(s)
+	if err != nil {
+		why("down's gated prologue: " + err.Error())
+		return
+	}
+	l.gu, l.guDown = gu, down
+	g.GateUpWhy = ""
+}
+
+// gateUpSwapped hands down's prologue up's row as the gate and the gate's as
+// up: the violation the fused FFN's gate must see (SwapGateUpForTest,
+// jitllmtest builds only).
+var gateUpSwapped bool

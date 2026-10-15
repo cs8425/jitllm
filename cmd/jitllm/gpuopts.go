@@ -191,8 +191,17 @@ func gpuOptions() []tier.Option {
 		o = append(o, tier.WithConfig(func(c *tier.Config) { c.PrefillPass = w }))
 	}
 	// JITLLM_GPU_PERSIST composes each decode block into persistent kernels
-	// (tier.WithPersist), JITLLM_GPU_PERSIST_GRID capping their grid.
-	if set("JITLLM_GPU_PERSIST") {
+	// (tier.WithPersist), JITLLM_GPU_PERSIST_GRID capping their grid;
+	// JITLLM_GPU_PERSIST=deps orders them with dependency counters rather
+	// than grid barriers (tier.WithPersistDeps).
+	// JITLLM_GPU_GATEUP=1 runs a dense FFN's gate and up as one launch
+	// (tier.WithGateUpFuse).
+	if set("JITLLM_GPU_GATEUP") {
+		o = append(o, tier.WithGateUpFuse(str("JITLLM_GPU_GATEUP") != "0"))
+	}
+	if str("JITLLM_GPU_PERSIST") == "deps" {
+		o = append(o, tier.WithPersistDeps(true, int(num("JITLLM_GPU_PERSIST_GRID"))))
+	} else if set("JITLLM_GPU_PERSIST") {
 		o = append(o, tier.WithPersist(true, int(num("JITLLM_GPU_PERSIST_GRID"))))
 	}
 	if page := int(num("JITLLM_GPU_KV_PAGE")); page > 0 {
@@ -213,6 +222,8 @@ func gpuOptions() []tier.Option {
 		{"JITLLM_NO_GPU_MMA", set("JITLLM_NO_GPU_MMA"), func(c *tier.Config) { c.NoMMA = true }},
 		{"JITLLM_GPU_NO_FUSE", set("JITLLM_GPU_NO_FUSE"), func(c *tier.Config) { c.NoFuse = true }},
 		{"JITLLM_GPU_NO_ACTFUSE", set("JITLLM_GPU_NO_ACTFUSE"), func(c *tier.Config) { c.NoActFuse = true }},
+		{"JITLLM_GPU_NO_ADDNORM", set("JITLLM_GPU_NO_ADDNORM"), func(c *tier.Config) { c.NoAddNormFold = true }},
+		{"JITLLM_GPU_GATEUP2", os.Getenv("JITLLM_GPU_GATEUP2") == "0", func(c *tier.Config) { c.GateUp2 = false }},
 		{"JITLLM_GPU_ACTIN_SITES", set("JITLLM_GPU_ACTIN_SITES"),
 			func(c *tier.Config) { c.ActInSites = num("JITLLM_GPU_ACTIN_SITES") }},
 		{"JITLLM_GPU_ACTIN_PREFETCH", set("JITLLM_GPU_ACTIN_PREFETCH"),

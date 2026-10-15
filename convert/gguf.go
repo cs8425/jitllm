@@ -74,6 +74,8 @@ func buildGGUF(f, vf *meta.File, src, mmproj string, o options) (*jlm.Source, er
 			return nil, fmt.Errorf("convert: %s is itself a vision tower; the first "+
 				"argument is the TEXT model", src)
 		}
+		af := vf
+		vf = withoutAudio(vf)
 		vs, err := sourceOf(vf)
 		if err != nil {
 			return nil, err
@@ -96,6 +98,19 @@ func buildGGUF(f, vf *meta.File, src, mmproj string, o options) (*jlm.Source, er
 			}
 		}
 		s.Tensors = append(s.Tensors, vs.Tensors...)
+		// The audio half, its blocks after the vision blocks.
+		aud, ats, err := audioOf(af, s.Vision.NLayer)
+		if err != nil {
+			return nil, err
+		}
+		if aud != nil {
+			if aud.ProjDim != s.Config.NEmbd {
+				return nil, fmt.Errorf("convert: %s's audio projects to %d and %s wants %d", mmproj, aud.ProjDim,
+					src, s.Config.NEmbd)
+			}
+			s.Vision.Audio = aud
+			s.Tensors = append(s.Tensors, ats...)
+		}
 		if s.Vision.Projector == jlm.ProjPixtral {
 			if err := imgBreakRow(s); err != nil {
 				return nil, err
@@ -150,6 +165,7 @@ func sourceOf(f *meta.File) (*jlm.Source, error) {
 	lscales := map[int32][2][]float32{}
 	clamps := map[int32]*[28]float32{}
 	var alphas, fused int
+	scales := map[string]float32{}
 	renames := towerNames(f, s.Vision)
 	for i := range f.Tensors {
 		t := &f.Tensors[i]
@@ -242,6 +258,24 @@ func sourceOf(f *meta.File) (*jlm.Source, error) {
 			s.Tensors = append(s.Tensors, e)
 			continue
 		}
+		// BitNet's optional per-tensor projection scale is folded into its
+		// weight's blocks (bitnetTensors).
+		if w, ok := bitnetScaleOf(t.Name); ok && !tower && s.Config.Arch == jlm.ArchBitNet {
+			e := jlm.Tensor{NDim: uint8(len(t.Dims)), Data: f.Bytes(t), Name: t.Name}
+			copy(e.Dims[:], t.Dims)
+			if e.Type, err = typeOf(t.Type); err != nil {
+				return nil, fmt.Errorf("convert: %s: %w", t.Name, err)
+			}
+			x, err := vecOf(&e)
+			if err != nil {
+				return nil, err
+			}
+			if len(x) != 1 {
+				return nil, fmt.Errorf("convert: %s is %d values, want one scale", t.Name, len(x))
+			}
+			scales[w] = x[0]
+			continue
+		}
 		var role jlm.Role
 		var block, index int32
 		// The newer families' tower tensors: a fused q|k|v split, and the
@@ -282,13 +316,22 @@ func sourceOf(f *meta.File) (*jlm.Source, error) {
 				}
 			}
 		}
-		ty, err := typeOf(t.Type)
+		data := f.Bytes(t)
+		srcType := t.Type
+		// A ternary type with no code here (TQ1_0, I2_S) is re-packed as
+		// TQ2_0 or TQ2_F32, exactly (convert/bitnet.go).
+		if b, ty, ok, terr := ternaryGGUF(t.Type, data, elemsOf(t.Dims)); terr != nil {
+			return nil, fmt.Errorf("convert: %s (%s): %w", t.Name, t.Type, terr)
+		} else if ok {
+			data, srcType = b, ty
+		}
+		ty, err := typeOf(srcType)
 		if err != nil {
 			return nil, fmt.Errorf("convert: %s: %w", t.Name, err)
 		}
 		e := jlm.Tensor{
 			Role: role, Block: block, Index: index, Type: ty,
-			NDim: uint8(len(t.Dims)), Data: f.Bytes(t), Name: t.Name,
+			NDim: uint8(len(t.Dims)), Data: data, Name: t.Name,
 		}
 		copy(e.Dims[:], t.Dims)
 		// A per-expert matrix (Mixtral-era blk.N.ffn_gate.E.weight) is held back
@@ -373,6 +416,9 @@ func sourceOf(f *meta.File) (*jlm.Source, error) {
 		if err := apertusXIELU(f, s); err != nil {
 			return nil, err
 		}
+	}
+	if err := bitnetTensors(s, scales); err != nil {
+		return nil, err
 	}
 	if err := ds4Tensors(s); err != nil {
 		return nil, err
@@ -564,8 +610,14 @@ func unfuse(e *jlm.Tensor, c *jlm.Config) ([]jlm.Tensor, bool, error) {
 	// linear block uses the same name for a delta-rule projection that deltaGeom
 	// splits, and the row-count check below refuses a wrong split. nomic-bert
 	// and the C6 blocks (with a fused bias beside it) are q|k|v row ranges.
-	if c == nil || !fusesQKV(c.Arch) {
+	if c == nil || !fusesQKV(c.Arch) && !decisionHeadBlock(e, c) {
 		return nil, false, nil
+	}
+	// A decision head's block (Laya's, d1-omni's) is nn.MultiheadAttention's
+	// in_proj: q, k and v each the residual's width, whatever the trunk's
+	// heads.
+	if decisionHeadBlock(e, c) && (e.Role == jlm.RoleAttnQKV || e.Role == jlm.RoleAttnQKVBias) {
+		return unfuseThirds(e, c)
 	}
 	if e.Role == jlm.RoleAttnQKVBias {
 		return unfuseBias(e, c)
