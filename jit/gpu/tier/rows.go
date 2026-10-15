@@ -542,7 +542,7 @@ func (g *devTier) ragMV(m mv, ntok int) (mv, bool) {
 	if _, _, ok := g.mmaTile(m.rows, ntok); ok && !kernels.IsFloat(m.q) {
 		return g.intBatchMV(m, ntok, 1)
 	}
-	if bm, ok := g.voltaMV(m, ntok); ok {
+	if bm, ok := g.voltaMV(m, ntok); ok && padOK(m, bm) {
 		return bm, true
 	}
 	// Tok 8; Rowt 2 below 64 rows and 4 from there, swept on a Volta-class card

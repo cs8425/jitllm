@@ -163,7 +163,7 @@ func (g *devTier) emitLaurel(lc *launcher, bs *blockScratch, l *layer, R int,
 	norm(bs.mvOut, l.nLaurel, nil)
 	lc.la(bs.addE, R*p.NEmbd, bs.h, bs.altB, bs.altLaur)
 	lc.la(bs.altCopy, R*p.NEmbd, bs.altB, bs.h)
-	lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+	lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
 }
 
 // emitGauss runs a sparse block's gaussian top-k on its gate bs.g, into
@@ -189,7 +189,7 @@ func (g *devTier) emitAltCorrect(lc *launcher, bs *blockScratch, l *layer, R int
 	lc.la(bs.altRoute, R*p.AltUp, bs.h, l.altRouter, bs.altM)
 	lc.la(bs.altCorrectK, R*p.AltUp*p.NEmbd, bs.altPred, bs.x, bs.altM, l.altCorrT, bs.altB)
 	lc.la(bs.altMul, R*p.NEmbd, bs.altB, l.altCorrScale, bs.h)
-	lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+	lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
 	mvrun(l.mvpg, l.pleGate, bs.pleG)
 	lc.la(bs.pleSlice, R*p.PLEDim, bs.pleIn, l.pleOff, bs.pleS)
 	lc.la(bs.pleAct, R*p.PLEDim, bs.pleG, bs.pleS, bs.pleA)

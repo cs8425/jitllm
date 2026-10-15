@@ -717,6 +717,13 @@ func (d *DS4Plan) EntRowAt(comp, hd int) int {
 // wrong text when ignored, so a tier that cannot apply one must decline the
 // block by name (see RULE 8a in AGENTS.md).
 type LayerPlan struct {
+	// KPad is the width the block's matrices that read the residual or the
+	// attention's output were packed at, when NEmbd is not a whole number of
+	// 32-element blocks (a tower 144 wide, packed at 160 with zero columns
+	// past 144); their Weight.K is KPad, and the device quantizes those
+	// activations as rows of KPad with zero tails (kernels.QuantizePadded),
+	// as the host pads them. Zero everywhere else.
+	KPad                                               int
 	NEmbd, NHead, NKVHead, HeadDim, NRot, NFFN, MaxSeq int
 	RMSEps, RopeBase                                   float64
 

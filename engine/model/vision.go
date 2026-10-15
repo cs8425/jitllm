@@ -695,6 +695,12 @@ func buildTower(c0 *jlm.File) (*Tower, error) {
 			return nil, errB
 		}
 		aUp, aDn := jlm.RoleVFC1Bias, jlm.RoleVFC2Bias
+		// A width that is not a whole number of quantization blocks reaches
+		// the container padded with zero columns (convert.quantizeTower):
+		// the matrices reading the residual are read at NEmbd.
+		for _, w := range []*tensor{&b.wq, &b.wk, &b.wv, &b.wo, &na, &nb} {
+			unpadK(w, c.NEmbd)
+		}
 		if na.rows == c.NFFN && nb.k == c.NFFN {
 			b.up, b.down = na, nb
 		} else if nb.rows == c.NFFN && na.k == c.NFFN {
@@ -743,6 +749,7 @@ func buildTower(c0 *jlm.File) (*Tower, error) {
 			if b.gate, err = get(jlm.RoleVFFNGate, bi); err != nil {
 				return nil, err
 			}
+			unpadK(&b.gate, c.NEmbd)
 			if b.gate.rows != c.NFFN || b.gate.k != c.NEmbd {
 				return nil, fmt.Errorf("model: OpenTower: block %d's MLP gate is %dx%d, want %d rows of %d",
 					i, b.gate.rows, b.gate.k, c.NFFN, c.NEmbd)
@@ -892,6 +899,20 @@ func buildTower(c0 *jlm.File) (*Tower, error) {
 	}
 
 	return t, t.packedWeights()
+}
+
+// unpadK reads a packed matrix at width want when the container padded it
+// to the next whole quantization block (convert.quantizeTower): its k becomes
+// want, and kp the packed width every product pads its rows to. A matrix at
+// any other width is left for the shape checks to name.
+func unpadK(t *tensor, want int) {
+	const towerBlock = 32 // Q8_0's, the type convert.quantizeTower writes
+	if t.packed == nil || want%towerBlock == 0 || t.k == want {
+		return
+	}
+	if kp := (want + towerBlock - 1) / towerBlock * towerBlock; t.k == kp {
+		t.k, t.kp = want, kp
+	}
 }
 
 // packedWeights refuses a tower with an unpacked matrix: the runner drives a
@@ -2012,6 +2033,10 @@ func (s *State) visPlan(li int) *nn.LayerPlan {
 		RMSEps:     c.RMSEps,
 		LayerNorm:  c.LayerNorm,
 		UngatedFFN: l.gate.e == nil,
+		KPad:       l.wq.kp,
+	}
+	if s.m.kpadViolation {
+		plan.KPad = 0
 	}
 	// A 2-D rotary tower turns the whole head, NEOX-paired, by the per-patch
 	// table EncodeGrid hands Layers (visRope).

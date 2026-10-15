@@ -2547,8 +2547,14 @@ func (m *Model) bankWeight(t tensor) nn.Weight {
 		Packed: &nn.Packed{Sheet: sheet, Sheets: sheets}}
 }
 
+// wt is t for a device: K is the width it was packed at, which is k but for
+// a ragged tower's matrices (tensor.kp; nn.LayerPlan.KPad).
 func wt(t tensor) nn.Weight {
-	return nn.Weight{T: t.typ, Data: t.data, Rows: t.rows, K: t.k, Packed: t.packed}
+	k := t.k
+	if t.kp != 0 {
+		k = t.kp
+	}
+	return nn.Weight{T: t.typ, Data: t.data, Rows: t.rows, K: k, Packed: t.packed}
 }
 
 // SetHeadOnDevice chooses whether the output norm and the vocabulary projection
