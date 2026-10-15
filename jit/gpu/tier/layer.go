@@ -6235,6 +6235,9 @@ type graphKey struct {
 	// gateUp2 says the dense FFNs ran gate and up as one Gate2 launch
 	// (Config.GateUp2).
 	gateUp2 bool
+	// gateUp2Force says Gate2 ran whatever the tuner chose
+	// (Config.GateUp2Force).
+	gateUp2Force bool
 	// noAddNorm says a prompt chunk's block-end adds ran alone
 	// (Config.NoAddNormFold).
 	noAddNorm bool
@@ -6752,7 +6755,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	// home, whose uploads sit between launches.
 	persistOn := R == 1 && rag == nil && !(bs.pkv != nil && bs.pkv.st != nil) && g.ensurePersist()
 	key := graphKey{lo, hi, nCap, R, head != nil, g.TableSplit, g.ScalarSoftmax, g.flashOn(), g.KVF16,
-		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, ragMap, hNormID, persistOn, persistOn && g.PersistDeps, g.GateUpFuse, g.GateUp2, g.NoAddNormFold, sid, g.NoFuse, g.NoActFuse}
+		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, ragMap, hNormID, persistOn, persistOn && g.PersistDeps, g.GateUpFuse, g.GateUp2, g.GateUp2Force, g.NoAddNormFold, sid, g.NoFuse, g.NoActFuse}
 	if lo == hi {
 		// The head alone reads no history, so the capacity is not part of
 		// what it records: keyed by it, prompts on either side of a growth

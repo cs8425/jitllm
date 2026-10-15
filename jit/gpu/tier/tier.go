@@ -180,10 +180,14 @@ type Config struct {
 	NoAddNormFold bool
 	// GateUp2 runs a dense gated FFN's gate and up as one Gate2 matvec
 	// (kernels.MatVecShape.Gate2): each workgroup sums its rows of both
-	// matrices over the one operand and writes act(gate)*up, the bits the
-	// gate's launch and up's gated launch write, where the backend's lowering
-	// makes that exact (kernels.Gate2Exact). On by default.
+	// matrices over the one operand and writes act(gate)*up: the bits the
+	// gate's launch and up's gated launch write on PTX (kernels.Gate2Exact),
+	// the reduction-order band elsewhere. On by default, taken per shape where
+	// this device's tuner finds it faster (tuneGateUp2).
 	GateUp2 bool
+	// GateUp2Force runs Gate2 wherever the shape has it, whatever this
+	// device's tuner chose (gateUp2Pick): the A/B arm and the gates.
+	GateUp2Force bool
 	// ActInPrefetch is how many weight words each thread of an operand-prologue
 	// matvec prefetches before its prologue (kernels.ActIn.Prefetch): 0 is the
 	// default (8), -1 none.
@@ -1781,7 +1785,10 @@ type devShared struct {
 	// actInWin is tuneActIn's verdict per operand-prologue site key: true where
 	// the prologue measured faster than the two launches on this card.
 	// actInTrial makes fuseActIn build every candidate for that measurement.
-	actInWin   map[string]bool
+	actInWin map[string]bool
+	// gu2Win is tuneGateUp2's verdict per up-projection shape: Gate2 or
+	// the two launches.
+	gu2Win     map[splitKey]bool
 	actInTrial bool
 	ragKerns   map[moeKernKey]backend.Kernel // a batched mixture's grouped matvecs (moegroup.go)
 	moeVolta   map[moeVoltaKey]moeVoltaMV    // their tensor-core twins; see voltaGroupedMV
@@ -2089,8 +2096,9 @@ func New(slots []Slot, options ...Option) (*GPU, error) {
 	// (PersistByDefaultForTest), so the regression gates run through it.
 	cfg.Persist = persistDefault
 	cfg.PersistDeps = persistDepsDefault
-	// Gate2 is the default where it is exact (kernels.Gate2Exact): on a V100
-	// it read 1.008-1.028 of the two launches on Llama 1B, 3B and 8B.
+	// Gate2 is allowed by default; tuneGateUp2 takes it per shape where it
+	// measures faster. On a V100 it read 1.008-1.028 of the two launches on
+	// Llama 1B, 3B and 8B.
 	cfg.GateUp2 = true
 	for _, f := range o.cfg {
 		f(cfg)
@@ -3284,7 +3292,7 @@ func (g *devTier) gatedKernel(q kernels.Quant, k, rows, split int, groupSplit bo
 // and writing act(gate)*up (kernels.MatVecShape.Gate2), or nil where the
 // backend cannot make it exact or the split writes partials.
 func (g *devTier) gate2Kernel(q kernels.Quant, k, rows, split int, groupSplit bool, act kernels.ActKind) backend.Kernel {
-	if split > 1 && !groupSplit || !kernels.Gate2Exact(g.dev.API()) || kernels.IsFloat(q) {
+	if split > 1 && !groupSplit || kernels.IsFloat(q) {
 		return nil
 	}
 	kk := kernKey{t: q, k: k, rows: rows, split: split, rowt: 1, group: groupSplit, gate2: true, act: act}

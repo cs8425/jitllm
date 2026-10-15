@@ -634,6 +634,7 @@ func (g *devTier) retuneDecode() {
 	// After the splits settle: the operand prologue is timed at the split
 	// each matvec now runs.
 	g.tuneActIn()
+	g.tuneGateUp2()
 	g.tuneGemm()
 }
 
