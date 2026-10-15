@@ -6731,10 +6731,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	if bs.pkv != nil {
 		// The width, and whether the decode plan runs beside it (ragAlone):
 		// two launch sequences a recording names.
-		ragMap = 2 * bs.pkv.ragRows
-		if bs.pkv.ragAlone {
-			ragMap++
-		}
+		ragMap = bs.pkv.ragKey()
 	}
 	if rag != nil {
 		ragN, ragRuns = len(rag.pos), len(rag.runs)
@@ -7881,7 +7878,11 @@ func (g *devTier) layersSession(s backend.Session) {
 								// nothing of their own.
 								tabRag = dec
 							}
-							err = pk.ragAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk)
+							if pk.ragStaged {
+								err = pk.ragStagedAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk, win)
+							} else {
+								err = pk.ragAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk)
+							}
 							g.RagPrefills++
 						}
 					} else if !skipAttn && useFlash {
