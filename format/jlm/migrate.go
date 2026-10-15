@@ -223,6 +223,16 @@ func migrate29(path string) error {
 		}
 		src.Tensors = append(src.Tensors, t)
 	}
-	_, err = Write(path, src, f.FP)
-	return err
+	// Written beside the old one and moved over it once the old handle is
+	// closed: Windows refuses to replace a file that is still open.
+	next := path + ".upgrade"
+	if _, err := Write(next, src, f.FP); err != nil {
+		return err
+	}
+	f.Close()
+	if err := os.Rename(next, path); err != nil {
+		os.Remove(next)
+		return fmt.Errorf("jlm: publishing %s: %w", path, err)
+	}
+	return nil
 }
