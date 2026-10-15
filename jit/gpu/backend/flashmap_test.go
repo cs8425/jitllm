@@ -61,17 +61,31 @@ func TestFlashPrefillRunTable(t *testing.T) {
 			ran++
 		}
 	}
+	for _, d := range mmaDevices(t, devs, ir.MMAVolta) {
+		for _, fs := range []kernels.FlashPrefill70Shape{
+			{Heads: 8, KVHeads: 2, Dim: 64, Scale: .125, Page: 64},
+			{Heads: 8, KVHeads: 4, Dim: 128, Scale: .088, Page: 64, F16: true, Softcap: 50},
+		} {
+			t.Run(fmt.Sprintf("v70/%s/%s/d%d", d.API(), d.Name(), fs.Dim), func(t *testing.T) {
+				runTableCase(t, d, fs, flash70Form)
+			})
+			ran++
+		}
+	}
 	if ran == 0 {
-		t.Skip("no device lowers m16n8k16, m16n8k8 or the collective tiles")
+		t.Skip("no device lowers m16n8k16, m16n8k8, m8n8k4 or the collective tiles")
 	}
 }
 
 func runTableCase(t *testing.T, d backend.Device, fs kernels.FlashPrefill70Shape, form flashForm) {
 	t.Helper()
 	wg := kernels.FlashPrefill80Rows(fs)
-	if form == flashTileForm {
+	switch form {
+	case flashTileForm:
 		tl, _ := kernels.FlashTileFor(fs.Dim)
 		wg = tl.Rows()
+	case flash70Form:
+		wg = kernels.FlashPrefill70Rows
 	}
 	pg := fs.Page
 	// Two sequences: A's 40 rows at a later base, B's 23 crossing a page edge.

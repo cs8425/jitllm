@@ -78,7 +78,10 @@ type pagedScratch struct {
 	// the decode plan takes every row; ragMap and ragOrder its host staging,
 	// pMap its device copy, and pRowDec/pRowDecW the decode descriptors
 	// with the table's rows emptied (descDec/descDecW staged).
-	ragRows                                int
+	ragRows int
+	// ragAlone says the table holds every row of the call (ragTable), so the
+	// decode plan does not run.
+	ragAlone                               bool
 	ragMap                                 []uint32
 	ragOrder                               []int
 	pMap, pRowDec, pRowDecW                backend.Buf

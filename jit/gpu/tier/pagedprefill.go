@@ -188,6 +188,8 @@ func (g *devTier) initPagedPrefill(bs *blockScratch) error {
 		case !g.NoVolta && (hd == 64 || hd == 128) && rows%kernels.FlashPrefill70Rows == 0 && g.sm70():
 			if pf.flash = comp(kernels.FlashPrefill70(fs)); pf.flash != nil {
 				pf.fGroups, pf.fWidth = kernels.FlashPrefill70Groups(fs), kernels.FlashPrefill70Threads
+				pf.ragBuild, pf.ragGroups = kernels.FlashPrefill70, kernels.FlashPrefill70Groups
+				pf.ragThreads, pf.ragWG = kernels.FlashPrefill70Threads, kernels.FlashPrefill70Rows
 			}
 		}
 	}
