@@ -179,8 +179,6 @@ func gemma4WhyNot(p *nn.LayerPlan) string {
 		return "a weightless v norm with no q/k norm to share a kernel with"
 	case p.VFromK && p.ClampKQV != 0:
 		return "v projected by k's weights under a q/k/v clamp"
-	case p.PLEDim%32 != 0:
-		return "a per-layer embedding width that is not a multiple of 32, the activation quantizer's block"
 	case (p.PLEDim != 0 || p.KVShared || p.FFNWide) && !p.GeomSplit && p.AltUp == 0:
 		// The per-layer embedding's add goes back through the split model's
 		// copy kernel, and the scratch sets are the split model's. Gemma 3n's

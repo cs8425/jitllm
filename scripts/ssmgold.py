@@ -259,6 +259,17 @@ def mamba1():
     return MambaForCausalLM, cfg, "starcoder", None
 
 
+def mamba1_ragged():
+    from transformers import MambaConfig, MambaForCausalLM
+    # mamba1 with a dt rank of 40, not a whole number of the activation
+    # quantizer's 32-element blocks (state-spaces/mamba-130m's is 48, a
+    # ceil(d/16) rank): the ragged-width gate's.
+    cfg = MambaConfig(vocab_size=49152, hidden_size=64, state_size=16, num_hidden_layers=3, expand=2,
+                      conv_kernel=4, use_bias=False, use_conv_bias=True, time_step_rank=40,
+                      layer_norm_epsilon=1e-5, tie_word_embeddings=False, residual_in_fp32=True)
+    return MambaForCausalLM, cfg, "starcoder", None
+
+
 def falconmamba():
     from transformers import FalconMambaConfig, FalconMambaForCausalLM
     # FalconMamba is Mamba-1 with dt, B and C each RMS-normed before use, by a
@@ -297,6 +308,7 @@ SPECS = {
     "synth-nemotronh": nemotronh,
     "synth-nemotronhmoe": nemotronhmoe,
     "synth-mamba1": mamba1,
+    "synth-mamba1-ragged": mamba1_ragged,
     "synth-falconmamba": falconmamba,
     "synth-jamba": jamba,
     "synth-mamba2": mamba2,

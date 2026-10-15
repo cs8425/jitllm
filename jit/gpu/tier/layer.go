@@ -1990,11 +1990,8 @@ func declineReason(p *nn.LayerPlan) string {
 		// The gated delta rule runs (recPair gives every kernel an out-of-place
 		// state); what is left is a shape check.
 		return "a linear-attention block with no key heads"
-	case p.Recurrent.Mamba1 && (p.Recurrent.Rank <= 0 || p.Recurrent.Rank%32 != 0):
-		// dt_proj reads a quantized activation of rank width, and
-		// kernels.Quantize works in 32-element blocks.
-		return fmt.Sprintf("a Mamba-1 dt rank of %d (the activation quantizer works in 32-element blocks)",
-			p.Recurrent.Rank)
+	case p.Recurrent.Mamba1 && p.Recurrent.Rank <= 0:
+		return fmt.Sprintf("a Mamba-1 dt rank of %d", p.Recurrent.Rank)
 	case p.Recurrent.WithAttn && (!p.Recurrent.SSD || p.MLA() || p.NoFFN):
 		// The sum is built for Falcon-H1's shape alone: Mamba-2 beside plain
 		// attention, then an FFN.
@@ -2007,12 +2004,6 @@ func declineReason(p *nn.LayerPlan) string {
 		(p.Recurrent.VHeads*p.Recurrent.VDim)%p.Recurrent.NormGroups != 0):
 		return fmt.Sprintf("a Mamba-2 gated norm of %d groups over %d channels",
 			p.Recurrent.NormGroups, p.Recurrent.VHeads*p.Recurrent.VDim)
-	case p.Recurrent.Conv > 0 && p.Recurrent.ChanDecay && p.Recurrent.KDim%32 != 0:
-		// KDA's second low-rank matvec reads a quantized activation of rank
-		// width, the rank is KDim, and kernels.Quantize works in 32-element
-		// blocks. Declined by name rather than failing inside prepLayer.
-		return fmt.Sprintf("a rank-%d low-rank gate (the activation quantizer "+
-			"works in 32-element blocks)", p.Recurrent.KDim)
 	case !actHasKernel(p):
 		// Every activation the host bakes has a device kernel (quick-GELU
 		// for CLIP towers, swiglu-oai for gpt-oss); what is left is a kind in a
@@ -2117,14 +2108,10 @@ func routeOf(p *nn.LayerPlan) kernels.MoERoute {
 // or 0 for the format's own. It is float-only: a quantized format's scales are
 // laid out against its sub-block (see kernels.MatVecShape.Sub), while a float
 // weight has no scale plane. What reaches this is MLA's absorbed banks, whose k
-// can be below 32 on a small fixture; the sub-block narrows to the width
-// itself.
-func subFor(q kernels.Quant, k int) int {
-	if !kernels.IsFloat(q) || k >= 32 || k <= 0 || k%4 != 0 {
-		return 0
-	}
-	return k
-}
+// can be below 32 on a small fixture, where the sub-block narrows to the width
+// itself, and a ragged width past 32 (KDA's output at two heads of 40), where
+// it narrows to the widest of 16, 8 and 4 that divides k.
+func subFor(q kernels.Quant, k int) int { return kernels.FloatSub(q, k) }
 
 // mlaWhyNot names the MLA shape this tier cannot express, or "". Each is a
 // width, so each is a kernel owed rather than a refusal (RULE 8): the
@@ -2446,6 +2433,11 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 		q, ok := quantOf(x.T)
 		if !ok {
 			return mv{}, false
+		}
+		// A narrowed float sub-block (subFor) walks k/sub steps, which the
+		// split, chosen against k/32, must divide.
+		if sub := subFor(q, x.K); sub > 0 && (x.K/sub)%split != 0 {
+			split = 1
 		}
 		// The decode row tile: its rows are adjacent, so a lane loads Rowt
 		// contiguous u32 instead of one. It composes with the split (the tile buys
@@ -3897,7 +3889,11 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 	if d := p.DS4; d != nil {
 		ds4QA, ds4OA = p.QLoraRank, d.OGroups*d.OLoraRank
 	}
-	for _, n := range []int{p.NFFN, qPad(p, qdim), moeWide, p.NFFNShExp, inner, chans,
+	k3Lat := 0
+	if p.K3 != nil {
+		k3Lat = pad32(p.K3.Latent)
+	}
+	for _, n := range []int{p.NFFN, qPad(p, qdim), pad32(p.PLEDim), k3Lat, moeWide, p.NFFNShExp, pad32(inner), chans,
 		mlaNopeW, mlaLatW, mlaOutW, mlaQAW, ds4QA, ds4OA} {
 		if n > wide {
 			wide = n
@@ -4104,8 +4100,8 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			// and after theirs.
 			al(&bs.dLowRank, rows*r.Rank*4)
 			al(&bs.m1LowN, rows*r.Rank*4)
-			al(&bs.dLRa, rows*r.Rank)
-			al(&bs.dLRax, 3*rows*(r.Rank/32)*4)
+			al(&bs.dLRa, rows*pad32(r.Rank))
+			al(&bs.dLRax, 3*rows*(pad32(r.Rank)/32)*4)
 			for _, b := range []*backend.Buf{&bs.m1B, &bs.m1C, &bs.m1BN, &bs.m1CN} {
 				al(b, rows*r.KDim*4)
 			}
@@ -4117,8 +4113,8 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			// The scale plane is three floats per 32-element group (a scale per 32
 			// and a sum per 16), as bs.ax is sized. An undersized one ran on CUDA
 			// and failed on Vulkan.
-			al(&bs.dLRa, rows*r.KDim)
-			al(&bs.dLRax, 3*rows*(r.KDim/32)*4)
+			al(&bs.dLRa, rows*pad32(r.KDim))
+			al(&bs.dLRax, 3*rows*(pad32(r.KDim)/32)*4)
 			al(&bs.dGateWaste, rows*nGate*4)
 		}
 		// q and k ping-pong between two buffers each: every device kernel is out
@@ -4375,7 +4371,7 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			if r.Conv == 0 {
 				return nil, nil
 			}
-			return kernels.Quantize(rows*r.VHeads*r.VDim, kernels.ClampWindow(actWin, r.VHeads*r.VDim))
+			return quantizeRows(rows, r.VHeads*r.VDim, kernels.ClampWindow(actWin, pad32(r.VHeads*r.VDim)))
 		}},
 		{&bs.quantQ, func() (*ir.Kernel, error) {
 			if w := qPad(p, qdim); w != qdim {
@@ -4915,7 +4911,7 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			if p.PLEDim == 0 {
 				return nil, nil
 			}
-			return kernels.Quantize(rows*p.PLEDim, actWin)
+			return quantizeRows(rows, p.PLEDim, actWin)
 		}},
 		{&bs.ewScale, func() (*ir.Kernel, error) {
 			if !p.DenseMoE {
@@ -5014,7 +5010,7 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			if r.Conv == 0 || !r.Mamba1 {
 				return nil, nil
 			}
-			return kernels.Quantize(rows*r.Rank, actWin)
+			return quantizeRows(rows, r.Rank, actWin)
 		}},
 		{&bs.m1NormDt, func() (*ir.Kernel, error) {
 			if r.Conv == 0 || !r.Mamba1 {
@@ -5122,7 +5118,7 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			if r.Conv == 0 || r.ShortConv || !r.ChanDecay {
 				return nil, nil
 			}
-			return kernels.Quantize(rows*r.KDim, actWin)
+			return quantizeRows(rows, r.KDim, actWin)
 		}},
 		{&bs.deltaStepChan, func() (*ir.Kernel, error) {
 			if r.Conv == 0 || r.ShortConv || !r.ChanDecay {
@@ -8626,7 +8622,7 @@ func (g *devTier) layersSession(s backend.Session) {
 				mvrun(l.mvpg, l.pleGate, bs.pleG)
 				lc.la(bs.pleSlice, R*p.PLEDim, bs.pleIn, l.pleOff, bs.pleS)
 				lc.la(bs.pleAct, R*p.PLEDim, bs.pleG, bs.pleS, bs.pleA)
-				lc.la(bs.pleQuant, kernels.QuantizeThreads(R*p.PLEDim/32), bs.pleA, bs.a, bs.ax)
+				lc.la(bs.pleQuant, kernels.QuantizeThreads(R*pad32(p.PLEDim)/32), bs.pleA, bs.a, bs.ax)
 				mvrun(l.mvpp, l.pleProj, bs.pleO)
 				lc.la(bs.normPart, R*bs.parts, bs.pleO, bs.part)
 				lc.la(bs.normApply, R*p.NEmbd, bs.pleO, l.nPLE, bs.part, bs.h)
@@ -9923,6 +9919,21 @@ func (g *devTier) actWinFor(ntok int) int {
 // int8 GEMM where Config.PreferGemmInt8 asks for it (int8Gemm, sm_80 on), the
 // staged binary16 GEMM on the m16n8 instruction where the device has it
 // (f16Gemm, sm_75 on), then intBatchMV's forms.
+// pad32 is n rounded up to the activation quantizer's 32-element block: the
+// width a ragged activation is quantized at, its tail zero.
+func pad32(n int) int { return (n + 31) / 32 * 32 }
+
+// quantizeRows is the quantizer of rows activations n wide: Quantize over
+// them where n is a whole number of blocks, QuantizePadded with a zero tail
+// where it is not (launch QuantizeThreads(rows*pad32(n)/32)). The window is
+// clamped to the padded row, as the host's ragged quantizer clamps it.
+func quantizeRows(rows, n, win int) (*ir.Kernel, error) {
+	if n%32 == 0 {
+		return kernels.Quantize(rows*n, win)
+	}
+	return kernels.QuantizePadded(rows, n, pad32(n), kernels.ClampWindow(win, pad32(n)))
+}
+
 // ePad is the width a block's residual-reading matrices quantize their
 // activation at: NEmbd, or the padded width of a ragged tower
 // (nn.LayerPlan.KPad).
@@ -10596,11 +10607,11 @@ func (g *devTier) emitLinear(sid uint64, s backend.Session, bs *blockScratch, l 
 			mvrun(l.mvSG, l.ssmGate, bs.dZ)
 		} else {
 			mvrun(l.mvGA, l.ssmGA, bs.dLowRank)
-			lc.la(bs.quantLR, kernels.QuantizeThreads(R*r.KDim/32), bs.dLowRank, bs.dLRa, bs.dLRax)
+			lc.la(bs.quantLR, kernels.QuantizeThreads(R*pad32(r.KDim)/32), bs.dLowRank, bs.dLRa, bs.dLRax)
 			mvrunAct(l.mvGB, l.ssmGB, bs.dZ, bs.dLRa, bs.dLRax, bs.dLowRank)
 		}
 		mvrun(l.mvFA, l.ssmFA, bs.dLowRank)
-		lc.la(bs.quantLR, kernels.QuantizeThreads(R*r.KDim/32), bs.dLowRank, bs.dLRa, bs.dLRax)
+		lc.la(bs.quantLR, kernels.QuantizeThreads(R*pad32(r.KDim)/32), bs.dLowRank, bs.dLRa, bs.dLRax)
 		mvrunAct(l.mvFB, l.ssmFB, bs.dAlpha, bs.dLRa, bs.dLRax, bs.dLowRank)
 		// ssmBA is b_proj alone here: beta's logits, one per value head, with
 		// no alpha stream in it to deinterleave.
@@ -10757,7 +10768,7 @@ func (g *devTier) emitLinear(sid uint64, s backend.Session, bs *blockScratch, l 
 	} else {
 		lc.la(bs.outActMul, R*inner, bs.dZ, bs.dOutN, bs.dAct)
 	}
-	lc.la(bs.quantD, kernels.QuantizeThreads(R*inner/32), gated, bs.a, bs.ax)
+	lc.la(bs.quantD, kernels.QuantizeThreads(R*pad32(inner)/32), gated, bs.a, bs.ax)
 	mvrun(l.mvSO, l.ssmOut, bs.mvOut)
 
 	// The flip is after the launches, so a captured graph replays the pointers
@@ -10857,7 +10868,7 @@ func (g *devTier) emitSSD(sid uint64, bs *blockScratch, l *layer, li, R int, rag
 			*errp = lc.launch(bs.ssdNorm, ng, nwid, bs.dOutN, l.ssmNorm, bs.dAct)
 		}
 	}
-	lc.la(bs.quantD, kernels.QuantizeThreads(R*inner/32), act, bs.a, bs.ax)
+	lc.la(bs.quantD, kernels.QuantizeThreads(R*pad32(inner)/32), act, bs.a, bs.ax)
 	mvrun(l.mvSO, l.ssmOut, out)
 	if errp == nil || *errp == nil {
 		g.stepFlip(sid, l)
@@ -10979,7 +10990,7 @@ func (g *devTier) emitMamba1(sid uint64, bs *blockScratch, l *layer, li, R int, 
 	// x through its bias and SiLU, into dMixed (dead past the convolution),
 	// and quantized for x_proj's three matvecs.
 	lc.la(bs.m1Bias, R*r.Chans, bs.dConv, l.ssmCB, bs.dMixed)
-	lc.la(bs.quantD, kernels.QuantizeThreads(R*inner/32), bs.dMixed, bs.a, bs.ax)
+	lc.la(bs.quantD, kernels.QuantizeThreads(R*pad32(inner)/32), bs.dMixed, bs.a, bs.ax)
 	mvrun(l.mvFA, l.ssmFA, bs.dLowRank)
 	mvrun(l.mvGA, l.ssmGA, bs.m1B)
 	mvrun(l.mvGB, l.ssmGB, bs.m1C)
@@ -11000,7 +11011,7 @@ func (g *devTier) emitMamba1(sid uint64, bs *blockScratch, l *layer, li, R int, 
 		low, bv, cv = bs.m1LowN, bs.m1BN, bs.m1CN
 	}
 	// dt_proj reads the bottleneck's own quantization.
-	lc.la(bs.m1Quant, kernels.QuantizeThreads(R*r.Rank/32), low, bs.dLRa, bs.dLRax)
+	lc.la(bs.m1Quant, kernels.QuantizeThreads(R*pad32(r.Rank)/32), low, bs.dLRa, bs.dLRax)
 	mvrunAct(l.mvFB, l.ssmFB, bs.dBRaw, bs.dLRa, bs.dLRax, low)
 	if rag {
 		lc.la(rk.delta, runs*rk.perRun, inS, bs.dMixed, bv, cv, bs.dBRaw, l.ssmDt, l.ssmA, l.ssmD,
@@ -11028,7 +11039,7 @@ func (g *devTier) emitMamba1(sid uint64, bs *blockScratch, l *layer, li, R int, 
 		lc.la(cp, seqs*r.StateLen, g.recNext, pool.s[0], bs.dRows)
 	}
 	lc.la(bs.outActMul, R*inner, bs.dZ, bs.dOut, bs.dAct)
-	lc.la(bs.quantD, kernels.QuantizeThreads(R*inner/32), bs.dAct, bs.a, bs.ax)
+	lc.la(bs.quantD, kernels.QuantizeThreads(R*pad32(inner)/32), bs.dAct, bs.a, bs.ax)
 	mvrun(l.mvSO, l.ssmOut, bs.mvOut)
 	if errp == nil || *errp == nil {
 		g.stepFlip(sid, l)

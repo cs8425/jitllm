@@ -44,9 +44,9 @@ func k3WhyNot(p *nn.LayerPlan) string {
 		k.BankFFN >= k.Streams:
 		return fmt.Sprintf("Kimi-K3 residual attention over %d streams (banks %d and %d, checkpoint %d)",
 			k.Streams, k.BankAttn, k.BankFFN, k.Push)
-	case k.Latent != 0 && (k.Latent%32 != 0 || p.NExpert == 0 || p.DenseMoE || p.ExpertWeightIn ||
-		p.MoEBias):
-		return fmt.Sprintf("a latent mixture at %d: the activation quantizer works in 32-element blocks", k.Latent)
+	case k.Latent != 0 && (p.NExpert == 0 || p.DenseMoE || p.ExpertWeightIn || p.MoEBias):
+		return fmt.Sprintf("a latent mixture at %d beside a dense mixture, expert input weights or "+
+			"mixture biases", k.Latent)
 	case p.Parallel || p.AltUp != 0 || p.DS4 != nil:
 		return "Kimi-K3's residual attention beside another residual structure"
 	}
@@ -176,7 +176,7 @@ func (g *devTier) initK3(bs *blockScratch) error {
 	if L := k.Latent; L != 0 {
 		x.latent = L
 		comp(&x.normL, func() (*ir.Kernel, error) { return kernels.RMSNormRows(L, R, float32(p.RMSEps), false, false) })
-		comp(&x.quantL, func() (*ir.Kernel, error) { return kernels.Quantize(R*L, actWin) })
+		comp(&x.quantL, func() (*ir.Kernel, error) { return quantizeRows(R, L, actWin) })
 		al(&x.lat, R*L)
 		al(&x.latAcc, R*L)
 		al(&x.latN, R*L)
@@ -259,7 +259,7 @@ func (g *devTier) k3LatentIn(lc *launcher, bs *blockScratch, l *layer, R int,
 	mvrun func(mv, *resident, backend.Buf)) {
 	x := bs.k3
 	mvrun(l.mvRD, l.routedDown, x.lat)
-	lc.la(x.quantL, kernels.QuantizeThreads(R*x.latent/32), x.lat, bs.a, bs.ax)
+	lc.la(x.quantL, kernels.QuantizeThreads(R*pad32(x.latent)/32), x.lat, bs.a, bs.ax)
 }
 
 // k3LatentOut takes the routed sum in x.latAcc out of the latent into
@@ -272,7 +272,7 @@ func (g *devTier) k3LatentOut(lc *launcher, bs *blockScratch, l *layer, R int,
 		ds4Rows(lc, x.normL, R, x.latAcc, l.k3.rnorm, x.latN)
 		src = x.latN
 	}
-	lc.la(x.quantL, kernels.QuantizeThreads(R*x.latent/32), src, bs.a, bs.ax)
+	lc.la(x.quantL, kernels.QuantizeThreads(R*pad32(x.latent)/32), src, bs.a, bs.ax)
 	mvrun(l.mvRU, l.routedUp, bs.mvOut)
 	g.K3Latent++
 }

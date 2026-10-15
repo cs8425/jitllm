@@ -193,7 +193,7 @@ func (g *devTier) emitAltCorrect(lc *launcher, bs *blockScratch, l *layer, R int
 	mvrun(l.mvpg, l.pleGate, bs.pleG)
 	lc.la(bs.pleSlice, R*p.PLEDim, bs.pleIn, l.pleOff, bs.pleS)
 	lc.la(bs.pleAct, R*p.PLEDim, bs.pleG, bs.pleS, bs.pleA)
-	lc.la(bs.pleQuant, kernels.QuantizeThreads(R*p.PLEDim/32), bs.pleA, bs.a, bs.ax)
+	lc.la(bs.pleQuant, kernels.QuantizeThreads(R*pad32(p.PLEDim)/32), bs.pleA, bs.a, bs.ax)
 	mvrun(l.mvpp, l.pleProj, bs.pleO)
 	norm(bs.pleO, l.nPLE, nil)
 	lc.la(bs.altFinish, R*p.AltUp*p.NEmbd, bs.altB, bs.h, bs.x)

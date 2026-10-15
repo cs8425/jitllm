@@ -88,8 +88,18 @@ def q4e():
     return Qwen4ExpForCausalLM, cfg
 
 
+def q4e_ragged():
+    # The hyper-connections' low rank 40, not a whole number of the
+    # activation quantizer's 32-element blocks: the ragged-width gate's.
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpForCausalLM
+    cfg = Qwen4ExpTextConfig(**dict(SHAPE, hc_lowrank=40, ple_embed_dim=64), rope_parameters=dict(ROPE))
+    return Qwen4ExpForCausalLM, cfg
+
+
 SPECS = {
     "synth-qwen4exp": q4e,
+    "synth-qwen4exp-ragged": q4e_ragged,
 }
 
 

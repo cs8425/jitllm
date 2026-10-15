@@ -45,6 +45,13 @@ var k3Fixtures = []struct {
 		}
 		return ok
 	}},
+	// The latent and KDA's head 40 wide: not a whole number of the activation
+	// quantizer's blocks, so every tier quantizes the latent and the low-rank
+	// gates' rank (the head width) with a ragged tail.
+	{"synth-kimik3-ragged", func(m *Model) bool {
+		c := m.Cfg
+		return c.Arch == "kimi-k3" && c.ExpertLatent == 40 && c.ChanDecay()
+	}},
 }
 
 // TestKimiK3MatchesReference holds each fixture to Moonshot's own remote code

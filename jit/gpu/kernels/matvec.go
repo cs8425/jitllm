@@ -357,6 +357,25 @@ type MatVecShape struct {
 	In ActIn
 }
 
+// FloatSub is the sub-block a float matvec of width k walks when k is not a
+// whole number of 32-element blocks: k itself below 32, else the widest of
+// 16, 8 and 4 that divides it; 0 for a quantized format, a whole k, or a k no
+// multiple of 4 divides. MatVecShape.Sub takes it when the caller names none.
+func FloatSub(t Quant, k int) int {
+	if t.info().float == 0 || k <= 0 || k%4 != 0 || k%32 == 0 {
+		return 0
+	}
+	if k < 32 {
+		return k
+	}
+	for _, sub := range []int{16, 8, 4} {
+		if k%sub == 0 {
+			return sub
+		}
+	}
+	return 0
+}
+
 // MatVec builds the decode matvec.
 //
 // One thread per row works because of the layout: weights are transposed at
@@ -486,6 +505,9 @@ func matVec(s MatVecShape, into *segCtx) (*ir.Kernel, error) {
 	// The sub-block is the format's unless a float caller narrows it; see
 	// MatVecShape.Sub.
 	sub := qi.sub
+	if s.Sub == 0 {
+		s.Sub = FloatSub(s.T, s.K)
+	}
 	if s.Sub > 0 {
 		if qi.float == 0 {
 			return nil, fmt.Errorf("kernels: MatVec: Sub=%d is float-only; %v stores %d-element "+

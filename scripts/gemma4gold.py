@@ -99,6 +99,16 @@ def gemma4_e():
                                    use_double_wide_mlp=True)
 
 
+def gemma4_e_ragged():
+    # gemma4_e with a per-layer input 40 wide, not a whole number of the
+    # activation quantizer's 32-element blocks: the ragged-width gate's.
+    from transformers import Gemma4ForCausalLM
+    return Gemma4ForCausalLM, base(attention_k_eq_v=False, num_global_key_value_heads=None,
+                                   num_key_value_heads=1, hidden_size_per_layer_input=40,
+                                   vocab_size_per_layer_input=262144, num_kv_shared_layers=2,
+                                   use_double_wide_mlp=True)
+
+
 def gemma4_wide():
     # The real head widths: 256 on the sliding layers and 512 on the global
     # ones, as every Gemma 4 has, so the attention kernels run at the widths a
@@ -114,6 +124,7 @@ SPECS = {
     "synth-gemma4-kv": gemma4_kv,
     "synth-gemma4-moe": gemma4_moe,
     "synth-gemma4-e": gemma4_e,
+    "synth-gemma4-e-ragged": gemma4_e_ragged,
 }
 
 
