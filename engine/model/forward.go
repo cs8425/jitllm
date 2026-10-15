@@ -77,9 +77,6 @@ func ResetProfile() {
 // State is one generation session: the KV cache plus the scratch buffers the
 // forward pass reuses. One State is one conversation; it is not safe to share.
 type State struct {
-	// bidirAll makes a mixed prompt's every row one bidirectional run
-	// (bidirRuns): a non-causal decoder's prompt with pictures in it.
-	bidirAll bool
 	// rlBases and rlEnds are relocateRows' per-sequence spans.
 	rlBases, rlEnds []int
 	m               *Model
@@ -622,9 +619,6 @@ type State struct {
 	// tail then copied out; rowsTok is where a greedy one's tokens land.
 	rowsLog, rowsHid []float32
 	rowsTok          []int32
-	// rowsPos is a stream model's speculation step's positions and slots
-	// (stepRowsStreams).
-	rowsPos []int
 
 	// emb is set for the length of one Embedder.Embed on a decoder embedding
 	// model: prefill then pools the final residual instead of projecting it

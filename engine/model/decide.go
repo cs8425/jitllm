@@ -1,8 +1,6 @@
 package model
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"image"
 	"slices"
@@ -56,10 +54,6 @@ type DecisionAnswer struct {
 	Choice     string
 	Score      float64
 	Confidence float64
-	// CanonicalLegend says a score's legend gives a description that is not
-	// text as its sorted-key JSON in a string (vllm-d3's, as llama.cpp's
-	// server writes it).
-	CanonicalLegend bool
 }
 
 // Decision is the model's readout, DecisionNone for a model that is not a
@@ -180,7 +174,7 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 	}
 	d := &Decider{m: m, cfg: m.container.Config(), kind: kind, tpl: tpl, maxOptions: 255}
 	switch kind {
-	case jlm.DecisionLev, jlm.DecisionVllmD3:
+	case jlm.DecisionLev:
 		// Codes A..Z then AA..ZZ; only those that are one token are used, up
 		// to 255 (lev's serving code, ADR-028).
 		var codes []string
@@ -312,7 +306,7 @@ func (d *Decider) Prepare(state jinja.Value, qs []DecisionQuestion, images int) 
 	// d1-omni's system_one ("" for None) and
 	// llama.cpp allow it, and Clef's systemone renders it as JSON null.
 	if (state.IsNone() || state.IsUndefined()) && d.kind != jlm.DecisionLFM2D1 && d.kind != jlm.DecisionClef &&
-		d.kind != jlm.DecisionD1Omni && d.kind != jlm.DecisionVllmD3 {
+		d.kind != jlm.DecisionD1Omni {
 		return fmt.Errorf("state must be provided")
 	}
 	for i := range qs {
@@ -415,13 +409,6 @@ func (d *Decider) DecideMedia(state jinja.Value, qs []DecisionQuestion, imgs []i
 	return out, nil
 }
 
-// nonCausal reports whether the decoder's attention sees the whole prompt
-// (jlm.FlagNonCausal on a decoder readout); a gate's violation runs it
-// causally.
-func (d *Decider) nonCausal() bool {
-	return d.cfg.Flags.Has(jlm.FlagNonCausal) && !d.m.IsEncoder() && d.violation != "causal"
-}
-
 // variants is how many times a question is asked: lev shows a choice's options
 // in two orders, to cancel its preference for the first label.
 func (d *Decider) variants(q *DecisionQuestion) int {
@@ -487,10 +474,7 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 // makes no heap allocation once warm (TestDecisionDoesNotAllocate). Writing
 // the prompt is text work before it.
 func (d *Decider) forward(ids []int32, groups [][]int32, v int) ([]float32, error) {
-	// A non-causal decoder's prompt (vllm-d3: attention.causal false) is one
-	// bidirectional run: its attention blocks see the whole prompt, as
-	// llama.cpp's mask does, and its recurrent blocks scan it in order.
-	d.one[0] = Span{Tokens: ids, Bidir: d.nonCausal()}
+	d.one[0] = Span{Tokens: ids}
 	return d.forwardSpans(d.one[:], groups, v)
 }
 
@@ -537,14 +521,10 @@ func (d *Decider) forwardSpans(spans []Span, groups [][]int32, v int) ([]float32
 	}
 	var lg []float32
 	var err error
-	if len(spans) == 1 && spans[0].Picture == nil && spans[0].Embd == nil && !spans[0].Bidir {
+	if len(spans) == 1 && spans[0].Picture == nil && spans[0].Embd == nil {
 		lg, err = d.st.Prefill(spans[0].Tokens)
-	} else if len(spans) == 1 && spans[0].Picture == nil && spans[0].Embd == nil {
-		lg, err = d.st.prefillBidir(spans[0].Tokens)
 	} else {
-		d.st.bidirAll = d.nonCausal()
 		lg, err = d.st.PrefillMixed(spans...)
-		d.st.bidirAll = false
 	}
 	if err != nil {
 		return nil, err
@@ -631,11 +611,6 @@ func (d *Decider) promptText(state jinja.Value, q *DecisionQuestion, v int) (str
 		for _, id := range d.labels[:n] {
 			groups = append(groups, []int32{id})
 		}
-	case jlm.DecisionVllmD3:
-		labels = d.labelTexts
-		for _, id := range d.labels[:len(opts)] {
-			groups = append(groups, []int32{id})
-		}
 	case jlm.DecisionOpenJev:
 		// The template writes the letters itself.
 		for _, id := range d.labels[:len(opts)] {
@@ -715,11 +690,7 @@ func (d *Decider) render(state jinja.Value, q *DecisionQuestion, opts []Decision
 	// models that read an absent one ask by the question's id (Clef's
 	// encode_record, lev's template); llama.cpp refuses the request instead.
 	ins := q.Instructions
-	if ins.IsUndefined() {
-		ins = jinja.None()
-	}
-	// d3's template asks its own default question for none (d3_format.py).
-	if ins.IsNone() && d.kind != jlm.DecisionVllmD3 {
+	if ins.IsUndefined() || ins.IsNone() {
 		ins = jinja.NewString(q.ID)
 	}
 	in := jinja.NewDict()
@@ -921,7 +892,7 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 			copy(p, s)
 		}
 		nn.Scale32JIT(p, 1/t)
-		if d.kind == jlm.DecisionLaya || d.kind == jlm.DecisionVllmD3 {
+		if d.kind == jlm.DecisionLaya {
 			copy(row, p) // the scaled scores, for the entropy below
 		}
 		nn.Softmax32JIT(p, n)
@@ -931,7 +902,7 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 		}
 		nn.Axpy32JIT(acc, p, w)
 	}
-	a := DecisionAnswer{Type: q.Type, CanonicalLegend: d.kind == jlm.DecisionVllmD3}
+	a := DecisionAnswer{Type: q.Type}
 	if q.Type == jlm.QuestionNoul {
 		if d.kind == jlm.DecisionLev {
 			// The expected rating over 0..n-1, as a probability of yes.
@@ -993,8 +964,7 @@ func (d *Decider) answer(q *DecisionQuestion, variants [][]float32) (DecisionAns
 		// a score's largest; llama.cpp gives TypeSafe's formula.
 		a.Confidence = top
 	}
-	if d.kind == jlm.DecisionLaya || (d.kind == jlm.DecisionVllmD3 && q.Type != jlm.QuestionNoul &&
-		d.violation != "typesafe-confidence") {
+	if d.kind == jlm.DecisionLaya {
 		// One minus the entropy over log n: -sum p log p, with log p the
 		// log-softmax of the same scaled scores (one variant on Laya).
 		nn.LogSoftmax32JIT(row, n)
@@ -1176,23 +1146,6 @@ func DecisionResponse(modelID string, qs []DecisionQuestion, answers []DecisionA
 				}
 				b.WriteString(jsonString(o.Key))
 				b.WriteByte(':')
-				if a.CanonicalLegend && !o.Description.IsString() {
-					// vllm-d3's: a description that is not text is given
-					// as its JSON with every object's keys sorted, a string
-					// (server-decision.cpp, canonical_legend).
-					desc := o.Description
-					if desc.IsUndefined() {
-						desc = jinja.None()
-					}
-					// Compact, as nlohmann's dump() writes it.
-					var c bytes.Buffer
-					if err := json.Compact(&c, []byte(sortKeys(desc).JSON())); err != nil {
-						c.Reset()
-						c.WriteString(sortKeys(desc).JSON())
-					}
-					b.WriteString(jsonString(c.String()))
-					continue
-				}
 				b.WriteString(o.Description.JSON())
 			}
 			b.WriteByte('}')

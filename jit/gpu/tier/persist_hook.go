@@ -53,3 +53,11 @@ func BreakAddNormForTest(on bool) bool {
 	addNormBroken = on
 	return old
 }
+
+// SwapQKVGemmForTest makes every q/k/v grid (qkvGemm) read k's and v's
+// weights the wrong way round, and returns the setting it replaced.
+func SwapQKVGemmForTest(on bool) bool {
+	old := qkvGemmSwapped
+	qkvGemmSwapped = on
+	return old
+}

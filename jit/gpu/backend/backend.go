@@ -228,26 +228,6 @@ type PeerCopier interface {
 // Session is a batch of device calls that runs under one ownership hop. The
 // methods mirror Buf and Kernel but skip the hop, so they are only valid inside
 // the closure Device.Session was given.
-// TrialPrefix leads the name of a kernel-timing entry a tuner's trial
-// launched (MarkTrial), so a profile reads the work apart from the trials
-// that ran beside it.
-const TrialPrefix = "trial:"
-
-// TrialMarker is a Session whose launches can be marked as a tuner's trial
-// for the kernel-timing instrument.
-type TrialMarker interface {
-	MarkTrial()
-}
-
-// MarkTrial marks every launch s makes from here as a tuner's trial in the
-// kernel-timing instrument (TrialPrefix); a backend with no instrument
-// ignores it.
-func MarkTrial(s Session) {
-	if t, ok := s.(TrialMarker); ok {
-		t.MarkTrial()
-	}
-}
-
 type Session interface {
 	Write(b Buf, p []byte) error
 	// WriteAt is Buf.WriteAt without the per-call ownership hop; see Session.

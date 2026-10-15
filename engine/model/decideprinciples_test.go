@@ -46,13 +46,6 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 		if c.kind == jlm.DecisionLaya || c.kind == jlm.DecisionD1Omni {
 			continue // an encoder has no history: TestDecisionRelocatesBetweenDevices
 		}
-		if c.kind == jlm.DecisionVllmD3 {
-			// A non-causal prompt is one bidirectional run, which no move can
-			// cut: its rows' scores need every row's keys. Its relocation is
-			// between questions (TestDecisionRelocatesBetweenDevices,
-			// TestDecisionMovesBetweenCards).
-			continue
-		}
 		t.Run(c.name, func(t *testing.T) {
 			m := openDecision(t, c.gguf, c.kind)
 			defer m.Close()
@@ -186,10 +179,7 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 // state lost 0.082-0.095 (three taps of history: a thin but clean margin);
 // lev above 0.3 on CUDA, with its delta-rule state lost 3.2; the openjev test
 // model 0.0008 on the laptop, its state lost 0.028.
-// vllm-d3 (V100, CUDA and Vulkan): a label logit moves 0.0235 between cards
-// and 0.0299 with the recurrent summaries lost, a thin margin: its attention
-// sees the whole prompt, so the linear blocks' state carries less of it.
-var decisionRelocTol = map[string]float64{"d1-3B": 0.06, "openjev": 0.005, "lev": 1.0, "vllm-d3": 0.026, "clef": 1.0, "clef-fixture": 0.01}
+var decisionRelocTol = map[string]float64{"d1-3B": 0.06, "openjev": 0.005, "lev": 1.0, "clef": 1.0, "clef-fixture": 0.01}
 
 // TestDecisionRelocatesBetweenDevices moves one Decider's blocks from the host
 // onto each device in turn and home, answering the same request at every

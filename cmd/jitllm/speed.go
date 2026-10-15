@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/jitllm/jitllm/engine/model"
@@ -404,19 +403,6 @@ func printKernelTimes(unit string, steps int) {
 	us, cnt := backend.CUDAKernelTimes()
 	if len(us) == 0 {
 		return
-	}
-	// A background tuner's trials are timed apart (backend.TrialPrefix): they
-	// ran beside the work, and a cold profile that summed them read the
-	// output head's matvec twenty times into one 8B prompt.
-	trialUS, trialN := 0.0, 0
-	for k, v := range us {
-		if strings.HasPrefix(k, backend.TrialPrefix) {
-			trialUS, trialN = trialUS+v, trialN+cnt[k]
-			delete(us, k)
-		}
-	}
-	if trialN > 0 {
-		fmt.Printf("cuda kernel timing: %.1f us in %d tuner-trial launches beside the work, not counted below\n", trialUS, trialN)
 	}
 	names := slices.SortedFunc(maps.Keys(us), func(a, b string) int { return cmp.Compare(us[b], us[a]) })
 	tot := 0.0

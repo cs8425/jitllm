@@ -185,6 +185,11 @@ type Config struct {
 	// the reduction-order band elsewhere. On by default, taken per shape where
 	// this device's tuner finds it faster (tuneGateUp2).
 	GateUp2 bool
+	// QKVGemm runs a prompt chunk's q, k and v as one GemmVoltaSegments grid
+	// instead of three binary16 GEMMs (each free to split k and reduce). Off
+	// by default: on a V100 it read 0.992-0.994 of the three on Llama-3.2-1B
+	// (gpu-kernels.md, "q, k and v as one prompt GEMM grid").
+	QKVGemm bool
 	// GateUp2Force runs Gate2 wherever the shape has it, whatever this
 	// device's tuner chose (gateUp2Pick): the A/B arm and the gates.
 	GateUp2Force bool
@@ -781,6 +786,9 @@ type Stats struct {
 	// AddNormFolded counts block-end residual adds a prompt chunk folded
 	// into the next block's attention norm (Config.NoAddNormFold).
 	AddNormFolded int
+	// QKVGemm counts prompt chunks' q/k/v projections run as one
+	// GemmVoltaSegments grid (Config.QKVGemm).
+	QKVGemmRuns int
 	// KVPrewarmPages counts pages a pool grew ahead of its history
 	// (PrewarmKV): the growth a State's first prompt no longer pays.
 	KVPrewarmPages int
@@ -1248,6 +1256,7 @@ func (s *Stats) add(o Stats) {
 	s.GemmInt8 += o.GemmInt8
 	s.NormF16 += o.NormF16
 	s.AddNormFolded += o.AddNormFolded
+	s.QKVGemmRuns += o.QKVGemmRuns
 	s.ActF16Fused += o.ActF16Fused
 	s.QuantActs += o.QuantActs
 	s.KVPrewarmPages += o.KVPrewarmPages
@@ -1793,6 +1802,7 @@ type devShared struct {
 	ragKerns   map[moeKernKey]backend.Kernel // a batched mixture's grouped matvecs (moegroup.go)
 	moeVolta   map[moeVoltaKey]moeVoltaMV    // their tensor-core twins; see voltaGroupedMV
 	ragK       map[ragKey]backend.Kernel     // a ragged step's matvecs; see ragMV
+	qkvK       map[string]*qkvSeg            // a prompt chunk's q/k/v grids; see qkvGemm
 	kshared    map[string]backend.Kernel     // scratch kernels by content; see compileShared
 	pcache     *persistCache                 // composed persistent kernels; see persist.go
 	// convK, conv and convN are the convolutional blocks' kernels, their
@@ -2581,6 +2591,11 @@ func (g *devTier) Close() {
 	for _, k := range g.convK {
 		if k != nil {
 			closeKern(k)
+		}
+	}
+	for _, s := range g.qkvK {
+		if s != nil {
+			closeKern(s.kern)
 		}
 	}
 	for _, k := range g.unks {

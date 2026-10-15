@@ -62,7 +62,7 @@ func mapExec(code []byte) (*Code, error) {
 	if addr == 0 {
 		return nil, fmt.Errorf("jit: VirtualAlloc %d bytes: %w", len(code), err)
 	}
-	copy(unsafe.Slice((*byte)(unsafe.Add(nil, addr)), len(code)), code)
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(addr)), len(code)), code)
 
 	var old uint32
 	ok, _, err := procVirtualProtect.Call(addr, uintptr(len(code)),
@@ -74,7 +74,7 @@ func mapExec(code []byte) (*Code, error) {
 	proc, _, _ := procGetCurrentProcess.Call()
 	procFlushInstrCache.Call(proc, addr, uintptr(len(code)))
 
-	c := &Code{addr: addr, entry: (*byte)(unsafe.Add(nil, addr)), Size: len(code)}
+	c := &Code{addr: addr, entry: (*byte)(unsafe.Pointer(addr)), Size: len(code)}
 	// A leaked RX mapping is not reclaimed by the GC on its own.
 	runtime.SetFinalizer(c, func(c *Code) { c.Close() })
 	return c, nil
