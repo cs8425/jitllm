@@ -29,6 +29,9 @@ import (
 var migrations = map[uint32]func(path string) error{}
 
 func init() {
+	migrations[26] = migrate26
+	migrations[27] = migrate27
+	migrations[28] = migrate28
 	migrations[29] = migrate29
 }
 
@@ -122,6 +125,10 @@ func (f *File) storedBytes(e *Entry) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		if f.ver < 27 && kernels.ScStream(q) {
+			// v26 spent a word on two sub-blocks' pairs, four a super-block.
+			nsc = int(rows) * e.K() / 256 * scWords26
+		}
 		planes = []plane{{e.QSOff, uint64(nq) * 4}, {e.DOff, uint64(nd) * 4}, {e.SCOff, uint64(nsc) * 4}}
 	} else {
 		per, err := verbatimBytes(e.Type, rows*e.Dims[0])
@@ -188,8 +195,7 @@ func migrate29(path string) error {
 		if e.Role == RoleADWB {
 			continue
 		}
-		t := Tensor{Role: e.Role, Block: e.Block, Index: e.Index, Type: e.Type, NDim: e.NDim,
-			Dims: e.Dims, Name: e.Name, Stored: true}
+		t := f.carried(e)
 		if e.Role == RoleABNShift {
 			dw, ok := f.Find(RoleADWB, e.Block, e.Index)
 			sc, ok2 := f.Find(RoleABNScale, e.Block, e.Index)
@@ -216,17 +222,29 @@ func migrate29(path string) error {
 			for c := range shift {
 				binary.LittleEndian.PutUint32(b[4*c:], math.Float32bits(bias[c]*scale[c]+shift[c]))
 			}
-			t.Data = b
-		} else {
-			e := e
-			t.Load = func() ([]byte, error) { return f.storedBytes(e) }
+			t.Load, t.Data = nil, b
 		}
 		src.Tensors = append(src.Tensors, t)
 	}
-	// Written beside the old one and moved over it once the old handle is
-	// closed: Windows refuses to replace a file that is still open.
+	return f.publish(path, src, 30)
+}
+
+// carried is entry e as Write takes it back: its stored planes, read when the
+// writer reaches it, placed without packing.
+func (f *File) carried(e *Entry) Tensor {
+	return Tensor{Role: e.Role, Block: e.Block, Index: e.Index, Type: e.Type, NDim: e.NDim,
+		Dims: e.Dims, Name: e.Name, Stored: true, Load: func() ([]byte, error) { return f.storedBytes(e) }}
+}
+
+// publish writes src as a version ver container in place of the one f was opened from,
+// beside it, and moves it over path once f is closed: Windows refuses to
+// replace a file that is still open. One streaming copy; the peak is a
+// tensor.
+func (f *File) publish(path string, src *Source, ver uint32) error {
 	next := path + ".upgrade"
-	if _, err := Write(next, src, f.FP); err != nil {
+	if _, err := writeAt(next, src, f.FP, ver); err != nil {
+		f.Close()
+		os.Remove(next)
 		return err
 	}
 	f.Close()
@@ -235,4 +253,120 @@ func migrate29(path string) error {
 		return fmt.Errorf("jlm: publishing %s: %w", path, err)
 	}
 	return nil
+}
+
+// migrate28 is version 28 to 29. v29 added the row table (placed after every
+// page array, and only for RoleNGramTable, which no v28 writer knew) and
+// TypeIQ4NL (a type code no v28 container carries). Nothing a v28 container
+// holds moved or changed meaning, so only the version word changes, in place.
+func migrate28(path string) error {
+	f, err := openAt(path, 28)
+	if err != nil {
+		return err
+	}
+	f.Close()
+	return setVersion(path, 29)
+}
+
+// migrate27 is version 27 to 28. v28 put the count of multi-token-prediction
+// blocks (Config.NMTP) into the config record after NExpertGroupUsed; a v27
+// container has none, so it is zero. The record grows by four bytes, which
+// moves every offset after it, so the container is rewritten with every
+// tensor's planes carried as they are.
+func migrate27(path string) error {
+	f, err := openAt(path, 27)
+	if err != nil {
+		return err
+	}
+	src := &Source{Config: f.cfg, Vision: f.vis, Vocab: f.voc}
+	for i := range f.tab {
+		src.Tensors = append(src.Tensors, f.carried(&f.tab[i]))
+	}
+	return f.publish(path, src, 28)
+}
+
+// scWords26 is the SC words a row's super-block held in a v26 Q4_K or Q5_K
+// tensor: eight sub-blocks' 6-bit scale and minimum, a byte each, two
+// sub-blocks a word.
+const scWords26 = 4
+
+// migrate26 is version 26 to 27. v27 packs Q4_K's and Q5_K's sub-block scales
+// and minima as a 96-bit stream, three words a super-block (kernels.ScStream),
+// where v26 gave each 6-bit field a byte, four words. The fields are the same
+// numbers, so the SC plane of every such tensor is re-laid from the v26 one;
+// its QS and D planes, and every other tensor, are carried as they are. The
+// planes shrink, which moves every offset after the first, so the container
+// is rewritten.
+func migrate26(path string) error {
+	f, err := openAt(path, 26)
+	if err != nil {
+		return err
+	}
+	src := &Source{Config: f.cfg, Vision: f.vis, Vocab: f.voc}
+	for i := range f.tab {
+		e := &f.tab[i]
+		t := f.carried(e)
+		if q, ok := packerOf(e.Type); ok && kernels.ScStream(q) {
+			t.Load = func() ([]byte, error) { return f.restream26(e, q) }
+		}
+		src.Tensors = append(src.Tensors, t)
+	}
+	return f.publish(path, src, 27)
+}
+
+// restream26 is a v26 Q4_K or Q5_K entry's stored planes with every sheet's SC
+// plane re-laid as v27's stream. v26 word w of a row (sc[w*rows+r]) held
+// sub-blocks 2w and 2w+1: the scale in bits 0-7 and 16-23, the minimum in
+// 8-15 and 24-31. v27 word w of super-block s is sc[(s*3+w)*rows+r], each
+// field where kernels.ScField puts it.
+func (f *File) restream26(e *Entry, q kernels.Quant) ([]byte, error) {
+	b, err := f.storedBytes(e)
+	if err != nil {
+		return nil, err
+	}
+	sheets, rows := sheetsOf(e.Dims, e.NDim)
+	nq, nd, nsc, err := kernels.PackedWords(q, int(rows), e.K())
+	if err != nil {
+		return nil, err
+	}
+	nsuper := e.K() / 256
+	old := int(rows) * nsuper * scWords26
+	head := (nq + nd) * 4 * int(sheets)
+	if len(b) != head+old*4*int(sheets) || nsc != int(rows)*nsuper*kernels.ScStreamWords {
+		return nil, fmt.Errorf("jlm: %s: %d stored bytes for a v26 %v of %d sheets of %d rows",
+			e.Name, len(b), e.Type, sheets, rows)
+	}
+	out := make([]byte, head+nsc*4*int(sheets))
+	copy(out, b[:head])
+	le := binary.LittleEndian
+	for sh := 0; sh < int(sheets); sh++ {
+		in := b[head+sh*old*4:]
+		dst := out[head+sh*nsc*4:]
+		for r := 0; r < int(rows); r++ {
+			for s := 0; s < nsuper; s++ {
+				var ws [kernels.ScStreamWords]uint32
+				for sub := 0; sub < 8; sub++ {
+					si := s*8 + sub
+					v := le.Uint32(in[4*((si/2)*int(rows)+r):])
+					lane := uint(si%2) * 16
+					scPut26(&ws, sub, false, uint8(v>>lane))
+					scPut26(&ws, sub, true, uint8(v>>(lane+8)))
+				}
+				for w, v := range ws {
+					le.PutUint32(dst[4*((s*kernels.ScStreamWords+w)*int(rows)+r):], v)
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// scPut26 ORs a 6-bit field into a super-block's stream words, where
+// kernels.ScField places it.
+func scPut26(ws *[kernels.ScStreamWords]uint32, sub int, min bool, v uint8) {
+	w, b, hi := kernels.ScField(sub, min)
+	ws[w] |= uint32(v&63) << uint(b)
+	if hi > 0 {
+		ws[w+1] |= uint32(v&63) >> uint(6-hi)
+	}
 }
