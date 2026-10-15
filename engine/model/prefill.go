@@ -507,7 +507,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 		if len(s.bidir) > 0 && !s.bidirCutFault {
 			n = min(s.bidirChunk(s.seqPos(slot), n), total-base)
 		}
-		chunkBidir := s.bidirIn(s.seqPos(slot), n)
+		chunkBidir := bidir || s.bidirIn(s.seqPos(slot), n)
 		lastBase = base
 		p0 := s.seqPos(slot)
 		s.relocateFor(p0 + n)
@@ -714,7 +714,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 					}
 				}
 				s.layerInputs(s.bple[:n*c.pleWidth()])
-				if s.bidirTell(p0, n) && s.ld.Layers(li, hi, p0, n, s.bx[:n*c.ResidW()], s.bcs[:n*c.RopeW()],
+				if s.callTell(p0, n) && s.ld.Layers(li, hi, p0, n, s.bx[:n*c.ResidW()], s.bcs[:n*c.RopeW()],
 					s.bswaTable(n, c.NRotSWA), fh) {
 					headDone = fh != nil
 					s.addDeep(hi-1, base, n)

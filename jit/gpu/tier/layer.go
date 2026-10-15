@@ -6216,6 +6216,10 @@ type graphKey struct {
 	// names, and a step of the same rows wanting fewer logits differs only
 	// here.
 	ragHead int
+	// ragMap is the ragged call's run-table width (raggedprefill.go): it
+	// picks the run-table launch, which a recording names, and 0 is the
+	// decode plan for every row.
+	ragMap int
 	// hnorm is which norm the head reads (headNormFor): a recording names its
 	// buffer by address.
 	hnorm int
@@ -6593,6 +6597,10 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 				return refuse("the block selection reads the whole history and part of it is evicted")
 			}
 		}
+		pk.ragRows = 0
+		if rag != nil && pk.cur != nil {
+			g.ragPrep(bs)
+		}
 		pk.prefill = pk.pf != nil && pk.cur != nil && pk.st == nil && rag == nil && R > 1 && nrow > 0
 		if pk.prefill {
 			if e := g.prefillPrep(bs, nrow); e != nil {
@@ -6715,7 +6723,10 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	// The label pick: one row's logits, a decode's or a folded chunk's last.
 	pick := head != nil && !argmax && sampleK == 0 && len(head.Pick) > 0 && rag == nil && !allRows &&
 		(R == 1 || fold) && g.prepPick(head)
-	ragN, ragRuns, ragHead := 0, 0, 0
+	ragN, ragRuns, ragHead, ragMap := 0, 0, 0, 0
+	if bs.pkv != nil {
+		ragMap = bs.pkv.ragRows
+	}
 	if rag != nil {
 		ragN, ragRuns = len(rag.pos), len(rag.runs)
 		if head != nil {
@@ -6736,7 +6747,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	// home, whose uploads sit between launches.
 	persistOn := R == 1 && rag == nil && !(bs.pkv != nil && bs.pkv.st != nil) && g.ensurePersist()
 	key := graphKey{lo, hi, nCap, R, head != nil, g.TableSplit, g.ScalarSoftmax, g.flashOn(), g.KVF16,
-		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, persistOn, persistOn && g.PersistDeps, g.GateUpFuse, g.GateUp2, g.NoAddNormFold, sid, g.NoFuse, g.NoActFuse}
+		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, ragMap, hNormID, persistOn, persistOn && g.PersistDeps, g.GateUpFuse, g.GateUp2, g.NoAddNormFold, sid, g.NoFuse, g.NoActFuse}
 	if lo == hi {
 		// The head alone reads no history, so the capacity is not part of
 		// what it records: keyed by it, prompts on either side of a growth
@@ -7824,8 +7835,21 @@ func (g *devTier) layersSession(s backend.Session) {
 						// window its keyStart (pRowW), through the decode plan
 						// chosen before the submission (pagedPlanFor).
 						desc := pk.pRow
-						if p.Window(li) > 0 && !pagedFaulted("window") && !(rag != nil && rowsFaulted("nowin")) {
+						win := p.Window(li) > 0 && !pagedFaulted("window") && !(rag != nil && rowsFaulted("nowin"))
+						if win {
 							desc = pk.pRowW
+						}
+						// A ragged call with a run table: the decode plan over
+						// the descriptors with the table's rows emptied, then
+						// the table's prefill over those rows
+						// (raggedprefill.go).
+						ragOn := rag != nil && pk.ragRows > 0
+						dec := desc
+						if ragOn {
+							dec = pk.pRowDec
+							if win {
+								dec = pk.pRowDecW
+							}
 						}
 						var sk backend.Buf
 						if p.AttnSinks {
@@ -7834,11 +7858,22 @@ func (g *devTier) layersSession(s backend.Session) {
 							}
 						}
 						if err == nil {
-							err = pk.attend(s, lc, g.kvp.layers[l.kvSrc], qAtt, kDst, vDst, bs.n, bs.xb, pgTab, desc, sk)
+							err = pk.attend(s, lc, g.kvp.layers[l.kvSrc], qAtt, kDst, vDst, bs.n, bs.xb, pgTab, dec, sk)
 							g.PagedLaunches++
 							if pk.cur.plan.Path == kernels.PathStaged {
 								g.PagedStagedLaunches++
 							}
+						}
+						if ragOn && err == nil {
+							tabRag := desc
+							if rowsFaulted("ragtab") {
+								// The violation: the table's rows read their
+								// keys through the emptied set, so they attend
+								// nothing of their own.
+								tabRag = dec
+							}
+							err = pk.ragAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag)
+							g.RagPrefills++
 						}
 					} else if !skipAttn && useFlash {
 						dst := bs.xb
@@ -8982,6 +9017,7 @@ func (g *devTier) layersSession(s backend.Session) {
 		if pk.prefill {
 			pk.pf.prefillWrites(w)
 		}
+		pk.ragWrites(w)
 		if pk.st != nil {
 			pk.st.writes(w)
 		}

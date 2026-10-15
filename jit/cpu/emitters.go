@@ -81,7 +81,8 @@ type Emitters struct {
 	RMSNorm   func(n int) ([]byte, error)
 	LayerNorm func(n int, bias bool) ([]byte, error)
 	// RowStat is the layer norm's passes turned to Gemma 3n's two row ops
-	// (mode RowGauss or RowMag; see EmitGaussTopK and EmitMagMatch).
+	// (mode RowGauss, RowMag or RowStd; see EmitGaussTopK, EmitMagMatch and
+	// EmitRowStd).
 	RowStat func(n int, mode RowMode) ([]byte, error)
 	RoPE    func(hd, nrot int, neox bool) ([]byte, error)
 	// RoPESplit is XD-RoPE's rotation (HunyuanVL): NEOX pairs whose halves
@@ -329,6 +330,8 @@ var primaryEmitters = Emitters{
 			return must("gausstopk", EmitGaussTopK(n))
 		case RowMag:
 			return must("magmatch", EmitMagMatch(n))
+		case RowStd:
+			return must("rowstd", EmitRowStd(n))
 		}
 		return nil, fmt.Errorf("jit: row statistic %d", mode)
 	},
@@ -432,6 +435,8 @@ var sseEmitters = Emitters{
 			return EmitGaussTopKSSE(n)
 		case RowMag:
 			return EmitMagMatchSSE(n)
+		case RowStd:
+			return EmitRowStdSSE(n)
 		}
 		return nil, fmt.Errorf("jit: row statistic %d", mode)
 	},

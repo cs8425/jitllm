@@ -13,7 +13,16 @@ import (
 // here passes that gate wherever the host does.
 const embedDevCos = 1 - 1e-5
 
-// TestEmbeddingsOnEveryDevice runs every BERT-family embedding model with
+// embedDevCosQuant is the bound for a decoder embedding model with quantized
+// weights, whose device runs its matrices over int8 activations where the
+// host's prefill does not: qwen3-embedding-0.6b (Q8_0) reads 0.99939-0.99942
+// on a V100's CUDA and Vulkan at half and every block, where its F16 file
+// reads 0.9999994 -- the band is the quantized activations, not the wiring.
+const embedDevCosQuant = 1 - 1e-3
+
+// TestEmbeddingsOnEveryDevice runs every embedding model -- the BERT family
+// through its encoder segment, a decoder (qwen3-embedding, EmbeddingGemma)
+// through its State, EmbeddingGemma's blocks planned non-causal -- with
 // every encoder block on each device present, and with half of them, against
 // the host and against the references TestEmbeddingsMatchReference holds the
 // host to -- the encoder's segment through the one placement path
@@ -25,8 +34,16 @@ func TestEmbeddingsOnEveryDevice(t *testing.T) {
 	for _, g := range loadEmbedGoldens(t) {
 		t.Run(g.Model, func(t *testing.T) {
 			m := openEmbedModel(t, g)
+			// A decoder embedding model (qwen3-embedding, EmbeddingGemma)
+			// places its State's blocks; its history is f32 on the device.
+			nb := m.encBlocks()
+			bound := embedDevCos
+			if g.Model == "qwen3-embedding-0.6b" {
+				bound = embedDevCosQuant
+			}
 			if !m.IsEncoder() {
-				t.Skipf("%s is a decoder embedding model: its device path is its State's, not the encoder's", g.Model)
+				nb = m.Cfg.NLayer
+				m.SetKVF16(false)
 			}
 			embed := func(e *Embedder) [][]float32 {
 				var out [][]float32
@@ -45,7 +62,6 @@ func TestEmbeddingsOnEveryDevice(t *testing.T) {
 			}
 			host := embed(he)
 			he.Close()
-			nb := m.encBlocks()
 			ran := 0
 			for _, spec := range stepDevices() {
 				probe, err := tier.OpenWith(tier.WithDevices(spec), tier.WithDeviceTune(tier.TuneOff))
@@ -99,8 +115,8 @@ func TestEmbeddingsOnEveryDevice(t *testing.T) {
 						got, placed := arm(n)
 						c := closest(got)
 						t.Logf("%d of %d blocks on %s: worst cosine to the host %.9f", placed, nb, spec, c)
-						if !(c >= embedDevCos) {
-							t.Errorf("%d blocks on %s: cosine to the host %.9f < %v", placed, spec, c, embedDevCos)
+						if !(c >= bound) {
+							t.Errorf("%d blocks on %s: cosine to the host %.9f < %v", placed, spec, c, bound)
 						}
 						if placed == nb {
 							for i := range got {
@@ -112,27 +128,66 @@ func TestEmbeddingsOnEveryDevice(t *testing.T) {
 							}
 						}
 					}
-					// The violation: the output norm's weight gone from what the
-					// device is handed (encWeights reads it at the offer).
-					saved := make([][]float32, len(m.enc.blocks))
-					for i := range m.enc.blocks {
-						b := &m.enc.blocks[i]
-						saved[i] = b.ln2W
-						ones := make([]float32, len(b.ln2W))
-						for j := range ones {
-							ones[j] = 1
+					// violation runs the every-block arm with cut applied and
+					// fails unless it moves the answer off the host's.
+					violation := func(name string, cut func() func()) {
+						undo := cut()
+						bad, _ := arm(-1)
+						undo()
+						c := closest(bad)
+						t.Logf("%s on %s: worst cosine to the host %.6f", name, spec, c)
+						if c >= bound {
+							t.Errorf("%s reads cosine %.9f on %s: the gate does not see it", name, c, spec)
 						}
-						b.ln2W = ones
 					}
-					bad, _ := arm(-1)
-					for i := range m.enc.blocks {
-						m.enc.blocks[i].ln2W = saved[i]
+					if m.IsEncoder() {
+						// The output norm's weight gone from what the device is
+						// handed (encWeights reads it at the offer).
+						violation("the output LayerNorm without its weight", func() func() {
+							saved := make([][]float32, len(m.enc.blocks))
+							for i := range m.enc.blocks {
+								b := &m.enc.blocks[i]
+								saved[i] = b.ln2W
+								b.ln2W = onesLike(b.ln2W)
+							}
+							return func() {
+								for i := range m.enc.blocks {
+									m.enc.blocks[i].ln2W = saved[i]
+								}
+							}
+						})
+						return
 					}
-					c := closest(bad)
-					t.Logf("the output LayerNorm without its weight on %s: worst cosine to the host %.6f", spec, c)
-					if c >= embedDevCos {
-						t.Errorf("the violation reads cosine %.9f on %s: the gate does not see it", c, spec)
+					// A decoder's: the attention norm's weight gone from what
+					// the device is handed at the offer.
+					violation("the attention norm without its weight", func() func() {
+						saved := make([][]float32, len(m.layers))
+						for i := range m.layers {
+							saved[i] = m.layers[i].attnNorm
+							m.layers[i].attnNorm = onesLike(saved[i])
+						}
+						return func() {
+							for i := range m.layers {
+								m.layers[i].attnNorm = saved[i]
+							}
+						}
+					})
+					if !m.Cfg.NonCausal {
+						return
 					}
+					// A bidirectional decoder's mask is load-bearing on the
+					// device: run causal there, and with the sliding layers'
+					// windows as wide as the sequence (the long text is past
+					// the window).
+					violation("a causal mask on the device", func() func() {
+						m.Cfg.NonCausal = false
+						return func() { m.Cfg.NonCausal = true }
+					})
+					violation("no symmetric window on the sliding layers", func() func() {
+						was := m.Cfg.SWAWindow
+						m.Cfg.SWAWindow = 1 << 20
+						return func() { m.Cfg.SWAWindow = was }
+					})
 				})
 			}
 			if ran == 0 {

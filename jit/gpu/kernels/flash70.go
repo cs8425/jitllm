@@ -24,6 +24,16 @@ type FlashPrefill70Shape struct {
 	Page, Splits int
 	// F16 reads a paged V packed as binary16 two to a word.
 	F16 bool
+	// Map reads each query slot's row from a run table, pMap after pRow: slot
+	// i is row pMap[i] of pQ, pOut and the descriptors. It is how one launch
+	// takes the prompt chunks of a ragged step (docs/design/ragged-prefill.md):
+	// each sequence's rows, in position order, fill whole workgroups of slots,
+	// the last padded with that sequence's last row, so a workgroup's rows are
+	// one sequence's as the paged form demands, and q and the output stay at
+	// the step's own rows. A padded slot computes its row's output again, the
+	// same arithmetic, and stores the same values. Paged only, and no splits:
+	// a merge would read partials for rows the table does not name.
+	Map bool
 }
 
 // flashPrefillSplits is how many key runs a flash prefill workgroup's rows
@@ -33,13 +43,16 @@ func flashPrefillSplits(s FlashPrefill70Shape) int { return max(1, s.Splits) }
 // flashPrefillCheck validates a paged flash prefill shape.
 func flashPrefillCheck(what string, s FlashPrefill70Shape) error {
 	if s.Page == 0 {
-		if s.Splits > 1 || s.F16 {
+		if s.Splits > 1 || s.F16 || s.Map {
 			return fmt.Errorf("kernels: %s: splits and f16 V are the paged form's", what)
 		}
 		return nil
 	}
 	if err := checkPage(what, s.Page); err != nil {
 		return err
+	}
+	if s.Map && s.Splits != 0 {
+		return fmt.Errorf("kernels: %s: a run table (Map) writes the output, so it takes no splits", what)
 	}
 	if s.KStride != 0 || s.Window != 0 || s.Splits < 0 || s.F16 && s.KVHeads*s.Dim%4 != 0 {
 		return fmt.Errorf("kernels: %s: a paged shape has no KStride and no Window (the window is "+

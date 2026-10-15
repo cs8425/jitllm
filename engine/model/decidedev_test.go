@@ -238,8 +238,7 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 						all := func(n int) bool { return n == nb }
 						got, placed, why, picked := decideOn(t, m, g, -1, all)
 						if placed != nb {
-							t.Skipf("%s held %d of %d blocks (%s): this card is too small for the every-block arm",
-								spec, placed, nb, why)
+							cardTooSmall(t, why, "%s held %d of %d blocks in the every-block arm", spec, placed, nb)
 						}
 						worst := decisionDiff(t, host, got)
 						t.Logf("every block on %s: worst difference from the host %.5f", spec, worst)
