@@ -47,6 +47,9 @@ type rowsOut struct {
 	// recurrent state after row r of the call: a rejection after row r takes
 	// it back (recSnap). Device blocks keep their own (nn.RecRewinder).
 	snap []recSnap
+	// ngBase is the step's row the chunk the n-gram block is running begins
+	// at, for snapTail.
+	ngBase int
 	// noCap is a gate's break (TestSpecOverAFinalSoftcap): the host's head
 	// over the step's rows skips the final softcap. false in every step a
 	// session makes.
@@ -90,11 +93,13 @@ func (r *rowsOut) foldHead(h *nn.Head, base, n int) (func(), bool) {
 	return nil, false
 }
 
-// stepRows runs src -- rows of slot 0 at the session's next positions -- and
-// fills out (see rowsOut). It is prefill with every output a speculation step
+// stepRows runs src -- rows of slot 0 at the session's next positions, ids
+// their tokens (nil for rows with none: a draft's) -- and fills out (see
+// rowsOut). What reads a row's token past its embedding (Qwen3.8-Flash-Next's
+// n-gram block) reads ids. It is prefill with every output a speculation step
 // reads: one pass over the weights for all the rows, the KV written for each.
 // The caller holds the pager (enterPager), as every inner path assumes.
-func (s *State) stepRows(src []func(dst []float32) error, out *rowsOut) error {
+func (s *State) stepRows(src []func(dst []float32) error, ids []int32, out *rowsOut) error {
 	c := s.c
 	out.token, out.tokens = -1, nil
 	switch {
@@ -137,7 +142,7 @@ func (s *State) stepRows(src []func(dst []float32) error, out *rowsOut) error {
 		h.ArgmaxOnly, h.Token = true, -1
 		defer func() { h.ArgmaxOnly = false }()
 	}
-	lg, err := s.prefillSrc(0, src, nil, nil)
+	lg, err := s.prefillSrc(0, src, ids, nil)
 	if err != nil {
 		return err
 	}
@@ -169,7 +174,10 @@ func (e errRowsRefused) Error() string {
 // block the ragged path refuses (latent attention).
 func (s *State) rowsVerifiable() bool {
 	_, ok := s.onRowsDevice()
-	return ok && !s.c.MLA() && s.nseq == 1
+	// Qwen3.8-Flash-Next's rows are hyper-connected streams with n-gram rows
+	// beside them, which stepRowsDevice does not build (altRowsStep does,
+	// with the head on the host): its steps run as prompt chunks.
+	return ok && !s.c.MLA() && !s.c.Q4E() && s.nseq == 1
 }
 
 // stepRowsDevice is stepRows as one ragged step on the device. The rows are
@@ -326,7 +334,28 @@ func (r *rowsOut) snapRow(s *State, li, slot, row int) {
 	nc, ns := g.convStateLen(), g.stateStride()
 	sn := &r.snap[row]
 	copy(sn.conv[li], s.rconv[li][slot*nc:(slot+1)*nc])
-	copy(sn.state[li], s.rstate[li][slot*ns:(slot+1)*ns])
+	if s.c.NGramAt(li) {
+		// The n-gram block ran every row of the chunk before the delta rule
+		// steps the first: its tail is the chunk's last row's by now, and
+		// snapTail took each row's as the block ran it.
+		ns = g.deltaStateLen()
+	}
+	copy(sn.state[li][:ns], s.rstate[li][slot*g.stateStride():slot*g.stateStride()+ns])
+}
+
+// snapTail copies v into the snapshot after row `row` of the step's chunk
+// that begins at ngBase, at off into block li's recurrent tail: the n-gram
+// block's predecessors (off 0) and convolution history, as each row moves
+// them on (ngramRows, ngramApply).
+func (r *rowsOut) snapTail(s *State, li, row, off int, v []float32) {
+	if r == nil {
+		return
+	}
+	row += r.ngBase
+	if row >= len(r.snap) || r.snap[row].state == nil || r.snap[row].state[li] == nil {
+		return
+	}
+	copy(r.snap[row].state[li][s.dg.deltaStateLen()+off:], v)
 }
 
 // newRecSnap allocates one snapshot of every host linear block's state for
@@ -357,7 +386,22 @@ func (s *State) copyRec(sn *recSnap, save bool) {
 	g := s.dg
 	nc, ns := g.convStateLen(), g.stateStride()
 	for li := range s.rconv {
-		if s.rconv[li] == nil || !s.c.LayerKind(li).Recurrent() || s.devAt(li) {
+		if s.rconv[li] == nil || !s.c.LayerKind(li).Recurrent() {
+			continue
+		}
+		if s.devAt(li) {
+			// The device rewinds its block's state, the n-gram block's
+			// convolution history with it; the predecessors the n-gram rows
+			// are hashed from stay the host's whichever side runs the block
+			// (ngramToDevice), so they are saved and restored here.
+			if s.c.NGramAt(li) {
+				prev, _ := s.ngramState(li, 0)
+				if save {
+					copy(sn.state[li][g.deltaStateLen():], prev)
+				} else {
+					copy(prev, sn.state[li][g.deltaStateLen():])
+				}
+			}
 			continue
 		}
 		if save {

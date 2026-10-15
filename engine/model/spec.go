@@ -319,12 +319,12 @@ func (s *State) Speculate(opts ...SpecOption) (*Speculator, error) {
 		// in as they arrive, which State.rewind does not take back. Not
 		// built, so refused by name, whoever drafts.
 		return nil, fmt.Errorf("model: speculation on %s is not built", c.Arch)
-	case c.Q4E():
+	case c.Q4E() && mtp:
 		// Its prediction block is hyper-connected as its trunk is, which the
-		// draft path's ordinary block does not run, and a rewind takes the
-		// device's n-gram history back but not the host's predecessors.
-		// Not built, so refused by name, whoever drafts.
-		return nil, fmt.Errorf("model: speculation on %s is not built", c.Arch)
+		// draft path's ordinary block does not run. Not built, so refused by
+		// name; prompt lookup drafts for it (a device n-gram block's host
+		// predecessors are part of what a rewind restores, copyRec).
+		return nil, fmt.Errorf("model: multi-token prediction on %s is not built", c.Arch)
 	case s.batched || s.nseq != 1:
 		return nil, fmt.Errorf("model: speculation drives a single sequence, not a batch")
 	case s.pos != 0:
@@ -447,7 +447,7 @@ func (sp *Speculator) trunkPrompt(prompt []int32) ([]float32, []float32, error) 
 	hid := make([]float32, n*c.NEmbd)
 	logits := make([]float32, c.NVocab)
 	if n == 1 {
-		if err := t.stepRows(embedSrc(t, prompt), &rowsOut{logits: logits, hidden: hid}); err != nil {
+		if err := t.stepRows(embedSrc(t, prompt), prompt, &rowsOut{logits: logits, hidden: hid}); err != nil {
 			return nil, nil, err
 		}
 		return logits, hid, nil
@@ -515,7 +515,7 @@ func (sp *Speculator) draftRows(toks []int32, hs []float32, out *rowsOut) error 
 		z := sp.ze[i*c.NEmbd : (i+1)*c.NEmbd]
 		src[i] = func(dst []float32) error { copy(dst, z); return nil }
 	}
-	return d.stepRows(src, out)
+	return d.stepRows(src, nil, out)
 }
 
 // embedMTP is token x's row of the table the prediction block reads: its own
@@ -664,7 +664,7 @@ func (sp *Speculator) Next(sm *Sampler) ([]int32, error) {
 		}
 	}
 	t.kv.note(P, rows...)
-	if err := t.stepRows(embedSrc(t, rows), &sp.tout); err != nil {
+	if err := t.stepRows(embedSrc(t, rows), rows, &sp.tout); err != nil {
 		return nil, err
 	}
 	sp.stats.Verify += time.Since(t1)
@@ -750,7 +750,7 @@ func (sp *Speculator) Next(sm *Sampler) ([]int32, error) {
 			// head: one more pass, and the next round starts clean.
 			if r > 0 {
 				commit := rowsOut{noHead: true}
-				if err := t.stepRows(embedSrc(t, nextReplay), &commit); err != nil {
+				if err := t.stepRows(embedSrc(t, nextReplay), nextReplay, &commit); err != nil {
 					return nil, err
 				}
 				nextReplay = nextReplay[:0]
