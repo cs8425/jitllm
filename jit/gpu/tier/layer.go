@@ -6222,6 +6222,9 @@ type graphKey struct {
 	// gateUp2 says the dense FFNs ran gate and up as one Gate2 launch
 	// (Config.GateUp2).
 	gateUp2 bool
+	// noAddNorm says a prompt chunk's block-end adds ran alone
+	// (Config.NoAddNormFold).
+	noAddNorm bool
 	// sid is the session the recording was made for: it bakes that session's
 	// page descriptors and recurrent seats, so another session never replays
 	// it. Keying on it, rather than dropping every recording when the current
@@ -6724,7 +6727,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	// home, whose uploads sit between launches.
 	persistOn := R == 1 && rag == nil && !(bs.pkv != nil && bs.pkv.st != nil) && g.ensurePersist()
 	key := graphKey{lo, hi, nCap, R, head != nil, g.TableSplit, g.ScalarSoftmax, g.flashOn(), g.KVF16,
-		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, persistOn, persistOn && g.PersistDeps, g.GateUpFuse, g.GateUp2, sid, g.NoFuse, g.NoActFuse}
+		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, persistOn, persistOn && g.PersistDeps, g.GateUpFuse, g.GateUp2, g.NoAddNormFold, sid, g.NoFuse, g.NoActFuse}
 	if lo == hi {
 		// The head alone reads no history, so the capacity is not part of
 		// what it records: keyed by it, prompts on either side of a growth
@@ -7271,6 +7274,10 @@ func (g *devTier) layersSession(s backend.Session) {
 			}
 			g.ds4Tables(lc, bs, R)
 		}
+		// A block-end residual add held for the next block's attention norm
+		// to do in its own launch (foldAddNorm): x = pendX + pendY.
+		var pendX, pendY backend.Buf
+		var pendNorm, pendConv backend.Kernel
 		for li := lo; li < hi; li++ {
 			attnFused, ffnFused := false, false
 			l := g.layers[li]
@@ -7284,6 +7291,11 @@ func (g *devTier) layersSession(s backend.Session) {
 			// and the attention.
 			voltaOnly := R > 1 && rag == nil && g.voltaBlock(l, R, bs.tok) && l.altRouter == nil && l.ds4 == nil &&
 				l.k3 == nil && l.q4e == nil
+			// A held add this block's norm will not take runs alone first.
+			if pendX != nil && !g.foldTakes(l, R, voltaOnly, skip) {
+				addRes(pendX, pendY, bs.x)
+				pendX, pendY = nil, nil
+			}
 			// Gemma 3n: every stream's prediction, the block run on the active
 			// one (altup.go).
 			if l.altRouter != nil {
@@ -7359,16 +7371,30 @@ func (g *devTier) layersSession(s backend.Session) {
 				} else if voltaOnly && !skip["norm"] {
 					// The norm writes the first projection's binary16 operand
 					// too, and the memo tells its GEMM so.
-					nk, conv := backend.Kernel(nil), backend.Kernel(nil)
-					if l.nAttnB == nil && l.nAttn != nil && l.altRouter == nil {
-						nk, conv = g.rmsF16For(bs, l.mvq, R, false)
-					}
-					if nk != nil {
-						laRows(nk, ain, l.nAttn, bs.h, g.f16Buf)
-						actMemoK, actMemoSrc = conv, bs.h
+					if pendX != nil {
+						// The previous block's residual add and this norm, one
+						// launch: x = pendX + pendY and h = RMSNorm(x).
+						y := pendY
+						if addNormBroken {
+							y = pendX
+						}
+						laRows(pendNorm, pendX, y, l.nAttn, bs.x, bs.h, g.f16Buf)
+						actMemoK, actMemoSrc = pendConv, bs.h
+						pendX, pendY = nil, nil
 						g.NormF16++
+						g.AddNormFolded++
 					} else {
-						norm(ain, l.nAttn, l.nAttnB)
+						nk, conv := backend.Kernel(nil), backend.Kernel(nil)
+						if l.nAttnB == nil && l.nAttn != nil && l.altRouter == nil {
+							nk, conv = g.rmsF16For(bs, l.mvq, R, false)
+						}
+						if nk != nil {
+							laRows(nk, ain, l.nAttn, bs.h, g.f16Buf)
+							actMemoK, actMemoSrc = conv, bs.h
+							g.NormF16++
+						} else {
+							norm(ain, l.nAttn, l.nAttnB)
+						}
 					}
 					fsrc = bs.h
 					g.QuantSkipped++
@@ -8613,7 +8639,11 @@ func (g *devTier) layersSession(s backend.Session) {
 			} else if l.k3 != nil {
 				g.k3PostFFN(lc, bs, R, fout)
 			} else if !skip["add"] && !ffnFused {
-				addRes(bs.x2, fout, bs.x)
+				if nk, conv := g.foldAddNorm(bs, l, li, hi, R, voltaOnly, scaled, persist, fout, skip); nk != nil {
+					pendX, pendY, pendNorm, pendConv = bs.x2, fout, nk, conv
+				} else {
+					addRes(bs.x2, fout, bs.x)
+				}
 			}
 			// BERT's output norm, over x + mlp, out of place and back.
 			if l.nResid != nil && !skip["norm"] {
@@ -8644,6 +8674,9 @@ func (g *devTier) layersSession(s backend.Session) {
 				lc.la(bs.scaleX, R*p.NEmbd, bs.x, l.outScale, bs.h)
 				lc.la(bs.scaleX, R*p.NEmbd, bs.h, bs.one, bs.x)
 			}
+		}
+		if pendX != nil {
+			addRes(pendX, pendY, bs.x)
 		}
 		if head != nil && (rag != nil || allRows) {
 			// The output norm, the projection of the rows that want logits
