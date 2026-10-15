@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 )
 
@@ -16,9 +17,9 @@ func TestADeviceCallFromInsideASessionCompletes(t *testing.T) {
 	if n, err := backend.CUDACount(); err != nil || n < 1 {
 		t.Skip("no CUDA device here:", err)
 	}
-	d, err := backend.OpenCUDA(0)
+	d, err := backend.OpenCUDA(testdevices.Ordinal(t, "cuda", 0))
 	if err != nil {
-		t.Fatalf("OpenCUDA(0): %v", err)
+		t.Fatalf("OpenCUDA: %v", err)
 	}
 	defer d.Close()
 	victim, err := d.Alloc(256)
@@ -79,9 +80,9 @@ func TestCUDASessionRunsOnTheCallersThread(t *testing.T) {
 	if n, err := backend.CUDACount(); err != nil || n < 1 {
 		t.Skip("no CUDA device here:", err)
 	}
-	d, err := backend.OpenCUDA(0)
+	d, err := backend.OpenCUDA(testdevices.Ordinal(t, "cuda", 0))
 	if err != nil {
-		t.Fatalf("OpenCUDA(0): %v", err)
+		t.Fatalf("OpenCUDA: %v", err)
 	}
 	defer d.Close()
 	b, err := d.Alloc(64)
@@ -126,7 +127,7 @@ func TestCUDAPostingIsPerDevice(t *testing.T) {
 	}
 	for _, postedFirst := range []bool{true, false} {
 		open := func(posted bool) backend.Device {
-			d, err := backend.OpenCUDAWith(0, backend.Opts{CUDAPosted: posted})
+			d, err := backend.OpenCUDAWith(testdevices.Ordinal(t, "cuda", 0), backend.Opts{CUDAPosted: posted})
 			if err != nil {
 				t.Fatalf("OpenCUDAWith(0): %v", err)
 			}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
 
@@ -23,7 +24,7 @@ import (
 //	                    both requests as one DecideBatch, the server's path)
 //	JITLLM_AB_MODELS    comma list of name=path (a .gguf or .jlm); a name
 //	                    starting "embed" is an embedder, embedding JITLLM_AB_TEXT
-//	JITLLM_AB_DEVICE    the device spec (default cuda:0)
+//	JITLLM_TEST_DEVICES the device (default cuda:0)
 //	JITLLM_AB_ROUNDS    paired rounds (default 20), after JITLLM_AB_SOAK (default 3)
 //	JITLLM_AB_BLOCKS    the most blocks a Decider offers the device (default -1, every block)
 //
@@ -39,10 +40,7 @@ func TestDecisionDeviceAB(t *testing.T) {
 	if arms == "" {
 		t.Skip("a measurement harness: JITLLM_DECIDE_AB names its arms")
 	}
-	spec := os.Getenv("JITLLM_AB_DEVICE")
-	if spec == "" {
-		spec = "cuda:0"
-	}
+	spec := testdevices.One("cuda:0")
 	rounds, soak := envInt("JITLLM_AB_ROUNDS", 20), envInt("JITLLM_AB_SOAK", 3)
 	text := os.Getenv("JITLLM_AB_TEXT")
 	if text == "" {

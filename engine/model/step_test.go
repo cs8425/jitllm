@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/ir"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
@@ -33,7 +34,7 @@ func TestStepAcrossSessionsMatchesEachAlone(t *testing.T) {
 	// Every backend this host has: the step's matvecs are chosen per device
 	// (an integer matrix unit, sm_70's tensor cores, neither), and a gate that
 	// asks for one backend covers none of the others (RULE 11d).
-	// JITLLM_STEP_DEVICES names them where a host's default index is not the
+	// JITLLM_TEST_DEVICES names them where a host's default index is not the
 	// card to use.
 	for _, spec := range stepDevices() {
 		t.Run(spec, func(t *testing.T) { stepAcrossSessions(t, m, spec) })
@@ -82,7 +83,7 @@ func stepAcrossSessions(t *testing.T, m *Model, spec string) {
 // (tier.Config.SharedRec: one state a slot, the step writing the device's
 // next-state scratch and a copy taking each row's home).
 //
-// It runs on every backend named in JITLLM_STEP_DEVICES (comma-separated,
+// It runs on every device named in JITLLM_TEST_DEVICES (comma-separated,
 // default "cuda:0,vulkan:0,metal"); one that does not open here is skipped by name.
 // JITLLM_STEP_HYBRID names another hybrid.
 func TestStepAcrossSessionsHybridMatchesEachAlone(t *testing.T) {
@@ -257,16 +258,10 @@ func openStepHybrid(t *testing.T) *Model {
 	return m
 }
 
-// stepDevices is the backends a device gate runs on: JITLLM_STEP_DEVICES,
-// comma-separated device specs, or one of each backend at index 0. Every
-// gate that sweeps backends reads it, so a shared box can confine them all
-// to one card (a bare "vulkan" takes whichever card Vulkan lists first).
-func stepDevices() []string {
-	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
-		return strings.Split(v, ",")
-	}
-	return []string{"cuda:0", "vulkan:0", "metal"}
-}
+// stepDevices is the backends a device gate runs on: JITLLM_TEST_DEVICES, or
+// one of each backend at index 0. Every gate that sweeps backends reads it, so
+// a shared box confines them all to the card it was given.
+func stepDevices() []string { return testdevices.Specs("cuda:0", "vulkan:0", "metal") }
 
 // hybridStepChecks is the selection a hybrid step gate demands: every linear
 // block of every joint step ran across sessions, the session that stepped

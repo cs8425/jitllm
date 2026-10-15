@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/metal"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
@@ -23,7 +24,7 @@ import (
 // names a model.
 //
 //	JITLLM_SPLIT_MODEL    the model (.gguf or .jlm)
-//	JITLLM_SPLIT_DEVICE   the device spec (default gpu)
+//	JITLLM_TEST_DEVICES   the device (default gpu)
 //	JITLLM_SPLIT_PROMPTS  prompts (default 4), JITLLM_SPLIT_TOKENS each (default 900)
 //
 // Per-kernel timing puts each Metal dispatch in a command buffer of its own,
@@ -34,10 +35,7 @@ func TestRaggedStepKernelSplit(t *testing.T) {
 	if path == "" {
 		t.Skip("a measurement harness: JITLLM_SPLIT_MODEL names its model")
 	}
-	spec := os.Getenv("JITLLM_SPLIT_DEVICE")
-	if spec == "" {
-		spec = "gpu"
-	}
+	spec := testdevices.One("gpu")
 	np, ntok := envInt("JITLLM_SPLIT_PROMPTS", 4), envInt("JITLLM_SPLIT_TOKENS", 900)
 	m, err := Open(jlmOf(t, path))
 	if err != nil {

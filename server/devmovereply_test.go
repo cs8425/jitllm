@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	v1 "github.com/jitllm/jitllm/server/gen/jitllm/v1"
 )
 
@@ -22,11 +23,8 @@ import (
 // reply before its target is ready, and a move that lands after the reply
 // proves nothing about a token boundary.
 func TestAMoveLandsBetweenTwoTokensOfAReply(t *testing.T) {
-	spec := os.Getenv("JITLLM_MOVE_DEVICES")
-	if spec == "" {
-		spec = "cuda:0,vulkan:1"
-	}
-	devs := strings.Split(spec, ",")
+	devs := testdevices.Take(t, 2, "cuda:0,vulkan:1")
+	spec := strings.Join(devs, ",")
 	name := os.Getenv("JITLLM_MOVE_REPLY_MODEL")
 	if name == "" {
 		name = "Llama-3.2-1B-Instruct-Q4_K_M.jlm"

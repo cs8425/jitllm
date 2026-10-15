@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"runtime"
 	"sync"
 	"testing"
@@ -50,7 +51,7 @@ func TestCloseThenSpawnThreads(t *testing.T) {
 // memory behind it, and the first Copy into it dereferenced nil. Each such
 // call must refuse, and a release must still be quiet.
 func TestAClosedCUDADeviceRefuses(t *testing.T) {
-	d, err := OpenCUDA(0)
+	d, err := OpenCUDA(testdevices.Ordinal(t, "cuda", 0))
 	if err != nil {
 		t.Skipf("no CUDA device: %v", err)
 	}

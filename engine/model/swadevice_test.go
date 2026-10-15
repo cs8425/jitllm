@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -88,8 +89,8 @@ func swaMedian(a, b [][]float32, from int) float64 {
 func swaTier(t *testing.T) *tier.GPU {
 	t.Helper()
 	o := append([]tier.Option{tier.WithDeviceTune(tier.TuneOff)}, testTierOpts(t)...)
-	if v := os.Getenv("JITLLM_TEST_DEVICES"); v != "" {
-		o = append(o, tier.WithDevices(v))
+	if testdevices.Selected() {
+		o = append(o, tier.WithDevices(testdevices.One("")))
 	}
 	g, err := tier.OpenWith(o...)
 	if err != nil || g == nil {

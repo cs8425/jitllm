@@ -8,7 +8,7 @@ import (
 )
 
 // TestClosingADeviceLeavesNoKernelOpen runs a latent-attention mixture and a
-// hybrid on each Vulkan device JITLLM_STEP_DEVICES names (vulkan:0 by default)
+// hybrid on each Vulkan device JITLLM_TEST_DEVICES names (vulkan:0 by default)
 // with every block placed, closes the tier, and demands that the device's own
 // Close found no kernel still open. vulkan.Ctx keeps a ledger of the kernels it
 // compiled, and a kernel nobody closed is a shader module, a pipeline, two
@@ -23,7 +23,7 @@ func TestClosingADeviceLeavesNoKernelOpen(t *testing.T) {
 		}
 	}
 	if len(devs) == 0 {
-		t.Skip("JITLLM_STEP_DEVICES names no Vulkan device, and the kernel ledger is Vulkan's -- this gate proved nothing")
+		t.Skip("JITLLM_TEST_DEVICES names no Vulkan device, and the kernel ledger is Vulkan's -- this gate proved nothing")
 	}
 	for _, name := range []string{"synth-deepseek", "synth-kimilinear"} {
 		t.Run(name, func(t *testing.T) {

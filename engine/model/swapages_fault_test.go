@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -17,10 +18,7 @@ import (
 // move or the decode fail: a gate that passes it cannot tell a window read
 // from a released page.
 func TestWindowReleaseGateDiscriminates(t *testing.T) {
-	specs := []string{"cuda", "vulkan", "metal"}
-	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
-		specs = strings.Split(v, ",")
-	}
+	specs := testdevices.Specs("cuda", "vulkan", "metal")
 	m, err := Open(jlmOf(t, testmodels.Path("synth-exaone4.gguf")), noTune)
 	if err != nil {
 		t.Fatal(err)

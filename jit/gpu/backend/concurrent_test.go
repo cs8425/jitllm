@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/ir"
 	"github.com/jitllm/jitllm/jit/gpu/metal"
@@ -20,6 +21,7 @@ import (
 // JITLLM_VIOLATE_CONCURRENT=1 tells the encoder every kernel writes nothing,
 // so no barrier goes in, which must fail.
 func TestConcurrentEncoderKeepsTheChain(t *testing.T) {
+	testdevices.Require(t, "metal")
 	gpuLock(t)
 	d, err := backend.OpenMetalWith(backend.Opts{Metal: metal.Opts{Concurrent: true}})
 	if err != nil {

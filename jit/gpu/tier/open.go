@@ -527,7 +527,7 @@ var (
 func allDevices(do backend.Opts) ([]backend.Device, error) {
 	out := append(cudaDevices(do), hipDevices(do)...)
 	out = append(out, vulkanGPUs(do)...)
-	if d, err := openMetal(do); err == nil {
+	if d, err := openMetal(enumerating(do)); err == nil {
 		out = append(out, d)
 	}
 	out = dropSecondAPI(out)
@@ -539,6 +539,7 @@ func allDevices(do backend.Opts) ([]backend.Device, error) {
 
 // cudaDevices opens every CUDA device that opens, by ordinal.
 func cudaDevices(do backend.Opts) []backend.Device {
+	do.Enumerating = true
 	var out []backend.Device
 	if n, err := cudaCount(); err == nil {
 		for i := 0; i < n; i++ {
@@ -552,6 +553,7 @@ func cudaDevices(do backend.Opts) []backend.Device {
 
 // hipDevices opens every HIP device that opens, by ordinal. No ROCm is none.
 func hipDevices(do backend.Opts) []backend.Device {
+	do.Enumerating = true
 	var out []backend.Device
 	for i := 0; i < hipCount(do.HIP); i++ {
 		if d, err := openHIP(i, do); err == nil {
@@ -568,6 +570,7 @@ func everyHIP(do backend.Opts) ([]backend.Device, error) {
 	if out := hipDevices(do); len(out) > 0 {
 		return out, nil
 	}
+	do.Enumerating = true
 	d, err := openHIP(0, do)
 	if err != nil {
 		return nil, err
@@ -578,6 +581,7 @@ func everyHIP(do backend.Opts) ([]backend.Device, error) {
 // vulkanGPUs opens every Vulkan device that computes and is not a software
 // rasteriser.
 func vulkanGPUs(do backend.Opts) []backend.Device {
+	do.Enumerating = true
 	var out []backend.Device
 	if infos, err := vulkanDevices(); err == nil {
 		for _, in := range infos {
@@ -598,6 +602,7 @@ func everyCUDA(do backend.Opts) ([]backend.Device, error) {
 	if out := cudaDevices(do); len(out) > 0 {
 		return out, nil
 	}
+	do.Enumerating = true
 	d, err := openCUDA(0, do)
 	if err != nil {
 		return nil, err
@@ -612,6 +617,7 @@ func everyVulkan(do backend.Opts) ([]backend.Device, error) {
 	if out := vulkanGPUs(do); len(out) > 0 {
 		return out, nil
 	}
+	do.Enumerating = true
 	d, err := openVulkan("", do)
 	if err != nil {
 		return nil, err
@@ -1034,4 +1040,10 @@ func (g *GPU) arenaReserved() uint64 {
 		return 0
 	}
 	return g.Config.arena.Limit()
+}
+
+// enumerating is do marked as part of a device search.
+func enumerating(do backend.Opts) backend.Opts {
+	do.Enumerating = true
+	return do
 }

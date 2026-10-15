@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/jitllm/jitllm/engine/nn"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -103,10 +104,7 @@ func hybridBatchedPrefill(t *testing.T, m *Model) {
 		st := m.NewState(plen + len(forced) + 1)
 		defer st.Close()
 		if dev {
-			spec := os.Getenv("JITLLM_HYBRID_DEVICES")
-			if spec == "" {
-				spec = "gpu:0"
-			}
+			spec := testdevices.One("gpu:0")
 			g, err := tier.OpenWith(tier.WithDevices(spec), tier.WithDeviceTune(tier.TuneOff),
 				tier.WithPoisonScratch(true),
 				tier.WithConfig(func(cf *tier.Config) {
@@ -160,7 +158,7 @@ func hybridBatchedPrefill(t *testing.T, m *Model) {
 
 	// The fused rule must have run on CUDA (which always has a subgroup), or
 	// this says nothing about kernels.GatedDeltaFused.
-	if spec := os.Getenv("JITLLM_HYBRID_DEVICES"); (spec == "" || strings.HasPrefix(spec, "cuda")) &&
+	if spec := testdevices.One("gpu:0"); (spec == "gpu:0" || strings.HasPrefix(spec, "cuda")) &&
 		(rows.st.LinearFused == 0 || bat.st.LinearFused == 0) {
 		t.Fatalf("recurrent blocks through the fused rule: %d row by row, %d batched -- CUDA "+
 			"should take it on both arms (%s)", rows.st.LinearFused, bat.st.LinearFused, bat.err)

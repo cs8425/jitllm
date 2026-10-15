@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/internal/testmodels/fresh"
 	"github.com/jitllm/jitllm/server"
@@ -66,10 +67,7 @@ func TestDemoRelocatesAStreamingReplyOnARealService(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		testmodels.Missing(t, "MODEL MISSING: %v (set JITLLM_MODELS to the model directory) -- this gate proved nothing", err)
 	}
-	devs := []string{"cuda:0", "vulkan:1"}
-	if v := os.Getenv("JITLLM_MOVE_DEVICES"); v != "" {
-		devs = strings.Split(v, ",")
-	}
+	devs := testdevices.Take(t, 2, "cuda:0,vulkan:1")
 	e := server.New(server.Config{Version: "test", NoMemCache: true})
 	t.Cleanup(e.Close)
 	if _, err := e.LoadModel(server.LoadOptions{Path: path, ModelID: "dev", DeviceIDs: devs}); err != nil {

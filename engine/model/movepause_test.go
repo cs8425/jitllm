@@ -19,7 +19,7 @@ import (
 // the host path (WithDirectMoves(false): the history home and up again, the
 // target prepared inside the pause), alternated in one process. A measurement,
 // not a gate (RULE 4): JITLLM_MOVE_PAUSE_MODEL names the model and opts in,
-// JITLLM_MOVE_DEVICES the two devices, JITLLM_MOVE_ROUNDS the rounds (3).
+// JITLLM_TEST_DEVICES the two devices, JITLLM_MOVE_ROUNDS the rounds (3).
 //
 // Every arm is teacher-forced on an unmoved control's tokens in the same
 // round and held to it: no prompt row computed again, and the logits bit for
@@ -29,7 +29,7 @@ func TestMovePause(t *testing.T) {
 	if name == "" {
 		t.Skip("JITLLM_MOVE_PAUSE_MODEL is unset: a measurement, run on request")
 	}
-	a, b := moveDevices()
+	a, b := moveDevices(t)
 	rounds := 3
 	if v, err := strconv.Atoi(os.Getenv("JITLLM_MOVE_ROUNDS")); err == nil && v > 0 {
 		rounds = v

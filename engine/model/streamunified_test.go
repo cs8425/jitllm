@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -35,7 +36,7 @@ func TestStreamedContainerOnAUnifiedDevice(t *testing.T) {
 
 	var g *tier.GPU
 	var name string
-	for _, c := range unifiedCandidates {
+	for _, c := range testdevices.Within(unifiedCandidates) {
 		d, err := tier.OpenWith(tier.WithDevices(c+"="+strconv.FormatUint(third, 10)),
 			tier.WithDeviceTune(tier.TuneOff), tier.WithArena(1<<30))
 		if err != nil || d == nil {

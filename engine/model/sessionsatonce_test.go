@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -172,7 +173,7 @@ func TestSessionsStepAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	for _, spec := range []string{"cuda:0", "vulkan:0", "vulkan:1", "metal"} {
+	for _, spec := range testdevices.Specs("cuda:0", "vulkan:0", "vulkan:1", "metal") {
 		t.Run(spec, func(t *testing.T) {
 			stepAtOnce(t, m, atOncePrompts(m), spec, m.Cfg.NLayer, true)
 		})
@@ -193,7 +194,7 @@ func TestSessionsStepAtOnceHybrid(t *testing.T) {
 		defer m.Close()
 		nl := m.Cfg.NLayer
 		for _, blocks := range []int{nl, nl / 2} {
-			for _, spec := range []string{"cuda:0", "vulkan:0", "vulkan:1", "metal"} {
+			for _, spec := range testdevices.Specs("cuda:0", "vulkan:0", "vulkan:1", "metal") {
 				t.Run(fmt.Sprintf("%s/%d-of-%d/%s", o.name, blocks, nl, spec), func(t *testing.T) {
 					stepAtOnce(t, m, hybridPrompts, spec, blocks, false)
 				})
@@ -295,7 +296,7 @@ func TestSessionsPageAtOnce(t *testing.T) {
 	defer m.Close()
 	prompts := atOncePrompts(m)
 	const seq, gen = 256, 24
-	for _, spec := range []string{"cuda:0", "vulkan:0", "metal"} {
+	for _, spec := range testdevices.Specs("cuda:0", "vulkan:0", "metal") {
 		t.Run(spec, func(t *testing.T) {
 			g := atOnceTier(t, spec, nil)
 			for li := range m.Cfg.NLayer {
@@ -398,7 +399,7 @@ func TestSessionsEvictAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	for _, spec := range []string{"cuda:0", "vulkan:0", "metal"} {
+	for _, spec := range testdevices.Specs("cuda:0", "vulkan:0", "metal") {
 		t.Run(spec, func(t *testing.T) {
 			turns := evictAtOnce(t, m, spec, false)
 			both := evictAtOnce(t, m, spec, true)
@@ -553,7 +554,7 @@ func TestSessionsRelocateAtOnce(t *testing.T) {
 	// half outright and its way back prepares them again -- allocations and
 	// uploads beside the other's submissions, not only its own history going.
 	for _, half := range []bool{false, true} {
-		for _, spec := range []string{"cuda:0", "vulkan:0", "metal"} {
+		for _, spec := range testdevices.Specs("cuda:0", "vulkan:0", "metal") {
 			t.Run(fmt.Sprintf("%s/half=%v", spec, half), func(t *testing.T) {
 				relocateAtOnce(t, m, atOncePrompts(m), spec, half, !half)
 			})
@@ -573,7 +574,7 @@ func TestSessionsRelocateAtOnceHybrid(t *testing.T) {
 		m := hybridModelOpt(t, o.opt)
 		defer m.Close()
 		for _, half := range []bool{false, true} {
-			for _, spec := range []string{"cuda:0", "vulkan:0", "metal"} {
+			for _, spec := range testdevices.Specs("cuda:0", "vulkan:0", "metal") {
 				t.Run(fmt.Sprintf("%s/%s/half=%v", o.name, spec, half), func(t *testing.T) {
 					relocateAtOnce(t, m, hybridPrompts, spec, half, false)
 				})
@@ -689,7 +690,7 @@ func TestModelsAndSessionsAtOnce(t *testing.T) {
 		ms = append(ms, m)
 	}
 	const seq = 256
-	for _, spec := range []string{"cuda:0", "vulkan:0", "metal"} {
+	for _, spec := range testdevices.Specs("cuda:0", "vulkan:0", "metal") {
 		t.Run(spec, func(t *testing.T) {
 			var gs []*tier.GPU
 			for range ms {

@@ -75,6 +75,15 @@ func HIPMissing(c hip.Config) string {
 // no ROCm at all, is an error naming the cause: a caller who asked for a HIP
 // device by name gets it or a reason, never another backend.
 func OpenHIPWith(ord int, o Opts) (Device, error) {
+	if ord >= 0 || o.Enumerating {
+		var err error
+		if ord, err = admit("amdgcn", ord, o.Enumerating); err != nil {
+			return nil, err
+		}
+	}
+	if ord < 0 && o.Enumerating {
+		ord = 0 // the default pick
+	}
 	rt, err := hipRuntime(o.HIP)
 	if err != nil {
 		return nil, err
@@ -109,7 +118,7 @@ func openHIP(o Opts) (Device, error) {
 	if HIPCount(o.HIP) == 0 {
 		return nil, fmt.Errorf("backend: hip: %s", HIPMissing(o.HIP))
 	}
-	return OpenHIPWith(0, o)
+	return OpenHIPWith(-1, o)
 }
 
 // Name is ordinal, card and arch, as CUDA's is ordinal, card and target.

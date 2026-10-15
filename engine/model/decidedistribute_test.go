@@ -16,7 +16,7 @@ import (
 // models: the device-to-device move (State.MoveBlocks) mid-prompt and between
 // questions, blocks split across two cards and across the host and two cards,
 // and a batch of requests against each alone. The two devices are
-// JITLLM_MOVE_DEVICES' (moveDevices): two cards of one backend run the same
+// JITLLM_TEST_DEVICES' first two (moveDevices): two cards of one backend run the same
 // kernels, so a move between them is held bit for bit, and two backends to
 // the reduction-order band.
 
@@ -24,7 +24,7 @@ import (
 // with t.
 func moveTier(t *testing.T) (*tier.GPU, string, string) {
 	t.Helper()
-	a, b := moveDevices()
+	a, b := moveDevices(t)
 	g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(a + "," + b),
 		tier.WithDeviceTune(tier.TuneOff)}, testTierOpts(t)...)...)
 	if err != nil || g == nil {
@@ -228,7 +228,7 @@ func labelWorst(want, got []float32) float64 {
 func TestDecisionDistributes(t *testing.T) {
 	for _, c := range decisionCases {
 		t.Run(c.name, func(t *testing.T) {
-			a, b := moveDevices()
+			a, b := moveDevices(t)
 			hm := openDecision(t, c.gguf, c.kind, noTune)
 			if !hm.IsEncoder() {
 				hm.SetKVF16(false)

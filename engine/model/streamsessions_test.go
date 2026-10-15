@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -29,7 +30,7 @@ func TestManySessionsStreamTheirHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	for _, spec := range []string{"cuda:0", "vulkan:0"} {
+	for _, spec := range testdevices.Specs("cuda:0", "vulkan:0") {
 		t.Run(spec, func(t *testing.T) {
 			manySessionsStream(t, m, spec)
 		})
