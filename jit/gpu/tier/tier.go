@@ -183,7 +183,7 @@ type Config struct {
 	// matrices over the one operand and writes act(gate)*up: the bits the
 	// gate's launch and up's gated launch write on PTX (kernels.Gate2Exact),
 	// the reduction-order band elsewhere. On by default, taken per shape where
-	// this device's tuner finds it faster (tuneGateUp2).
+	// this device's tuner finds it faster (tuneFFN).
 	GateUp2 bool
 	// QKVGemm runs a prompt chunk's q, k and v as one GemmVoltaSegments grid
 	// instead of three binary16 GEMMs (each free to split k and reduce). Off
@@ -529,6 +529,11 @@ type Config struct {
 	// act(gate)*up and quantize it in its prologue: three launches where there
 	// were four, every row reduced as before. Off by default.
 	GateUpFuse bool
+	// FFNForm forces the recipe every dense gated FFN runs (recipe.go):
+	// FFNTuned, the zero value, takes the per-shape verdict tuneFFN timed on
+	// this card, or Gate2 where nothing was timed. A forced recipe a block
+	// cannot express runs the next one down the chain (gate2in, gate2, two).
+	FFNForm FFNForm
 	// NoGraph issues the token's launches one driver call at a time instead of
 	// replaying a captured graph: the other arm of that comparison, a field so
 	// both arms can be live in one process.
@@ -740,6 +745,12 @@ type Stats struct {
 	// GateUp2Runs counts gated FFNs whose gate and up ran as one Gate2
 	// launch (Config.GateUp2).
 	GateUp2Runs int
+	// Gate2InRuns counts gated FFNs whose norm, gate and up ran as one
+	// launch (the gate2in recipe).
+	Gate2InRuns int
+	// FFNTimed and FFNKept count the FFN shape keys tuneFFN decided on this
+	// card and those whose verdict is not the device's default recipe.
+	FFNTimed, FFNKept int
 	// PersistLaunches counts persistent kernels launched (Config.Persist),
 	// PersistParts the per-op launches they ran, PersistPhases their
 	// grid-barrier-separated phases, PersistCompiles the compositions built
@@ -1230,6 +1241,9 @@ func (s *Stats) add(o Stats) {
 	}
 	s.RagGateFused += o.RagGateFused
 	s.GateUp2Runs += o.GateUp2Runs
+	s.Gate2InRuns += o.Gate2InRuns
+	s.FFNTimed += o.FFNTimed
+	s.FFNKept += o.FFNKept
 	s.RagHeadOne += o.RagHeadOne
 	s.SampleReads += o.SampleReads
 	s.PickReads += o.PickReads
@@ -1795,9 +1809,11 @@ type devShared struct {
 	// the prologue measured faster than the two launches on this card.
 	// actInTrial makes fuseActIn build every candidate for that measurement.
 	actInWin map[string]bool
-	// gu2Win is tuneGateUp2's verdict per up-projection shape: Gate2 or
+	// gu2Win is tuneFFN's verdict per up-projection shape: Gate2 or
 	// the two launches.
-	gu2Win     map[splitKey]bool
+	gu2Win map[splitKey]bool
+	// ffnWin is tuneFFN's verdict per FFN shape key (recipe.go).
+	ffnWin     map[string]FFNForm
 	actInTrial bool
 	ragKerns   map[moeKernKey]backend.Kernel // a batched mixture's grouped matvecs (moegroup.go)
 	moeVolta   map[moeVoltaKey]moeVoltaMV    // their tensor-core twins; see voltaGroupedMV
@@ -2106,7 +2122,7 @@ func New(slots []Slot, options ...Option) (*GPU, error) {
 	// (PersistByDefaultForTest), so the regression gates run through it.
 	cfg.Persist = persistDefault
 	cfg.PersistDeps = persistDepsDefault
-	// Gate2 is allowed by default; tuneGateUp2 takes it per shape where it
+	// Gate2 is allowed by default; tuneFFN takes it per shape where it
 	// measures faster. On a V100 it read 1.008-1.028 of the two launches on
 	// Llama 1B, 3B and 8B.
 	cfg.GateUp2 = true

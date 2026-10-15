@@ -199,6 +199,15 @@ func gpuOptions() []tier.Option {
 	if set("JITLLM_GPU_GATEUP") {
 		o = append(o, tier.WithGateUpFuse(str("JITLLM_GPU_GATEUP") != "0"))
 	}
+	// JITLLM_GPU_FFN forces the dense gated FFN's recipe (tier.WithFFNForm):
+	// two, gate2, gate2in or gu; unset leaves it to the per-card trial.
+	if set("JITLLM_GPU_FFN") {
+		f, err := tier.ParseFFNForm(str("JITLLM_GPU_FFN"))
+		if err != nil {
+			panic(err)
+		}
+		o = append(o, tier.WithFFNForm(f))
+	}
 	if str("JITLLM_GPU_PERSIST") == "deps" {
 		o = append(o, tier.WithPersistDeps(true, int(num("JITLLM_GPU_PERSIST_GRID"))))
 	} else if set("JITLLM_GPU_PERSIST") {

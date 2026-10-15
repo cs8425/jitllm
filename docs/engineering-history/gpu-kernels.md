@@ -6510,6 +6510,36 @@ The 1B gains 0.7-0.8%; the 8B's GEMMs hide it inside the noise (and pull the
 card off its boost clock, which the 1B holds). On by default;
 `JITLLM_GPU_NO_ADDNORM=1` is the other arm.
 
+## The FFN's recipes, timed per card
+
+The first composer slice (`docs/design/composer.md`): the dense gated FFN's
+forms -- two launches, Gate2, Gate2 with the norm's prologue (gate2in), and
+gate+up with down forming the product (gu) -- are recipes of one site,
+timed per shape key norm through down by the one trial (`timeRecipes`),
+which the operand-prologue tuner now runs on too; `tuneFFN` replaces
+`tuneGateUp2`. gate2in is the recipe found by composition: behind a
+residual the attention output's launch already added, the FFN's
+RMSNormQuantRows goes and Gate2 builds its operand itself, one launch where
+there were two. Bit-identical on PTX (`backend.TestGate2InIsTheTwoLaunches`,
+96 cases; `model.TestFFNRecipesMatchTwoLaunches` every block placed with and
+without the graph and at a half seam; violation `TestGate2InSeesASwap`,
+384768 of 513024 logits move). `TestDecodeDoesNotAllocate` holds at zero on
+CUDA.
+
+V100 (sm_70, CUDA, GPU 1), `verify -ab ffn` (gate2in forced against Gate2
+forced), n=24 interleaved, -n 64, `JITLLM_GPU_TUNE=1`, A/A first; SM clock
+the modal reading of a 500 ms trace over each arm, 1530 MHz throughout.
+Ratios >1 mean gate2in is faster:
+
+    model                  A/A               gate2in vs Gate2   IQR
+    Llama-3.2-1B Q4_K_M    0.9989 / 1.0012   1.0121 / 1.0074    2.0% / 4.1%
+
+(An earlier binary of the same kernels read A/A 0.9941 / 0.9987 and
+1.0136 / 1.0102.) The tuner kept gate2in on both of the 1B's FFN keys. The
+3B and 8B were not measured: the card's disks had no room for their
+version-30 containers. The win is the launch and the h/a round trip it
+removes, about 1% of a 1B token, smaller as the FFN's weight traffic grows.
+
 ## q, k and v as one prompt GEMM grid
 
 The 8B prompt profile put k and v (1024x4096) at split 2 with a reduce each:
