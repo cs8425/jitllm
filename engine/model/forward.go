@@ -622,6 +622,9 @@ type State struct {
 	// tail then copied out; rowsTok is where a greedy one's tokens land.
 	rowsLog, rowsHid []float32
 	rowsTok          []int32
+	// rowsPos is a stream model's speculation step's positions and slots
+	// (stepRowsStreams).
+	rowsPos []int
 
 	// emb is set for the length of one Embedder.Embed on a decoder embedding
 	// model: prefill then pools the final residual instead of projecting it

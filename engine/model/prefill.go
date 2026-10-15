@@ -1283,6 +1283,9 @@ func (s *State) hostRows(li, slot, base, p0, n, chunkRows int, bidir bool) error
 		s.growQ4E(chunkRows)
 		x := s.bx[:n*c.ResidW()]
 		if c.NGramAt(li) {
+			if s.rows != nil {
+				s.rows.ngBase = base
+			}
 			if err := s.ngramApply(li, l, x, n, nil, func(int) (*State, int) { return s, slot },
 				func(i int) int32 { return s.q4.rid[i] }); err != nil {
 				return err
