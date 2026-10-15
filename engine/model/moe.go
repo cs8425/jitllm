@@ -286,9 +286,14 @@ func (s *State) moeFFN(l *layer, ord []int32, h, out []float32, dw []float32) (b
 	// One SwiGLU over every expert. The slack between rows and moePad is
 	// zero and the activation maps zero to zero, so it stays zero.
 	n := m * s.moePad
-	if l.ungatedExp {
+	// A gated bank's SwiGLU goes into the down projections' quantize region
+	// (MatVecPackedGatherAct): one pool region fewer a call, the same kernel
+	// and bits. Not while tracing, which reads the activation between.
+	fuseAct := !l.ungatedExp && s.m.tracer == nil
+	switch {
+	case l.ungatedExp:
 		s.actAll(s.moeGate[:n], c.Act)
-	} else {
+	case !fuseAct:
 		s.actmulAll(s.moeGate[:n], s.moeUp[:n], c.Act)
 	}
 	s.traceExperts(ord, "moe_act", s.moeGate, s.moePad, rows)
@@ -317,7 +322,15 @@ func (s *State) moeFFN(l *layer, ord []int32, h, out []float32, dw []float32) (b
 		for j := 0; j < m; j++ {
 			os = append(os, s.moeDown[j*ew:(j+1)*ew])
 		}
-		ok = s.jit.MatVecPackedGather(os, d0.typ, ps, s.moeGate, s.moePad, ew, rows)
+		if fuseAct {
+			ok = s.jit.MatVecPackedGatherAct(os, d0.typ, ps, s.moeGate, s.moeUp, c.Act, s.moePad, ew, rows)
+		} else {
+			ok = s.jit.MatVecPackedGather(os, d0.typ, ps, s.moeGate, s.moePad, ew, rows)
+		}
+	}
+	if !ok && fuseAct {
+		// Declined before it touched an activation: the SwiGLU on its own.
+		s.actmulAll(s.moeGate[:n], s.moeUp[:n], c.Act)
 	}
 	if !ok {
 		// The per-expert down, for a non-uniform or unpacked bank;

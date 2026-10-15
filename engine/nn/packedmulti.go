@@ -70,6 +70,22 @@ func (f *JIT) MatVecPackedMulti(outs [][]float32, t quant.Type, ps []*Packed, x 
 // It shares MatMulPacked's activation scratch (growPackedMM) and leaves f.q and
 // f.pairs alone, so MatVecPacked's cached activation survives the call.
 func (f *JIT) MatVecPackedGather(outs [][]float32, t quant.Type, ps []*Packed, x []float32, xstride, nrows, k int) bool {
+	return f.matVecPackedGather(outs, t, ps, x, nil, 0, xstride, nrows, k)
+}
+
+// MatVecPackedGatherAct is MatVecPackedGather over act(x)*up, each activation
+// j's gated product taken in place in x (up at the same stride) inside the
+// region that quantizes it: a mixture's down projections after their SwiGLU,
+// one pool region fewer than the activation and the gather apart, with the
+// same generated activation kernel and so the same bits.
+func (f *JIT) MatVecPackedGatherAct(outs [][]float32, t quant.Type, ps []*Packed, x, up []float32, act ActKind, xstride, nrows, k int) bool {
+	if gatedIndex(act) < 0 || len(up) < len(ps)*xstride-xstride+k {
+		return false
+	}
+	return f.matVecPackedGather(outs, t, ps, x, up, act, xstride, nrows, k)
+}
+
+func (f *JIT) matVecPackedGather(outs [][]float32, t quant.Type, ps []*Packed, x, up []float32, act ActKind, xstride, nrows, k int) bool {
 	m := len(ps)
 	if f == nil || m < 2 || len(outs) != m || nrows <= 0 || k <= 0 ||
 		xstride < k || len(x) < (m-1)*xstride+k {
@@ -98,10 +114,10 @@ func (f *JIT) MatVecPackedGather(outs [][]float32, t quant.Type, ps []*Packed, x
 	tq := f.quantStart()
 	// One region for every activation's quantize, where there were m.
 	gq := &f.hot.gatherQuant
-	gq.qk, gq.t, gq.x = f.quantKernel(t), t, x
+	gq.qk, gq.t, gq.x, gq.up, gq.act = f.quantKernel(t), t, x, up, act
 	gq.xstride, gq.k, gq.nb, gq.half, gq.win = xstride, k, nb, half, f.actWindow
 	f.pool.Do(m, max(1, m/(4*f.pool.N())), f.hot.gatherQuantFn(f))
-	gq.x = nil
+	gq.x, gq.up = nil, nil
 	f.quantSince(tq)
 
 	groups := nrows / grpOf(t)
@@ -217,8 +233,14 @@ func (h *hotRegions) gatherQuantFn(f *JIT) func(worker, lo, hi int) {
 				if j.half > 0 {
 					hs = f.mhalf[i*j.half : (i+1)*j.half]
 				}
+				xi := j.x[i*j.xstride : i*j.xstride+k]
+				if j.up != nil {
+					// The gated activation in place, in the quantize's own
+					// region (MatVecPackedGatherAct).
+					ActMul32JIT(xi, j.up[i*j.xstride:i*j.xstride+k], j.act)
+				}
 				j.qk.Run(j.t, f.mq[i*k:(i+1)*k], f.mpairs[i*2*nb:(i+1)*2*nb], hs, f.quantScratch(wk),
-					j.x[i*j.xstride:i*j.xstride+k], k, 0, nb, j.win)
+					xi, k, 0, nb, j.win)
 			}
 		}
 	}
