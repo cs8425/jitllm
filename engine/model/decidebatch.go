@@ -243,18 +243,22 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 	if len(jobs) == 0 {
 		return nil
 	}
-	if len(jobs) == 1 && d.violation != "batch-alone" {
+	if (len(jobs) == 1 || d.nonCausal()) && d.violation != "batch-alone" {
 		// One prompt has no rows to share a step with: it runs as Decide
 		// runs it, on the Decider's own State, where the head reads back
 		// the label logits alone (forwardSpans) rather than a row's every
-		// logit, and no batch session is stepped.
-		j := jobs[0]
-		s, err := d.forward(j.ids, j.groups, 0)
-		if err != nil {
-			return err
+		// logit, and no batch session is stepped. A non-causal model's
+		// prompts each run so too: a batch slot's rows attend causally
+		// (bidirRuns), which is not its graph.
+		d.input = 0
+		for _, j := range jobs {
+			s, err := d.forward(j.ids, j.groups, 0)
+			if err != nil {
+				return err
+			}
+			j.scores = append(j.scores[:0], s...)
+			d.input += len(j.ids)
 		}
-		j.scores = append(j.scores[:0], s...)
-		d.input = len(j.ids)
 		return nil
 	}
 	sc, err := d.batchSession(min(len(jobs), decisionBatchRows))
@@ -290,7 +294,7 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 // puts a batch of one into the batch session, turns it off with the rest.
 func (d *Decider) batchAlone() bool {
 	return d.kind != jlm.DecisionLaya && d.kind != jlm.DecisionClef && d.st != nil &&
-		d.st.GPULayers() > 0 && d.violation != "device-batch" && d.violation != "batch-alone"
+		(d.st.GPULayers() > 0 || d.nonCausal()) && d.violation != "device-batch" && d.violation != "batch-alone"
 }
 
 // layaPackRows is the most rows a packed encoder pass holds: a device's

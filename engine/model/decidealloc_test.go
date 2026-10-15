@@ -203,7 +203,8 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 			t.Fatal(err)
 		}
 	})
-	if !m.IsEncoder() && d.kind != jlm.DecisionClef {
+	// A non-causal model's prompts run one at a time (runJobs).
+	if !m.IsEncoder() && d.kind != jlm.DecisionClef && !d.nonCausal() {
 		st := d.BatchStats()
 		if st.Steps == st0.Steps || st.MaxSeqs < 2 {
 			t.Fatalf("the batch ran %d steps, at most %d prompts in one: it was not batched", st.Steps-st0.Steps, st.MaxSeqs)
