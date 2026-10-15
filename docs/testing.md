@@ -222,6 +222,14 @@ How it holds (`internal/testdevices`, `backend.Restrict`):
   part of what it asserts skips unless they are selected
   (`testdevices.Require`). `cuda:2,vulkan:2` is the pair for the move gates.
 
+One thing a selection cannot do: with a Vulkan device selected, the loader's
+enumeration makes the NVIDIA driver attach a graphics context to card 0 for
+as long as the process lives, whichever card is selected (measured with
+`nvidia-smi`: an enumeration-only process shows a `G` entry on GPU 0). A
+selection with no Vulkan device enumerates nothing and touches no other card;
+a selection with one (`vulkan:N`) pays that context on card 0. CUDA opens are
+exact.
+
 A test takes its device list from the helpers, never from a literal:
 `Specs(defaults...)` for a sweep, `One(def)` for one device, `Spec(def)` for a
 list a tier places blocks over, `Take(t, n, def)` for n distinct devices,

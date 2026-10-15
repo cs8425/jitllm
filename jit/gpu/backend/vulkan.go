@@ -96,7 +96,16 @@ func OpenVulkanWith(sel string, o Opts) (Device, error) {
 // VulkanDevices enumerates the Vulkan devices on this host without opening one,
 // which is what a caller choosing where to put blocks needs before it pays for
 // a logical device per candidate. It is the counterpart of CUDACount.
-func VulkanDevices() ([]vulkan.Info, error) { return vulkan.List() }
+//
+// Under a Restriction that holds no Vulkan device it enumerates nothing: the
+// NVIDIA driver attaches a graphics context to card 0 for the length of an
+// enumeration, which a process confined to another card must not make.
+func VulkanDevices() ([]vulkan.Info, error) {
+	if _, err := admit("spirv", -1, true); err != nil {
+		return nil, err
+	}
+	return vulkan.List()
+}
 
 func (v *vkDev) Name() string { return v.c.Name() }
 

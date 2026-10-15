@@ -45,7 +45,7 @@ func TestCUDAOrdinalZeroIsWhatOpenReturns(t *testing.T) {
 	}
 	// The name must identify a card, not a capability: two cards share a
 	// PTX target.
-	if !strings.HasPrefix(name, "#0 ") {
+	if !strings.HasPrefix(name, "#"+strconv.Itoa(ord)+" ") {
 		t.Errorf("Name %q does not lead with its ordinal", name)
 	}
 	if !strings.Contains(name, "(sm_") {

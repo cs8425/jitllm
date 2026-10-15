@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/jitllm/jitllm/internal/testmodels"
 )
 
 const me = "github.com/jitllm/jitllm/internal/testdevices"
@@ -17,6 +19,7 @@ const me = "github.com/jitllm/jitllm/internal/testdevices"
 // included, skipping what is not this tree's source.
 func walkGo(t *testing.T, f func(path string)) {
 	t.Helper()
+	testmodels.SourceTree(t)
 	root := filepath.Join("..", "..")
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
