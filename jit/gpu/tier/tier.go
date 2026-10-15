@@ -998,6 +998,9 @@ type Stats struct {
 	// (raggedprefill.go): the selection check that a step's prompt chunks
 	// attended as a prefill rather than through the decode plan.
 	RagPrefills int
+	// RagForms counts batched scratches built with a flash prefill that has a
+	// run-table form: where it is 0, ragged steps keep the decode plan.
+	RagForms int
 	// PagedPrefillPasses counts the passes those launches ran over a history
 	// longer than one launch attends -- the selection check for the fold.
 	PagedPrefillPasses int
@@ -1307,6 +1310,7 @@ func (s *Stats) add(o Stats) {
 	s.PagedAccMMA += o.PagedAccMMA
 	s.FlashPrefill80 += o.FlashPrefill80
 	s.RagPrefills += o.RagPrefills
+	s.RagForms += o.RagForms
 	s.PagedPrefillPasses += o.PagedPrefillPasses
 	s.EmbedLaunches += o.EmbedLaunches
 	s.HeadFolds += o.HeadFolds

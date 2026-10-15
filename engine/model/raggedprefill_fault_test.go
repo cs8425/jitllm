@@ -20,21 +20,33 @@ import (
 // violation -- the table's rows reading their keys through the emptied
 // descriptors (rows fault "ragtab") -- must part.
 func TestRaggedStepAttendsAsAPrefill(t *testing.T) {
-	path := testmodels.Path("lfm2/LFM2-350M-Q4_K_M.jlm")
+	path := testmodels.Path("lfm2/LFM2-350M-Q4_K_M.gguf")
 	if _, err := os.Stat(path); err != nil {
 		testmodels.Missing(t, "MODEL MISSING: %v (set JITLLM_MODELS) (RULE 11)", err)
 	}
-	m, err := Open(path)
+	m, err := Open(jlmOf(t, path))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer m.Close()
 	vocab := min(m.Cfg.NVocab, 30000)
 	prompts := [][]int32{linPrompt(130, vocab), linPrompt(170, vocab)[3:], linPrompt(90, vocab)[5:]}
+	for _, arm := range []struct {
+		name  string
+		tiles bool
+	}{{"default", false}, {"tiles", true}} {
+		t.Run(arm.name, func(t *testing.T) { raggedAsPrefill(t, m, prompts, arm.tiles) })
+	}
+}
+
+// raggedAsPrefill is TestRaggedStepAttendsAsAPrefill on one form: the
+// device's own choice, or the collective tiles (Config.PreferTiles,
+// FlashPrefillTile's run table) where they lower.
+func raggedAsPrefill(t *testing.T, m *Model, prompts [][]int32, tiles bool) {
 	const seq = 400
 	open := func(t *testing.T, noRag bool) *tier.GPU {
 		o := append(testTierOpts(t), tier.WithDeviceTune(tier.TuneOff),
-			tier.WithConfig(func(c *tier.Config) { c.NoRagPrefill = noRag }))
+			tier.WithConfig(func(c *tier.Config) { c.NoRagPrefill, c.PreferTiles = noRag, tiles }))
 		if v := os.Getenv("JITLLM_TEST_DEVICES"); v != "" {
 			o = append(o, tier.WithDevices(v))
 		}
@@ -63,10 +75,11 @@ func TestRaggedStepAttendsAsAPrefill(t *testing.T) {
 		want[i] = append([]float32(nil), lg...)
 		st.Close()
 	}
-	// The run table is FlashPrefill80's form so far; a device whose prefill
-	// runs another form keeps the decode plan in ragged steps.
-	if g.Stats().FlashPrefill80 == 0 {
-		t.Skipf("%s's prefill is not FlashPrefill80's, the one form with a run table yet: this gate proved nothing here", g.Name())
+	// A device whose flash prefill has no run-table form yet (sm_70's
+	// FlashPrefill70, the staged kernels) keeps the decode plan in ragged
+	// steps.
+	if g.Stats().RagForms == 0 {
+		t.Skipf("%s's prefill form has no run table yet: this gate proved nothing here", g.Name())
 	}
 	batch := func(t *testing.T, g *tier.GPU, fault string) ([][]float32, tier.Stats) {
 		sc := NewScheduler(m, len(prompts), seq)

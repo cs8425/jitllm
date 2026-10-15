@@ -65,19 +65,19 @@ func ragTable(dst []uint32, rows []pagedRow, wg int, order []int) ([]uint32, []i
 
 // ragPrep readies bs's ragged call for the run-table launch, or reports false
 // (the decode plan takes every row) where the call has no run of two rows or
-// the device has no run-table form: the flash prefill must be
-// FlashPrefill80's (the first form built with the table), with no sinks and
-// no streamed history. It builds the table and the decode descriptors with
+// the device has no run-table form: the flash prefill must be one with a
+// table (FlashPrefill80 and its m16n8k8 twin, FlashPrefillTile), with no
+// sinks and no streamed history. It builds the table and the decode descriptors with
 // the table's rows emptied, compiles the launch at the table's width, and
 // grows the table's buffer. Callers hold g.mu and have run pagedStage.
 func (g *devTier) ragPrep(bs *blockScratch) bool {
 	pk := bs.pkv
 	pk.ragRows = 0
 	pf := pk.pf
-	if pf == nil || !pf.flash80 || pf.fs.Splits != 0 || pk.st != nil || g.NoRagPrefill {
+	if pf == nil || pf.ragBuild == nil || pf.fs.Splits != 0 || pk.st != nil || g.NoRagPrefill {
 		return false
 	}
-	wg := kernels.FlashPrefill80Rows(pf.fs)
+	wg := pf.ragWG
 	pk.ragMap, pk.ragOrder = ragTable(pk.ragMap, pk.rows, wg, pk.ragOrder)
 	if len(pk.ragMap) == 0 {
 		return false
@@ -89,11 +89,7 @@ func (g *devTier) ragPrep(bs *blockScratch) bool {
 	if pf.ragK[n] == nil {
 		fs := pf.fs
 		fs.Map, fs.Rows = true, n
-		build := kernels.FlashPrefill80
-		if pf.k8 {
-			build = kernels.FlashPrefill80K8
-		}
-		k, err := build(fs)
+		k, err := pf.ragBuild(fs)
 		if err != nil {
 			g.LastErr = "ragged prefill: " + err.Error()
 			return false
@@ -169,7 +165,7 @@ func (pk *pagedScratch) ragWrites(w func(backend.Buf, []byte)) {
 func (pk *pagedScratch) ragAttend(lc *launcher, q, k, v, n, out, tab, desc backend.Buf) error {
 	fs := pk.pf.fs
 	fs.Map, fs.Rows = true, pk.ragRows
-	return lc.launch(pk.pf.ragK[pk.ragRows], kernels.FlashPrefill80Groups(fs), kernels.FlashPrefill80Threads,
+	return lc.launch(pk.pf.ragK[pk.ragRows], pk.pf.ragGroups(fs), pk.pf.ragThreads,
 		q, k, v, n, out, tab, desc, pk.pMap)
 }
 

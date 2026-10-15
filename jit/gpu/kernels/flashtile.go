@@ -114,6 +114,9 @@ func FlashPrefillTile(s FlashPrefill70Shape, t FlashTile) (*ir.Kernel, error) {
 	if P > 0 {
 		name = fmt.Sprintf("flashtilepaged_d%d_q%d_k%d_s%d", hd, qb, tk, s.Splits)
 	}
+	if s.Map {
+		name += "_map"
+	}
 	b := ir.New(name, [3]int{int(nth), 1, 1})
 	pQ := b.Param("pQ", ir.F32)
 	pK := b.Param("pK", ir.F32)
@@ -125,6 +128,12 @@ func FlashPrefillTile(s FlashPrefill70Shape, t FlashTile) (*ir.Kernel, error) {
 		pTab, pDesc = b.Param("pTab", ir.U32), b.Param("pRow", ir.U32)
 	}
 	c := func(v int64) ir.Value { return b.Const(ir.U32, v) }
+	// rowOf is a query slot's row: itself, or the run table's (Map).
+	rowOf := func(slot ir.Value) ir.Value { return slot }
+	if s.Map {
+		pMap := b.Param("pMap", ir.U32)
+		rowOf = func(slot ir.Value) ir.Value { return b.Load(ir.U32, pMap, slot, 0) }
+	}
 	f := b.ConstF32
 	add := func(v ir.Value, n int64) ir.Value {
 		if n == 0 {
@@ -160,7 +169,7 @@ func FlashPrefillTile(s FlashPrefill70Shape, t FlashTile) (*ir.Kernel, error) {
 		// The block's keys, [keyStart of its first row, keyEnd of its last),
 		// in tk-key tiles from a multiple of 32, which lie in one page each;
 		// this split's run of them.
-		span = tileSpanOf(b, pDesc, row0, add(row0, int64(qb-1)))
+		span = tileSpanOf(b, pDesc, rowOf(row0), rowOf(add(row0, int64(qb-1))))
 		kStart, ntiles = span.tileRun(b, spl, S, tk)
 	} else {
 		maxcnt = b.Load(ir.U32, pN, row0, int64(qb)) // the block's last row's count
@@ -174,7 +183,7 @@ func FlashPrefillTile(s FlashPrefill70Shape, t FlashTile) (*ir.Kernel, error) {
 		w := add(tid, nth*it)
 		qi := b.Div(ir.U32, w, c(int64(hd/2)))
 		p := b.Rem(ir.U32, w, c(int64(hd/2)))
-		src := b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, row0, qi), c(int64(s.Heads))), h),
+		src := b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, rowOf(b.Add(ir.U32, row0, qi)), c(int64(s.Heads))), h),
 			c(int64(hd))), b.Shl(ir.U32, p, c(1)))
 		e := b.LoadV(ir.F32, pQ, src, 0, 2)
 		b.Store(shO, b.Add(ir.U32, b.Mul(ir.U32, qi, c(ks/2)), p), b.PackF16(e[0], e[1]), 0)
@@ -203,7 +212,7 @@ func FlashPrefillTile(s FlashPrefill70Shape, t FlashTile) (*ir.Kernel, error) {
 	row := b.Add(ir.U32, b.Mul(ir.U32, sg, c(8)), rl) // within the block
 	var cnt, kst ir.Value                             // paged: the row's keyEnd and keyStart
 	if P > 0 {
-		kst, cnt = pagedDesc(b, pDesc, b.Add(ir.U32, row0, row), PRowStart), pagedDesc(b, pDesc, b.Add(ir.U32, row0, row), PRowEnd)
+		kst, cnt = pagedDesc(b, pDesc, rowOf(b.Add(ir.U32, row0, row)), PRowStart), pagedDesc(b, pDesc, rowOf(b.Add(ir.U32, row0, row)), PRowEnd)
 	} else {
 		cnt = b.Load(ir.U32, pN, b.Add(ir.U32, row0, row), 1)
 	}
@@ -438,7 +447,7 @@ func FlashPrefillTile(s FlashPrefill70Shape, t FlashTile) (*ir.Kernel, error) {
 		return b.Done(), nil
 	}
 	inv := b.Div(ir.F32, f(1), b.Max(ir.F32, l, f(1e-30)))
-	dst := b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, row0, row), c(int64(s.Heads))), h),
+	dst := b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, rowOf(b.Add(ir.U32, row0, row)), c(int64(s.Heads))), h),
 		c(int64(hd))), dimL)
 	for d := 0; d < dpl; d++ {
 		o := b.Bitcast(ir.F32, b.Load(ir.U32, shO, oRow, int64(d)))
