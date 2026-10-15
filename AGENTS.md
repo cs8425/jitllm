@@ -802,6 +802,19 @@ best rate.
 
 Evidence: `docs/engineering-history/gpu-kernels.md` ("RULE 11e's cases").
 
+## RULE 11f: before building anything, find what already does it.
+
+Find the machinery that already does the job, or can be adapted to it, and use
+it. Then check that what you reuse or build keeps the five principles (JIT, no
+Go compute, relocation, paging, low to no allocation) and prove no regression
+with RULE 6's checklist. A PR reports all three, each under its own heading:
+**what existed and was reused**, **the principles kept**, **the regression
+evidence**. A PR that cannot name what it searched for first skipped the first
+step.
+
+Evidence: `docs/engineering-history/scheduling-and-measurement.md` ("RULE 11f's
+cases: a cache that existed, a store that existed").
+
 ## RULE 12: a comment explaining why something is NOT done is a claim about the code, and it rots.
 
 Before inheriting a "we do not do X because Y", check Y at the source. It costs
@@ -890,6 +903,10 @@ budget.
   multi devices multi instances"*. A session bringing a block home leaves it on
   the card for every other session using it
   (`model.TestABatchLeavesAnotherSessionAlone`).
+- **KV is never held twice.** Host storage follows ownership: a page lives on
+  the host or on the device that owns it, never as a standing mirror of both,
+  and a prefix shared between sessions is one page (`SharedStore`), not a copy
+  per session.
 - **A device that shares the host's memory is not a second pool.** An integrated
   GPU's heap and Apple Silicon's are system RAM: `UnifiedMemory()` reports it on
   every backend with one contract -- SUBTRACT, DO NOT ADD. Vulkan decides this by
