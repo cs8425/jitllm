@@ -630,6 +630,27 @@ func MagMatch32JIT(y, x, ref []float32, eps float64) {
 	})
 }
 
+// RowStd32JIT standardises x over its unbiased deviation, with generated code:
+// y = (x - mean) / (sqrt(sum((x - mean)^2)/(n-1)) + eps), a one-element row's
+// deviation 0. NeMo's per-feature normalisation (d1-omni's audio front end).
+// y may be x.
+func RowStd32JIT(y, x []float32, eps float64) {
+	n := len(x)
+	if n == 0 {
+		return
+	}
+	if len(y) < n {
+		lengthPanic("rowstd", n, len(y))
+	}
+	code, kc := lnCode(lnKey{cpu.HostTier(), n, false, cpu.RowStd}, lnKons{n, eps, 1})
+	code.Call(&cpu.Args{
+		Out: &y[0],
+		A:   (*int8)(unsafe.Pointer(&x[0])),
+		Scr: (*byte)(unsafe.Pointer(&kc[0])),
+		K:   int64(n),
+	})
+}
+
 // lnFill is normFill for LayerNorm; see its comment.
 func lnFill(n int, k lnKey, nk lnKons) (*cpu.Code, []float32) {
 	lns.mu.Lock()
@@ -660,7 +681,12 @@ func lnFill(n int, k lnKey, nk lnKons) (*cpu.Code, []float32) {
 		next.code[k] = c
 	}
 	if !okk {
-		kc = []float32{1 / float32(n), float32(nk.eps), float32(nk.c)}
+		// The fourth is 1/(n-1), RowStd's (0 for one element).
+		var unb float32
+		if n > 1 {
+			unb = 1 / float32(n-1)
+		}
+		kc = []float32{1 / float32(n), float32(nk.eps), float32(nk.c), unb}
 		next.kons[nk] = kc
 	}
 	lns.snap.Store(next)
