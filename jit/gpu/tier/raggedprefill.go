@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	"github.com/jitllm/jitllm/jit/gpu/backend"
+	"github.com/jitllm/jitllm/jit/gpu/ir"
 	"github.com/jitllm/jitllm/jit/gpu/kernels"
 )
 
@@ -93,15 +94,50 @@ func (g *devTier) ragPrep(bs *blockScratch) bool {
 	pk := bs.pkv
 	pk.ragRows = 0
 	pf := pk.pf
-	if pf == nil || pf.ragBuild == nil || pk.st != nil || g.NoRagPrefill {
+	if pf == nil || pk.st != nil || g.NoRagPrefill {
+		return false
+	}
+	// The staged form's run table: the FMA kernels (prefillTiled), the
+	// direct form; its query tile is the scores' and the accumulate's both.
+	staged := pf.ragBuild == nil
+	if staged && (pf.flash != nil || pf.mode != prefillTiled) {
 		return false
 	}
 	wg := pf.ragWG
+	if staged {
+		wg = lcm(pf.sq, pf.qt)
+	}
 	pk.ragMap, pk.ragOrder, pk.ragAlone = ragTable(pk.ragMap, pk.rows, wg, pk.ragOrder)
 	if len(pk.ragMap) == 0 {
 		return false
 	}
 	n := len(pk.ragMap)
+	pk.ragStaged = staged
+	if staged {
+		if !g.ragStagedPrep(bs, n) {
+			return false
+		}
+	} else if !g.ragFlashPrep(pf, n) {
+		return false
+	}
+	if pk.pMapBytes < 4*n {
+		if pk.pMap != nil {
+			pk.pMap.Free()
+		}
+		b, err := g.allocBytes(make([]byte, 4*n))
+		if err != nil {
+			pk.pMap, pk.pMapBytes = nil, 0
+			g.LastErr = "ragged prefill: " + err.Error()
+			return false
+		}
+		pk.pMap, pk.pMapBytes = b, 4*n
+	}
+	return g.ragDecDescs(pk, n)
+}
+
+// ragFlashPrep compiles the flash form's run-table launch at n slots, and
+// with sinks its mapped merge.
+func (g *devTier) ragFlashPrep(pf *pagedPrefill, n int) bool {
 	if pf.ragK == nil {
 		pf.ragK = map[int]backend.Kernel{}
 	}
@@ -141,18 +177,12 @@ func (g *devTier) ragPrep(bs *blockScratch) bool {
 		}
 		pf.ragMerge[n] = c
 	}
-	if pk.pMapBytes < 4*n {
-		if pk.pMap != nil {
-			pk.pMap.Free()
-		}
-		b, err := g.allocBytes(make([]byte, 4*n))
-		if err != nil {
-			pk.pMap, pk.pMapBytes = nil, 0
-			g.LastErr = "ragged prefill: " + err.Error()
-			return false
-		}
-		pk.pMap, pk.pMapBytes = b, 4*n
-	}
+	return true
+}
+
+// ragDecDescs builds the decode plan's descriptors with the table's rows
+// emptied, and n slots' worth of nothing else. Callers hold g.mu.
+func (g *devTier) ragDecDescs(pk *pagedScratch, n int) bool {
 	for _, dec := range []struct {
 		buf  *backend.Buf
 		src  []uint32
@@ -198,6 +228,13 @@ func (pk *pagedScratch) ragWrites(w func(backend.Buf, []byte)) {
 	if len(pk.descDecW) > 0 {
 		w(pk.pRowDecW, u32view(pk.descDecW))
 	}
+	if pk.ragStaged {
+		for i := range pk.ragSt {
+			if rs := &pk.ragSt[i]; rs.v != nil {
+				w(rs.buf, u32view(rs.base))
+			}
+		}
+	}
 }
 
 // ragAttend launches the run table's flash prefill over the chunk rows,
@@ -228,4 +265,186 @@ func (pk *pagedScratch) ragFree() {
 		}
 	}
 	pk.pMapBytes, pk.pRowDecBytes, pk.pRowDecWBytes = 0, 0, 0
+	for i := range pk.ragSt {
+		if rs := &pk.ragSt[i]; rs.buf != nil {
+			rs.buf.Free()
+			rs.buf, rs.bytes = nil, 0
+		}
+	}
+}
+
+// lcm is the least common multiple of two positive tiles.
+func lcm(a, b int) int {
+	x, y := a, b
+	for y != 0 {
+		x, y = y, x%y
+	}
+	return a / x * b
+}
+
+// ragStaged is one descriptor set's staged run table: each slot's partition
+// base (its run's first key, 64-aligned) and the chunk every run's span fits,
+// the variant at that chunk and the table's width, and the bases' buffer.
+type ragStaged struct {
+	base  []uint32
+	chunk int
+	v     *prefillVariant
+	buf   backend.Buf
+	bytes int
+}
+
+// ragStagedPrep builds the staged run table's bases and chunk for each
+// descriptor set (the full one and the windowed one), compiles the mapped
+// variant and grows the planes. False keeps the decode plan: a span past the
+// pass width (the staged run table is the direct form's), or a build that
+// failed. Callers hold g.mu.
+func (g *devTier) ragStagedPrep(bs *blockScratch, n int) bool {
+	pk, pf := bs.pkv, bs.pkv.pf
+	pw, _ := g.prefillPass()
+	for i, desc := range [2][]uint32{pk.desc, pk.descW} {
+		rs := &pk.ragSt[i]
+		if len(desc) == 0 {
+			rs.v = nil
+			continue
+		}
+		rs.base = rs.base[:0]
+		span := 1
+		var cur uint32
+		for slot, r := range pk.ragMap {
+			row := pk.rows[r]
+			// A run's first slot sets its base: the slot before it is
+			// another sequence's (or none).
+			if slot == 0 || pk.rows[pk.ragMap[slot-1]].s != row.s || pk.rows[pk.ragMap[slot-1]].pad != row.pad {
+				cur = desc[int(r)*kernels.PRowWords+kernels.PRowStart] &^ 63
+			}
+			rs.base = append(rs.base, cur)
+			if end := int(desc[int(r)*kernels.PRowWords+kernels.PRowEnd]); end > int(cur) {
+				span = max(span, end-int(cur))
+			}
+		}
+		if span > pw {
+			return false
+		}
+		c := 64
+		for c < span {
+			c *= 2
+		}
+		rs.chunk = c
+		v, err := g.ragStagedVariant(bs, pf, c, n)
+		if err != nil {
+			g.LastErr = "ragged prefill: " + err.Error()
+			return false
+		}
+		rs.v = v
+		if rs.bytes < 4*n {
+			if rs.buf != nil {
+				rs.buf.Free()
+			}
+			b, err := g.allocBytes(make([]byte, 4*n))
+			if err != nil {
+				rs.buf, rs.bytes = nil, 0
+				g.LastErr = "ragged prefill: " + err.Error()
+				return false
+			}
+			rs.buf, rs.bytes = b, 4*n
+		}
+	}
+	return true
+}
+
+// ragStagedVariant is the staged kernels with the run table at chunk keys
+// and n slots, the direct form, compiled once; the planes grow to its size.
+func (g *devTier) ragStagedVariant(bs *blockScratch, pf *pagedPrefill, chunk, n int) (*prefillVariant, error) {
+	key := [2]int{chunk, n}
+	if v, ok := pf.ragVars[key]; ok {
+		return v, nil
+	}
+	s := bs.pkv.shape
+	s.Rows, s.Chunk, s.Splits, s.Map = n, chunk, 0, true
+	s.Group, s.Warps, s.KImm = 0, 0, false
+	s.Sink = bs.p.AttnSinks
+	v := &prefillVariant{s: s}
+	ks, err := kernels.PagedAttnScoresTiled(s, pf.sq, pf.kt)
+	var kf, ka *ir.Kernel
+	if err == nil {
+		kf, err = kernels.PagedPrefillSoftmax(s, pf.lanes, pf.qt)
+	}
+	if err == nil {
+		ka, err = kernels.PagedAttnAccTiled(s, pf.qt)
+	}
+	if err != nil {
+		return nil, err
+	}
+	v.scoreT = kernels.PagedAttnScoresTiledThreads(s, pf.sq, pf.kt)
+	v.accT = kernels.PagedAttnAccTiledThreads(s, pf.qt)
+	v.softG, v.softW = kernels.PagedPrefillSoftmaxGroups(s, pf.lanes), kernels.PagedPrefillSoftmaxWidth(pf.lanes)
+	for i, k := range []*ir.Kernel{ks, kf, ka} {
+		c, err := g.compileShared(k)
+		if err != nil {
+			v.close()
+			return nil, err
+		}
+		*[]*backend.Kernel{&v.scores, &v.soft, &v.acc}[i] = c
+	}
+	np := kernels.PagedPrefillPlane(s)
+	have := pf.planeFloats
+	if err := g.prefillBuf(&pf.sc, &have, np); err != nil {
+		v.close()
+		return nil, err
+	}
+	have = pf.planeFloats
+	if err := g.prefillBuf(&pf.wt, &have, np); err != nil {
+		v.close()
+		return nil, err
+	}
+	pf.planeFloats = max(pf.planeFloats, np)
+	if pf.ragVars == nil {
+		pf.ragVars = map[[2]int]*prefillVariant{}
+	}
+	pf.ragVars[key] = v
+	return v, nil
+}
+
+// ragStagedAttend launches the staged run table over the table's rows: the
+// scores, the softmax (with the sink) and the accumulate, which writes out.
+// win picks the windowed descriptor set's bases and variant.
+func (pk *pagedScratch) ragStagedAttend(lc *launcher, q, k, v, n, out, tab, desc, sink backend.Buf, win bool) error {
+	pf := pk.pf
+	rs := &pk.ragSt[0]
+	if win {
+		rs = &pk.ragSt[1]
+	}
+	vr := rs.v
+	lc.la(vr.scores, vr.scoreT, q, k, n, pf.sc, tab, desc, pk.pMap, rs.buf)
+	args := []backend.Buf{pf.sc, n, pf.wt, pf.part, tab, desc}
+	if vr.s.Sink {
+		args = append(args, sink)
+	}
+	args = append(args, pk.pMap, rs.buf)
+	if err := lc.launch(vr.soft, vr.softG, vr.softW, args...); err != nil {
+		return err
+	}
+	lc.la(vr.acc, vr.accT, pf.wt, v, n, out, tab, desc, pk.pMap, rs.buf)
+	return nil
+}
+
+// ragKey is what a recording keys the ragged call's run table by: the
+// table's width, whether the decode plan runs beside it, and the staged
+// form's chunk for each descriptor set -- each picks a launch sequence.
+func (pk *pagedScratch) ragKey() int {
+	if pk.ragRows == 0 {
+		return 0
+	}
+	k := pk.ragRows << 1
+	if pk.ragAlone {
+		k |= 1
+	}
+	if pk.ragStaged {
+		for i := range pk.ragSt {
+			if rs := &pk.ragSt[i]; rs.v != nil {
+				k = k*8191 + rs.chunk
+			}
+		}
+	}
+	return k
 }
