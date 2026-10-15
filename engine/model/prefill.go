@@ -540,9 +540,11 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 				}
 			}
 		}
-		// The device runs one fixed grid (kernels bake their element count), so
-		// a narrower chunk runs the same work with surplus rows zeroed; it
-		// always gets the full width, not the host tuner's.
+		// The device gets the full width, not the host tuner's. A chunk's
+		// kernels are built for that width, and what it costs follows the
+		// rows it carries, not the width: measured, d1-3B every block placed,
+		// 64 rows 13.3 ms and 512 57.4 ms on the V100 (CUDA), 116 ms and
+		// 834 ms on the M4 (Metal).
 		if s.devCount() > 0 && !bidir && !spanAll {
 			width = s.deviceChunk()
 			// One submission's width when a run is in the prompt: a pipelined
@@ -552,15 +554,6 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 			}
 		}
 		n := min(width, total-base)
-		// A placed linear block's summary is a restore point only where a
-		// chunk ends (recChunkPoint): a cached hybrid's device chunk ends at
-		// the mark, the one point it is cut for. A device runs a chunk at one
-		// fixed grid, so every other point is where a chunk ends anyway.
-		if s.devCount() > 0 && !bidir && !spanAll && s.devLinear() && s.recPointsOn() {
-			if m := s.recMark - s.seqPos(slot); m > 0 && m < n && s.recEvery() > 0 {
-				n = m
-			}
-		}
 		// A bidirectional run is never cut (bidir.go).
 		if len(s.bidir) > 0 && !s.bidirCutFault {
 			n = min(s.bidirChunk(s.seqPos(slot), n), total-base)

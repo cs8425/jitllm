@@ -3894,8 +3894,14 @@ first room taken back. Eviction is as built; compaction gives the unheld
 named pages back first and leaves a layer with held ones alone. A linear
 block's restore points are snapshots on the card (`recshare.go`), copied from
 and into the session's seat. `Stats.KVPositionsMigrated` is zero for a warm
-prompt (`TestDecisionReusesThePrefix`), and a device chunk is cut once, at the
-mark: a device runs a chunk at one fixed grid.
+prompt (`TestDecisionReusesThePrefix`). A placed linear block keeps a point
+only where a chunk ends (`recChunkPoint`); a chunk is not cut for one. Cutting
+one at the mark, or every 128 or 256 positions, was measured on the V100
+(jivman's run, one process, cold and warm alternating): each cut is a
+submission's fixed cost, and on d1 it took warm from 125 ms to 133 (mark),
+156 (128) and 147 (256) against cold's 119-122; on Lev the mark took it from
+311 to 557 against cold's 396-458. A device's prefill costs what its rows
+cost (64 rows 13 ms, 512 57 ms, d1 on the V100), not a fixed grid's.
 
 **And a warm prompt through the shared store makes no heap allocation**
 (`TestDecisionWithAPrefixDoesNotAllocate`): the keys are hashed with a kept
