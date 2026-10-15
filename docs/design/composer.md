@@ -14,12 +14,12 @@ hand into `encodeLayer`'s launch sequence and each with its own switch:
 |---|---|---|---|
 | operand prologue (norm/quantize inside the matvec), sites q/k/v, o, down | `fuseActIn` | `tuneActIn`: timed per shape key, cached `gpuactin` | GK "The prologue decided per card by measurement" |
 | gate+up as one launch, down forming act(gate)*up (`gu`) | `fuseGateUp` | `Config.GateUpFuse`, off | GK "Gate and up in one launch: exact, and a loss past the 1B" |
-| gate+up as one launch summing both rows (`Gate2`) | `gate2Kernel` | `Config.GateUp2`, on wherever `gateUp2On` holds | GK "... each workgroup summing both rows (Gate2)" |
+| gate+up as one launch summing both rows (`Gate2`) | `gate2Kernel` | `tuneGateUp2`: Gate2 against two launches per up shape, cached `gpugateup2` | GK "... each workgroup summing both rows (Gate2)" |
 | split / in-group split | `retuneDecode` | timed per shape, cached `gpusplit` | GK "split tuner" |
 
-The FFN's three forms are a precedence chain (`GateUpFuse` before `Gate2`
-before two launches), decided by two booleans measured on three Llama models
-on one V100. `gu` won on the 1B (1.006) and lost 5-9% past it; Gate2 won 1-3%
+The FFN's three forms were a precedence chain (`GateUpFuse` before `Gate2`
+before two launches): a boolean for `gu`, and a two-arm tuner for Gate2 that
+could not see `gu` or a form composed with the norm. `gu` won on the 1B (1.006) and lost 5-9% past it; Gate2 won 1-3%
 on all three. A different card, a different FFN width or a different format
 can reorder them, and the chain cannot see that. The operand prologue is
 already a per-card choice, but its tuner is specific to its two arms.
@@ -131,3 +131,28 @@ recipe can buy without adding traffic.
    region; the same table shape applies with the pool's regions as recipes.
 7. **Prefill GEMM epilogues**: another agent's work (the add-norm fold);
    not duplicated here.
+
+## The first slice, as built
+
+`jit/gpu/tier/recipe.go`. `timeRecipes` is the one trial: N arms
+interleaved in one process, the order rotated each round, 20 paired rounds
+after one discarded, each challenger's per-round ratio to the incumbent,
+median and IQR gate. `tuneActIn` runs on it (its three sites, two recipes
+each), and `tuneFFN` replaces `tuneGateUp2`: per FFN shape key it times
+two, gate2, gate2in and gu (each built where the shape takes it) norm
+through down, keeps the device's default (Gate2 where exact, else two)
+unless a challenger is 1% faster, and writes the Gate2 verdict
+`gateUp2On` reads. `Config.FFNForm` (`JITLLM_GPU_FFN`) forces a recipe;
+`GateUpFuse` and `GateUp2Force` still force theirs. `mvLaunch` is the one
+launch the tuners' arms make, matching `encodeLayer`'s workgroup width,
+row tile and partial reduction.
+
+The recipe found by composing: **gate2in**, Gate2 with ActIn's norm
+prologue. Where the attention output's launch already added the residual,
+the FFN's RMSNormQuantRows goes and gate and up read the residual row
+themselves: two launches become one per block. It is bit-identical on PTX
+(`backend.TestGate2InIsTheTwoLaunches`, 96 cases; `model.TestFFNRecipesMatchTwoLaunches`
+with every block placed with and without the graph and a half seam;
+violation `TestGate2InSeesASwap`). The tuner keeps it on both of
+Llama-3.2-1B's FFN keys on the V100. Rows: GK "The FFN's recipes, timed per
+card".

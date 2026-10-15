@@ -44,7 +44,9 @@ func ffnRecipeDecode(t *testing.T, m *Model, ids, toks []int32, noGraph bool, la
 		s.SetGPULayers(0)
 		return out
 	}
-	run(tier.FFNTwo) // settles the split tuner: the arms after it run its answers
+	// The first pass runs the tuners (split, prologue, FFN) with every recipe
+	// offered; the arms after it run their answers.
+	run(tier.FFNTuned)
 	var outs [][][]float32
 	var sts []tier.Stats
 	for _, f := range arms {
