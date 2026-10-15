@@ -109,12 +109,17 @@ strata_run() {
   fi
   echo "$out" | sed -n 's|^decode .* -> *\([0-9.]*\) tok/s.*|\1|p' | tail -1
 }
+# The B arm of a jitllm A/B (STRATA_VS_AA with JITLLM_B or JITLLM_ENV_B):
+# another build or other settings, under the same gates and interleave.
+jitllm_run_b() {
+  JITLLM="${JITLLM_B:-$JITLLM}" JITLLM_ENV="${JITLLM_ENV_B:-$JITLLM_ENV}" jitllm_run
+}
 A=jitllm_run
 B=strata_run
 NAME_B=strata
 if [ -n "${STRATA_VS_AA:-}" ]; then
-  B=jitllm_run
-  NAME_B=jitllm
+  B=jitllm_run_b
+  NAME_B="jitllm${JITLLM_B:+ $(basename "$JITLLM_B")}${JITLLM_ENV_B:+ ($JITLLM_ENV_B)}"
 fi
 
 echo "jitllm $(basename "$JITLLM_PATH") ($JITLLM_ENV) vs $NAME_B on GPU $GPU, node $NODE: decode $N tokens after the prompt [$IDS], $ROUNDS ABBA rounds; log $LOG"
