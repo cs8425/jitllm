@@ -6729,7 +6729,12 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 		(R == 1 || fold) && g.prepPick(head)
 	ragN, ragRuns, ragHead, ragMap := 0, 0, 0, 0
 	if bs.pkv != nil {
-		ragMap = bs.pkv.ragRows
+		// The width, and whether the decode plan runs beside it (ragAlone):
+		// two launch sequences a recording names.
+		ragMap = 2 * bs.pkv.ragRows
+		if bs.pkv.ragAlone {
+			ragMap++
+		}
 	}
 	if rag != nil {
 		ragN, ragRuns = len(rag.pos), len(rag.runs)
@@ -7861,7 +7866,7 @@ func (g *devTier) layersSession(s backend.Session) {
 								sk = bs.noSink
 							}
 						}
-						if err == nil {
+						if err == nil && !(ragOn && pk.ragAlone) {
 							err = pk.attend(s, lc, g.kvp.layers[l.kvSrc], qAtt, kDst, vDst, bs.n, bs.xb, pgTab, dec, sk)
 							g.PagedLaunches++
 							if pk.cur.plan.Path == kernels.PathStaged {

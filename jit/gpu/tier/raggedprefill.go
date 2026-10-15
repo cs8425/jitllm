@@ -24,9 +24,13 @@ import (
 
 // ragTable is a ragged call's run table: the step rows of each sequence with
 // more than one row, padded per workgroup. Its slot count is a multiple of wg.
-// It is built into dst and returned; dst is reused, so a step allocates
-// nothing once the widest table has been made.
-func ragTable(dst []uint32, rows []pagedRow, wg int, order []int) ([]uint32, []int) {
+// alone reports that every real row is in it -- no sequence has a single
+// row, which the decode plan would take -- and then the call's padding rows
+// are in it too, a run of their own whose descriptors attend nothing, so the
+// table's launch writes every row and the decode plan need not run. It is
+// built into dst and returned; dst is reused, so a step allocates nothing
+// once the widest table has been made.
+func ragTable(dst []uint32, rows []pagedRow, wg int, order []int) (_ []uint32, _ []int, alone bool) {
 	dst = dst[:0]
 	order = order[:0]
 	for r, row := range rows {
@@ -48,6 +52,7 @@ func ragTable(dst []uint32, rows []pagedRow, wg int, order []int) ([]uint32, []i
 		}
 		return ra.pos - rb.pos
 	})
+	alone = true
 	for i := 0; i < len(order); {
 		j := i + 1
 		for j < len(order) && rows[order[j]].s == rows[order[i]].s {
@@ -57,10 +62,24 @@ func ragTable(dst []uint32, rows []pagedRow, wg int, order []int) ([]uint32, []i
 			for k := 0; k < (j-i+wg-1)/wg*wg; k++ {
 				dst = append(dst, uint32(order[min(i+k, j-1)]))
 			}
+		} else {
+			alone = false
 		}
 		i = j
 	}
-	return dst, order
+	if alone && len(dst) > 0 {
+		first, n := len(dst), 0
+		for r, row := range rows {
+			if row.pad {
+				dst = append(dst, uint32(r))
+				n++
+			}
+		}
+		for n > 0 && (len(dst)-first)%wg != 0 {
+			dst = append(dst, dst[len(dst)-1])
+		}
+	}
+	return dst, order, alone
 }
 
 // ragPrep readies bs's ragged call for the run-table launch, or reports false
@@ -78,7 +97,7 @@ func (g *devTier) ragPrep(bs *blockScratch) bool {
 		return false
 	}
 	wg := pf.ragWG
-	pk.ragMap, pk.ragOrder = ragTable(pk.ragMap, pk.rows, wg, pk.ragOrder)
+	pk.ragMap, pk.ragOrder, pk.ragAlone = ragTable(pk.ragMap, pk.rows, wg, pk.ragOrder)
 	if len(pk.ragMap) == 0 {
 		return false
 	}
