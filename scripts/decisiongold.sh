@@ -72,5 +72,5 @@ want clef-fixture && gold clef/fixture/clef-fixture.gguf clef-fixture
 want d1-omni-600M-F16 && gold d1-omni/d1-omni-600M-F16.gguf d1-omni-600M-F16
 want tinyopenjev-for-testing-Q8_0 && gold openjev/tinyopenjev-for-testing-Q8_0.gguf tinyopenjev-for-testing-Q8_0
 want tinyopenjev-for-testing-Q8_0 && gold openjev/tinyopenjev-for-testing-Q8_0.gguf tinyopenjev-for-testing-Q8_0 openjev/mmproj-tinyopenjev-for-testing-Q8_0.gguf chatpicture
-want d1-omni-600M-F16 && gold d1-omni/d1-omni-600M-F16.gguf d1-omni-600M-F16 d1-omni/mmproj-d1-omni-600M-F16.gguf pictures
+want d1-omni-600M-F16 && gold d1-omni/d1-omni-600M-F16.gguf d1-omni-600M-F16 d1-omni/mmproj-d1-omni-600M-F16.gguf pictures voice
 true

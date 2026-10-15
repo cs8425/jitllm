@@ -975,6 +975,9 @@ type Stats struct {
 	// RecZeroSource counts the bytes of zeros those copies read, uploaded
 	// once a zeroing.
 	RecZeroSource uint64
+	// RecZeroHost counts seat zeroings written from the host because the
+	// kept zeros could not be had on the device (recZeroLayers).
+	RecZeroHost int
 	// PagedStagedLaunches counts decode attentions that ran the staged
 	// kernels rather than FlashDecodeKV (kernels.ChooseDecodePlan).
 	PagedStagedLaunches int
@@ -1295,6 +1298,7 @@ func (s *Stats) add(o Stats) {
 	s.RecZeroBytes += o.RecZeroBytes
 	s.RecZeroCopies += o.RecZeroCopies
 	s.RecZeroSource += o.RecZeroSource
+	s.RecZeroHost += o.RecZeroHost
 	s.PagedPrefill70 += o.PagedPrefill70
 	s.PagedAccMMA += o.PagedAccMMA
 	s.FlashPrefill80 += o.FlashPrefill80
@@ -1674,6 +1678,10 @@ type devShared struct {
 	// device's and not a session's: their calls are one at a time
 	// (GPU.convMu).
 	convTo launchTo
+	// convCall is the convolutional submission's arguments, and convFn its
+	// method value, made once (conv.go).
+	convCall convCallArgs
+	convFn   func(backend.Session)
 	// roomGen moves every time this device may have gained room: a refund, or
 	// a budget raised. A caller that gave blocks up reads it to know when
 	// asking for them back could succeed. See GPU.RoomGen.
@@ -1938,7 +1946,9 @@ type GPU struct {
 	// its submissions, in the scratch every convolutional block there shares
 	// (conv.go), so two sessions' calls go one after the other.
 	convTmp [2][]float32
-	convMu  sync.Mutex
+	// convRuns is ConvLayers' runs, reused under convMu.
+	convRuns []run
+	convMu   sync.Mutex
 	// rowsErr is why the last LayersRows failed, naming the device: the
 	// devices' LastErr summed by Stats is whichever wrote last, not the one
 	// that refused.

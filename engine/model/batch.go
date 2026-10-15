@@ -81,7 +81,6 @@ func (s *State) forwardRows(tokens []int32, seq, pos []int, nlogit int) ([]float
 	s.relocateRows(took, n)
 	if rr, ok := s.ld.(nn.RowsRoomer); ok && s.devCount() > 0 && !rr.RowsRoom(n, s.nseq) {
 		s.SetGPULayers(0)
-		s.roomHome++
 	}
 	// A model wholly on one device runs the ragged step there. Otherwise the
 	// device's blocks go as rows with their own slots (nn.RowsDevice): the

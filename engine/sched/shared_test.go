@@ -159,7 +159,7 @@ func alternate(t *testing.T, procs int) {
 	defer a.Close()
 	defer b.Close()
 
-	var bQueued atomic.Bool
+	var bQueued, aIn atomic.Bool
 	var queued, worst, cur, aRuns atomic.Int64
 	onTurnQueue = func(w chan struct{}) {
 		if w == b.wake {
@@ -185,9 +185,22 @@ func alternate(t *testing.T, procs int) {
 			// Counted on the first chunk only: the region is one turn.
 			a.Do(64, 1, func(_, lo, hi int) {
 				if lo == 0 {
-					// a gives its P up mid-region, so on one P b runs and
-					// queues behind it.
-					runtime.Gosched()
+					// a holds the turn until b has queued behind it, so every
+					// one of b's regions meets a held turn: whether b ever
+					// queues no longer depends on how the runner schedules the
+					// two goroutines (on a small one a ran back to back and b
+					// found the turn free for all 500 regions, which this gate
+					// then reported as no contention). bQueued is cleared by
+					// b's own region, so a waits again for the next.
+					aIn.Store(true)
+					for !bQueued.Load() {
+						select {
+						case <-stop:
+							return
+						default:
+							runtime.Gosched()
+						}
+					}
 				}
 				if lo == 0 && bQueued.Load() {
 					if n := cur.Add(1); n > worst.Load() {
@@ -198,8 +211,8 @@ func alternate(t *testing.T, procs int) {
 			aRuns.Add(1)
 		}
 	}()
-	for aRuns.Load() < 100 {
-		runtime.Gosched() // a is looping back to back before b asks
+	for !aIn.Load() {
+		runtime.Gosched() // a is inside a region, holding the turn, before b asks
 	}
 	const regions = 500
 	for r := 0; r < regions; r++ {

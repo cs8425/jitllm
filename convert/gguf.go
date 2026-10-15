@@ -74,6 +74,7 @@ func buildGGUF(f, vf *meta.File, src, mmproj string, o options) (*jlm.Source, er
 			return nil, fmt.Errorf("convert: %s is itself a vision tower; the first "+
 				"argument is the TEXT model", src)
 		}
+		af := vf
 		vf = withoutAudio(vf)
 		vs, err := sourceOf(vf)
 		if err != nil {
@@ -97,6 +98,19 @@ func buildGGUF(f, vf *meta.File, src, mmproj string, o options) (*jlm.Source, er
 			}
 		}
 		s.Tensors = append(s.Tensors, vs.Tensors...)
+		// The audio half, its blocks after the vision blocks.
+		aud, ats, err := audioOf(af, s.Vision.NLayer)
+		if err != nil {
+			return nil, err
+		}
+		if aud != nil {
+			if aud.ProjDim != s.Config.NEmbd {
+				return nil, fmt.Errorf("convert: %s's audio projects to %d and %s wants %d", mmproj, aud.ProjDim,
+					src, s.Config.NEmbd)
+			}
+			s.Vision.Audio = aud
+			s.Tensors = append(s.Tensors, ats...)
+		}
 		if s.Vision.Projector == jlm.ProjPixtral {
 			if err := imgBreakRow(s); err != nil {
 				return nil, err
