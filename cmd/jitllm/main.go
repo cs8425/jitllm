@@ -1164,6 +1164,9 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	// The prompt is the text ids plus whatever an image spliced in (marker
 	// tokens and one embedding per projected patch group).
 	ptok := len(ids) + extra
+	if n := st.MixtureAffine(); n > 0 {
+		fmt.Fprintf(os.Stderr, "numa     %d host mixture region(s) ran on the nodes holding their experts\n", n)
+	}
 	fmt.Fprintf(os.Stderr, "\nprompt %d tok in %v (%s)   decode %d tok in %v (%s)\n",
 		ptok, prefill.Round(time.Millisecond), rateOf(ptok, prefill),
 		len(out), decode.Round(time.Millisecond), rateOf(len(out), decode))

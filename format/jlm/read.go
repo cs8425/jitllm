@@ -44,6 +44,10 @@ type File struct {
 	// noHuge and nodeMask are this File's Placement; see SetPlacement.
 	noHuge   bool
 	nodeMask []uint64
+	// nodes is a one-node mask for each of Placement.Nodes when they spread
+	// the memory: expert page x is bound whole to nodes[x%len(nodes)]
+	// (claim), the rest interleaved.
+	nodes [][]uint64
 	// pins[b] is how many leases hold block b resident. A pinned page is never
 	// a victim; see Hold.
 	pins []int

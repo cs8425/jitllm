@@ -3109,6 +3109,10 @@ func (s *State) Accelerated() []quant.Type { return s.jit.Types() }
 // Workers is how many worker threads the fast tier uses.
 func (s *State) Workers() int { return s.jit.Workers() }
 
+// MixtureAffine is how many of this State's host mixture regions ran on the
+// NUMA nodes holding their experts (nn.JIT.MixtureAffine).
+func (s *State) MixtureAffine() int64 { return s.jit.MixtureAffine() }
+
 // Shapes is how many shape-specialized kernels were generated for this model.
 func (s *State) Shapes() int { return s.jit.Shapes() }
 
