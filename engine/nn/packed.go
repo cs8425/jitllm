@@ -27,7 +27,10 @@ func (f *JIT) MatVecPacked(out []float32, t quant.Type, p *Packed, x []float32, 
 	if f == nil || p == nil || len(p.QS) == 0 || len(out) < nrows || len(x) < k {
 		return false
 	}
-	x = x[:k]
+	// A k that is not a whole number of t's outer blocks reads a weight
+	// packed at the next one, the activation's tail quantized as zeros
+	// (ragged.go).
+	x, k = x[:k], raggedK(t, k)
 	q, ok := kernels.QuantOf(t)
 	if !ok {
 		return false
@@ -52,7 +55,7 @@ func (f *JIT) MatVecPacked(out []float32, t quant.Type, p *Packed, x []float32, 
 	}
 	nb := k / cpu.Q8Block
 	f.ensureAct(k)
-	f.prepAct(t, x, k, nb)
+	f.prepActRagged(t, x, len(x), k, nb)
 
 	// The shape's chooser (mvpick.go): which kernel this call runs, and the
 	// clock it is timed by while the choice is open.
@@ -272,7 +275,12 @@ func (f *JIT) quantScratch(w int) []float32 {
 // length, type, generation). It is the same prep the GGUF kernels use, and
 // MatVecPackedMulti shares it so the cache check exists once.
 func (f *JIT) prepAct(t quant.Type, x []float32, k, nb int) {
-	if f.cacheOK && f.cachePtr == &x[0] && f.cacheLen == k &&
+	f.prepActRagged(t, x, len(x), k, nb)
+}
+
+// prepActRagged is prepAct for kx floats quantized as k (ragged.go).
+func (f *JIT) prepActRagged(t quant.Type, x []float32, kx, k, nb int) {
+	if f.cacheOK && f.cachePtr == &x[0] && f.cacheLen == kx &&
 		f.cacheTyp == t && f.cacheGen == f.gen {
 		return
 	}
@@ -286,16 +294,19 @@ func (f *JIT) prepAct(t quant.Type, x []float32, k, nb int) {
 		half = f.half[:k/16]
 	}
 	qs, ps, win := f.q[:k], f.pairs[:2*nb], f.actWindow
+	if kx != k {
+		f.growRagStage(k)
+	}
 	if nb >= 4*f.pool.N() {
 		j := &f.hot.quant
-		j.qk, j.t, j.qs, j.ps, j.half, j.x, j.k, j.win = qk, t, qs, ps, half, x, k, win
+		j.qk, j.t, j.qs, j.ps, j.half, j.x, j.k, j.kx, j.win = qk, t, qs, ps, half, x, k, kx, win
 		f.pool.Do(nb, max(1, nb/(4*f.pool.N())), f.hot.quantFn(f))
 		j.x = nil
 	} else {
-		qk.Run(t, qs, ps, half, f.quantScratch(0), x, k, 0, nb, win)
+		f.quantRow(qk, t, qs, ps, half, f.quantScratch(0), 0, x, kx, k, 0, nb, win)
 	}
 	f.quantSince(tq)
-	f.cachePtr, f.cacheLen, f.cacheTyp, f.cacheGen, f.cacheOK = &x[0], k, t, f.gen, true
+	f.cachePtr, f.cacheLen, f.cacheTyp, f.cacheGen, f.cacheOK = &x[0], kx, t, f.gen, true
 }
 
 // numaRows is sched.DoNodes' layout for a packed weight's rows, or 0 when it
@@ -566,7 +577,7 @@ type hotRegions struct {
 		t           quant.Type
 		qs          []int8
 		ps, half, x []float32
-		k, win      int
+		k, kx, win  int
 		fn          func(worker, lo, hi int)
 	}
 	// gatherQuant is MatVecPackedGather's quantize of every activation.
@@ -683,7 +694,7 @@ func (h *hotRegions) quantFn(f *JIT) func(worker, lo, hi int) {
 	if h.quant.fn == nil {
 		h.quant.fn = func(w, blo, bhi int) {
 			j := &h.quant
-			j.qk.Run(j.t, j.qs, j.ps, j.half, f.quantScratch(w), j.x, j.k, blo, bhi, j.win)
+			f.quantRow(j.qk, j.t, j.qs, j.ps, j.half, f.quantScratch(w), w, j.x, j.kx, j.k, blo, bhi, j.win)
 		}
 	}
 	return h.quant.fn

@@ -248,5 +248,5 @@ func (g *devTier) emitDenseMLP(lc *launcher, bs *blockScratch, l *layer, R int, 
 	lc.la(bs.normPart, R*bs.parts, x2, bs.part)
 	lc.la(bs.normApply, R*p.NEmbd, x2, l.nRouter, bs.part, bs.hr)
 	lc.la(bs.normApply, R*p.NEmbd, x2, l.nFFN2, bs.part, bs.h)
-	lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+	lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
 }

@@ -27,6 +27,10 @@ func (f *JIT) MatMulPacked(out []float32, t quant.Type, p *Packed, x []float32, 
 	if len(out) < nrows*ntok || len(x) < ntok*k {
 		return false
 	}
+	// x is ntok rows of kx; a ragged kx reads a weight packed at k
+	// (ragged.go), each row's tail quantized as zeros.
+	kx := k
+	k = raggedK(t, k)
 	// Either the fused kernel or the tile will do: without a fused kernel the
 	// tile serves the remainder itself (tok=1 is a legal width).
 	fused := f.packedFused[t]
@@ -62,7 +66,7 @@ func (f *JIT) MatMulPacked(out []float32, t quant.Type, p *Packed, x []float32, 
 	// NoGEMM (the prefill gates' exact arm) turns this GEMM off with the GGUF
 	// one: its integer-accumulating form is not bit-identical to the matvec.
 	var ws *cpu.Code
-	if f.cfg.GEMMTok >= 0 && !f.cfg.NoGEMM && nrows%8 == 0 && f.gemmRows != gemmOff {
+	if f.cfg.GEMMTok >= 0 && !f.cfg.NoGEMM && nrows%8 == 0 && f.gemmRows != gemmOff && kx == k {
 		ws = f.gemmFor(t, k, nrows)
 	}
 	qs, ps, hsz := k, 2*nb, half
@@ -70,13 +74,16 @@ func (f *JIT) MatMulPacked(out []float32, t quant.Type, p *Packed, x []float32, 
 		qs, ps, hsz = k+cpu.GEMMPad, 2*nb+cpu.GEMMPad/4, half+cpu.GEMMPad/4
 	}
 	f.growPackedMM(ntok, qs, ps, hsz)
+	if kx != k {
+		f.growRagStage(k)
+	}
 
 	tq := f.quantStart()
 	// One dispatch for every token's quantize, where there were ntok. The
 	// region's state is the JIT's (mmJob) and its function a method value
 	// built once, so a warm call allocates nothing.
 	j := &f.mmj
-	*j = mmJob{out: out, t: t, p: p, x: x, nrows: nrows, k: k, ntok: ntok, row: row, stride: stride,
+	*j = mmJob{out: out, t: t, p: p, x: x, nrows: nrows, k: k, kx: kx, ntok: ntok, row: row, stride: stride,
 		db: db, dstr: dstr, half: half, qs: qs, ps: ps, hsz: hsz, nb: nb, win: f.actWindow,
 		qk: f.quantKernel(t), step: step}
 	defer func() { f.mmj = mmJob{} }()
@@ -213,8 +220,8 @@ func (f *JIT) mmQuant(wk, lo, hi int) {
 		if j.half > 0 {
 			hs = f.mhalf[i*j.hsz : i*j.hsz+j.half]
 		}
-		j.qk.Run(j.t, q, f.mpairs[i*j.ps:i*j.ps+2*j.nb], hs, f.quantScratch(wk),
-			j.x[i*j.k:(i+1)*j.k], j.k, 0, j.nb, j.win)
+		f.quantRow(j.qk, j.t, q, f.mpairs[i*j.ps:i*j.ps+2*j.nb], hs, f.quantScratch(wk), wk,
+			j.x[i*j.kx:(i+1)*j.kx], j.kx, j.k, 0, j.nb, j.win)
 	}
 }
 
@@ -222,15 +229,15 @@ func (f *JIT) mmQuant(wk, lo, hi int) {
 // scratch the call already reuses, so the pool regions read it through method
 // values built once (mmFns) and a warm call allocates nothing.
 type mmJob struct {
-	out, x                                []float32
-	t                                     quant.Type
-	p                                     *Packed
-	nrows, k, ntok, row, stride, db, half int
-	dstr                                  int64
-	qs, ps, hsz, nb, win, step            int
-	qk                                    cpu.QuantActKernels
-	fused, tiled, rem1                    *cpu.Code
-	nt, ttok, rowsPer                     int
+	out, x                                    []float32
+	t                                         quant.Type
+	p                                         *Packed
+	nrows, k, kx, ntok, row, stride, db, half int
+	dstr                                      int64
+	qs, ps, hsz, nb, win, step                int
+	qk                                        cpu.QuantActKernels
+	fused, tiled, rem1                        *cpu.Code
+	nt, ttok, rowsPer                         int
 	// The weight-stationary GEMM's (packedGEMM).
 	code                              *cpu.Code
 	mout                              []float32

@@ -52,7 +52,12 @@ type shapeKey struct {
 // model (jit_stub.go); the Go arithmetic every kernel is gated against lives in
 // internal/oracle, which only tests may import.
 type JIT struct {
-	hot hotRegions // see hotRegions
+	// ragStage is a ragged activation's tail stage, ragStride floats a
+	// worker; ragViolation is a gate's violation of it (ragged.go).
+	ragStage     []float32
+	ragStride    int
+	ragViolation bool
+	hot          hotRegions // see hotRegions
 	// tier is the instruction-set tier this JIT was built for, recorded once
 	// at construction, and em is that tier's emitter table: every kernel this
 	// JIT emits comes from em, so a JIT never mixes tiers. Force a tier (a

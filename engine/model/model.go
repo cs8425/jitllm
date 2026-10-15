@@ -974,6 +974,12 @@ type tensor struct {
 	data []byte
 	rows int // ne1, output features
 	k    int // ne0, input features
+	// kp is the width the weight was packed at when its k is not a whole
+	// number of quantization blocks (a tower 144 wide): the converter pads
+	// it with zero columns to kp, and every product quantizes its k-wide
+	// activation as kp with a zero tail (nn's ragged quantizer on the host,
+	// kernels.QuantizePadded on a device). Zero where k is the packed width.
+	kp int
 	// packed is this weight in the device layout, set for a packed container
 	// type; nil for a verbatim one.
 	packed *nn.Packed
@@ -1175,8 +1181,12 @@ type expert struct{ gate, up, down tensor }
 
 // Model is a loaded transformer.
 type Model struct {
-	Cfg   *Config
-	Vocab *tok.Vocab
+	// kpadViolation is a gate's violation of a ragged tower on a device: its
+	// plans state no padded width (nn.LayerPlan.KPad), so the device
+	// quantizes the rows at their own width under weights packed wider.
+	kpadViolation bool
+	Cfg           *Config
+	Vocab         *tok.Vocab
 
 	// pager serialises decode when the container evicts; see pagelock.go.
 	pager sync.Mutex
