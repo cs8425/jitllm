@@ -50,6 +50,13 @@ type Embedder struct {
 	// attnLF is an LFM2 encoder's: its head width, k and v rows of its GQA
 	// key heads.
 	attnLF *nn.AttnSet
+	// aud is the audio tower's scratch (audio.go), and audioTap, where set,
+	// sees its stages' rows -- the gates' bisection hook.
+	aud      audioRun
+	audioTap func(stage string, rows []float32)
+	// audSeg is the audio tower's segment State, the one its blocks are
+	// placed on a device through (audiodev.go); nil until a device is.
+	audSeg *State
 
 	// rg is the pool regions the host's blocks run (encRegions).
 	rg encRegions
@@ -179,6 +186,17 @@ func (e *Embedder) encoderJIT() error {
 	if m.enc.lf != nil {
 		e.attnLF = e.jit.AttnSetFor(c.HeadDim, c.HeadDim, c.NKVHead*c.HeadDim, cpu.KVF32)
 	}
+	// The audio tower's depthwise subsampling rows, at the frequencies its
+	// mel bins halve to.
+	if a := m.audio; a != nil {
+		f := int(a.cfg.MelBins)
+		f = (f-1)/2 + 1
+		for range 2 {
+			fo := (f-1)/2 + 1
+			e.jit.AddDWConv(cpu.DWShape{K: 3, Stride: 2, WP: f + 2, Chans: int(a.cfg.SubChannels), WOut: fo})
+			f = fo
+		}
+	}
 	return nil
 }
 
@@ -191,6 +209,10 @@ func (e *Embedder) Close() {
 	if e.seg != nil {
 		e.seg.Close()
 		e.seg = nil
+	}
+	if e.audSeg != nil {
+		e.audSeg.Close()
+		e.audSeg = nil
 	}
 	if e.jit != nil {
 		e.jit.Close()

@@ -553,7 +553,7 @@ type State struct {
 	ldStep  nn.SessionStepper
 	ldRows  nn.RowsDevice
 	// roomHome counts batch steps whose device had no room for them, so the
-	// blocks came home first (forwardRows).
+	// blocks came home before the step (relocateRows, forwardRows).
 	roomHome int
 	ldNamed  nn.NamedDevice
 	// The lists a step this State leads reuses (step.go): Step's runs, the

@@ -242,3 +242,5 @@ func (f *JIT) WidenKVRows(dst, src []float32, hd, n int)    { unsupported() }
 func (f *JIT) MatMulFloat(out []float32, t quant.Type, w []byte, x []float32, nrows, k, ntok int) bool {
 	return false
 }
+
+func Ln32JIT(x []float32) { unsupported() }

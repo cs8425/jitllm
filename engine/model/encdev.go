@@ -29,6 +29,8 @@ import (
 // so the device runs without it too; empty everywhere but those tests.
 type encRun struct {
 	violation string
+	// audio says the segment is an audio tower's blocks (audiodev.go).
+	audio bool
 }
 
 // encBlocks is how many blocks an encoder's segment holds: the encoder's, and
@@ -247,6 +249,9 @@ func (m *Model) encZeros(n int) []float32 {
 
 // encPlan is encoder block li's plan for a device.
 func (s *State) encPlan(li int) *nn.LayerPlan {
+	if s.enc.audio {
+		return s.audPlan(li)
+	}
 	m, c := s.m, s.c
 	p := &nn.LayerPlan{
 		Model:     m.id,
@@ -324,6 +329,9 @@ func (s *State) encPlan(li int) *nn.LayerPlan {
 
 // encWeights is encoder block li's weights for a device.
 func (s *State) encWeights(li int) nn.LayerWeights {
+	if s.enc.audio {
+		return s.audWeights(li)
+	}
 	m, d := s.m, s.c.NEmbd
 	enc := m.enc
 	if lf := enc.lf; lf != nil && li < len(lf.blocks) {
