@@ -13,7 +13,8 @@
 # $JITLLM_MODELS/clef/fixture/, LiquidAI/d1-omni-600M-GGUF d1-omni-600M-F16.gguf and
 # mmproj-d1-omni-600M-F16.gguf into $JITLLM_MODELS/d1-omni/, and d1's mmproj-d1-3B-F16.gguf into
 # $JITLLM_MODELS/d1/ for the picture requests (pictures.json,
-# chatpicture.json). llama.cpp b11514 (ggml-org/llama.cpp releases,
+# chatpicture.json), and ggml-org/tinyopenjev-for-testing-gguf
+# tinyopenjev-for-testing-Q8_0.gguf into $JITLLM_MODELS/openjev/. llama.cpp b11514 (ggml-org/llama.cpp releases,
 # llama-b11514-bin-ubuntu-x64) or newer.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -68,5 +69,6 @@ want Laya-BF16 && gold laya/gguf/Laya-BF16.gguf Laya-BF16
 want Clef-Flash-Q8_0 && gold clef/Clef-Flash-Q8_0.gguf Clef-Flash-Q8_0
 want clef-fixture && gold clef/fixture/clef-fixture.gguf clef-fixture
 want d1-omni-600M-F16 && gold d1-omni/d1-omni-600M-F16.gguf d1-omni-600M-F16
+want tinyopenjev-for-testing-Q8_0 && gold openjev/tinyopenjev-for-testing-Q8_0.gguf tinyopenjev-for-testing-Q8_0
 want d1-omni-600M-F16 && gold d1-omni/d1-omni-600M-F16.gguf d1-omni-600M-F16 d1-omni/mmproj-d1-omni-600M-F16.gguf pictures voice
 true
