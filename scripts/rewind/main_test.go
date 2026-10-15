@@ -157,3 +157,22 @@ func TestRemovesLines(t *testing.T) {
 		t.Fatal("prefix rule")
 	}
 }
+
+// The CI job runs main's copy of the program against a PR checkout that has
+// no scripts/rewind of its own (a branch older than the check): -C names the
+// repository, and nothing is read from it but git's objects.
+func TestRunsAgainstARepositoryWithoutTheProgram(t *testing.T) {
+	r, oldMain := fixture(t)
+	head := rewindCommit(r, oldMain)
+	if _, err := os.Stat(filepath.Join(r.dir, "scripts", "rewind")); err == nil {
+		t.Fatal("fixture carries the program")
+	}
+	cmd := exec.Command("go", "run", ".", "-C", r.dir, "-base", "main", "-head", head)
+	out, err := cmd.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+		t.Fatalf("want exit 1, got %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "a.txt") {
+		t.Fatalf("a.txt not reported:\n%s", out)
+	}
+}
