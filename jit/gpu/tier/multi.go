@@ -1433,6 +1433,40 @@ func (g *GPU) migrateRec(sid uint64, li int, conv, state []float32, toDevice boo
 	return d.migrateRec(sid, li, conv, state, toDevice)
 }
 
+// PublishKV names block li's page of the zero session by key, on the device
+// holding the block (nn.KVShareDevice).
+func (g *GPU) PublishKV(li, page int, key string) bool { return g.publishKV(0, li, page, key) }
+
+// MapKV puts the page key names into the zero session's page of block li.
+func (g *GPU) MapKV(li, page int, key string, end int) bool { return g.mapKV(0, li, page, key, end) }
+
+// SnapRec, HasRec and LoadRec are the zero session's restore points of
+// block li, on the device holding it (nn.RecShareDevice).
+func (g *GPU) SnapRec(li int, key string) bool { return g.recShare(0, li, key, 0) }
+func (g *GPU) HasRec(li int, key string) bool  { return g.recShare(0, li, key, 1) }
+func (g *GPU) LoadRec(li int, key string) bool { return g.recShare(0, li, key, 2) }
+
+func (g *GPU) recShare(sid uint64, li int, key string, op int) bool {
+	g.mu.Lock()
+	d := g.own[li]
+	g.mu.Unlock()
+	return d != nil && d.recShareCall(sid, li, key, op)
+}
+
+func (g *GPU) publishKV(sid uint64, li, page int, key string) bool {
+	g.mu.Lock()
+	d := g.own[li]
+	g.mu.Unlock()
+	return d != nil && d.publishKVs(sid, li, page, key)
+}
+
+func (g *GPU) mapKV(sid uint64, li, page int, key string, end int) bool {
+	g.mu.Lock()
+	d := g.own[li]
+	g.mu.Unlock()
+	return d != nil && d.mapKVs(sid, li, page, key, end)
+}
+
 // MigrateKV is migrateKV for the zero session: a caller that never attached.
 func (g *GPU) MigrateKV(li int, k, v []float32, pos int, toDevice bool) bool {
 	return g.migrateKV(0, li, k, v, pos, toDevice)

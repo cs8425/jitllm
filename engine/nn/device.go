@@ -1427,6 +1427,27 @@ type RowsRoomer interface {
 	RowsRoom(rows, seqs int) bool
 }
 
+// KVShareDevice is a device whose KV pages the prefix cache can name and map
+// (jit/gpu/tier/kvshare.go): PublishKV names the session's page of block li
+// by key, held by the session; MapKV puts the page key names into the
+// session's page, the sequence then written to end at least, no byte moved,
+// and is false when no page answers to key. A write into a named page copies
+// it first.
+type KVShareDevice interface {
+	PublishKV(li, page int, key string) bool
+	MapKV(li, page int, key string, end int) bool
+}
+
+// RecShareDevice is a device that keeps a linear block's restore points where
+// its state lives (jit/gpu/tier/recshare.go): SnapRec copies the session's
+// state of block li into the snapshot named key, HasRec says one is kept, and
+// LoadRec copies it into the session's state. Nothing crosses the bus.
+type RecShareDevice interface {
+	SnapRec(li int, key string) bool
+	HasRec(li int, key string) bool
+	LoadRec(li int, key string) bool
+}
+
 // SeqKVDevice is a LayerDevice that keeps attention history per sequence --
 // the device pages it (docs/design/device-kv-paging.md) -- rather than one
 // cache laid out in RowsDevice's slots. A batch's rows then migrate one at a

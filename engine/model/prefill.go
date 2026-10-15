@@ -463,6 +463,8 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 	if s.seqPos(slot)+total > s.maxSeq {
 		return nil, errFull{s.maxSeq, s.reqSeq}
 	}
+	s.recPrefill = true
+	defer func() { s.recPrefill = false }()
 	// A bidirectional embedding run is one chunk: no row's attention exists
 	// until every row's k and v are in the cache.
 	bidir := s.emb != nil && s.emb.bidir
@@ -550,6 +552,15 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 			}
 		}
 		n := min(width, total-base)
+		// A placed linear block's summary is a restore point only where a
+		// chunk ends (recChunkPoint): a cached hybrid's device chunk ends at
+		// the mark, the one point it is cut for. A device runs a chunk at one
+		// fixed grid, so every other point is where a chunk ends anyway.
+		if s.devCount() > 0 && !bidir && !spanAll && s.devLinear() && s.recPointsOn() {
+			if m := s.recMark - s.seqPos(slot); m > 0 && m < n && s.recEvery() > 0 {
+				n = m
+			}
+		}
 		// A bidirectional run is never cut (bidir.go).
 		if len(s.bidir) > 0 && !s.bidirCutFault {
 			n = min(s.bidirChunk(s.seqPos(slot), n), total-base)
@@ -906,6 +917,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 		if s.rowTap != nil {
 			s.rowTap(p0, s.bx[:n*c.ResidW()])
 		}
+		s.recChunkPoint(slot, p0+n)
 		s.advance(slot, n)
 		// The last chunk's last row is the only one the caller can use, so it
 		// becomes the decode path's residual stream and the session continues
@@ -1356,6 +1368,7 @@ func (s *State) hostRows(li, slot, base, p0, n, chunkRows int, bidir bool) error
 				return err
 			}
 			s.rows.snapRow(s, li, slot, base+r)
+			s.recRowPoint(li, slot, p0+r+1)
 		}
 		s.tock(opAttn, ta)
 		if batched {

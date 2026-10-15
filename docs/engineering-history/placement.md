@@ -3846,20 +3846,62 @@ and only the granularity was wrong.
 THOSE.** Two prompts sharing TEN tokens reuse nothing at chunk 16, and that is
 the design rather than a fault.
 
-★★ **AND A HYBRID RESTORES AT ONE POINT PER PROMPT, BECAUSE A RECURRENCE CANNOT
-BE REWOUND AND ITS STATE IS 79 MB.** The attention pages are sealed at every
-chunk; the gated delta rule's summary can only be sealed where the engine
-actually holds it, which at the end of a prefill is the prompt's end and nowhere
-earlier. Measured on Qwen3-Next-80B: an 88 MB cache entry, of which 36 linear
-layers x 2,195,456 B = **79 MB** is the summary. So a point every 16 positions
-would be 1.26 GB for a 256-token prompt against a default cache of 8 GiB.
-Capturing them DURING prefill is the way to have more and is unbuilt, priced
-rather than assumed.
+★★ **A HYBRID RESTORED AT ONE POINT PER PROMPT, BECAUSE A RECURRENCE CANNOT BE
+REWOUND AND ITS STATE IS 79 MB -- AND NOW KEEPS POINTS DURING PREFILL, PRICED
+PER MODEL.** The gated delta rule's summary can only be sealed where the engine
+holds it. Measured on Qwen3-Next-80B: an 88 MB cache entry, of which 36 linear
+layers x 2,195,456 B = **79 MB** is the summary, so a point every 16 positions
+would be 1.26 GB for a 256-token prompt. For a while a hybrid therefore probed
+only the exact end, and a decision model (d1 = LFM2, Lev = qwen35) restored
+nothing across requests whose boards differed in a few tokens.
 
-**So a hybrid probes only the exact end.** Probing chunks it cannot resume from
-made it fault every layer's pages and then give the whole prefix up -- through a
-counter whose message read *"it could not be moved onto the device"* on a
-`-devices cpu` run.
+Points are captured during prefill now (`engine/model/recpoint.go`): a host
+linear block's summary after the row that lands on a point, in the row loop
+(`recRowPoint`). The spacing is priced per model (`recEvery`): the smallest
+power-of-two multiple of kvChunk at which a point's summaries cost no more than
+the attention history the same span adds, capped at the page -- **16 on d1
+(LFM2's short convolutions), 256 on Lev (qwen35's delta state)**. Beside the
+spaced points, one at the position a prompt parts from the one before it
+(`recMark`): a request's state before each question, a conversation before its
+newest turn, restored exactly by the next prompt that shares it. Restore
+probes the points at or under the prompt's limit, largest first
+(`kvCache.restore(limit)`), each only with every summary there.
+
+★★ **AND THE PAGES ARE SHARED, NOT COPIED (`SharedStore`).** A first version
+stored the attention prefix at every point as a copy (a fill-named page per
+16 positions, then 16-position chunks) through `MemStore` and copied it back
+into the session on restore: a second copy of the history beside the
+session's, against the standing rule that host storage follows ownership. It
+was deleted. A sharing session (`State.ShareKV`, now accepted on a hybrid)
+publishes its pages to the store -- the sealed ones as before, and the page a
+prompt ends inside under the key of its fill -- and names each page by the
+chunks of history it holds (`SharedStore.alias`, `kvCache.aliasChunks`), no
+byte moved. A prompt that parts from it inside a page aliases that page by
+the chunk it shares; its first write there copies that one page
+(`kvPages.cow`). The restore points' summaries are the one copy: a state that
+moves on, stored through the store's `Set` (in place when re-stored).
+
+★★ **AND ON A DEVICE THE PAGES ARE NAMED WHERE THEY LIVE.** The pool's pages
+were the session's alone ("two sessions' pages never alias",
+device-kv-paging.md), so a device block's history went home to be cached and
+came back up to be restored -- on the V100 a warm d1 decision took 2x a cold
+one, most of it those migrations. A layer's page now carries the cache's key
+and a count of the sequences holding it (`jit/gpu/tier/kvshare.go`): sealing
+names it (`PublishKV`), a restore puts it into the sequence's table
+(`MapKV`), a write into one copies that page on the card first (`cowPages`),
+a sequence letting it go drops its hold, and the unheld named pages are the
+first room taken back. Eviction is as built; compaction gives the unheld
+named pages back first and leaves a layer with held ones alone. A linear
+block's restore points are snapshots on the card (`recshare.go`), copied from
+and into the session's seat. `Stats.KVPositionsMigrated` is zero for a warm
+prompt (`TestDecisionReusesThePrefix`), and a device chunk is cut once, at the
+mark: a device runs a chunk at one fixed grid.
+
+**And a warm prompt through the shared store makes no heap allocation**
+(`TestDecisionWithAPrefixDoesNotAllocate`): the keys are hashed with a kept
+hasher and named once (`kvCache.digest`), the probe list and the recurrent
+staging are kept, a copy-on-write takes the layer's spare, and a page the store
+already held hands the session's memory back to that spare.
 
 ★★ **AND `-kv-cache` CACHED NOTHING FOR ANY REALISTIC PROMPT UNTIL `sealTail`,
 AND ITS OWN MESSAGE EXPLAINED WHY IN A WAY THAT READ AS INTENT.** A page sealed
