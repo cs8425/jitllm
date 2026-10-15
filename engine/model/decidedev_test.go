@@ -33,7 +33,10 @@ import (
 // near-tie, a nine-way rating distribution whose top two sit 0.02 apart
 // (ambiguous question 3, p 0.47 against 0.49): the laptop's 0.058 on five
 // blocks is the same. Its violations move the answers 0.65-0.69.
-var decisionDevTol = map[string]float64{"d1-3B": 0.03, "lev": 0.08, "laya": 0.01, "clef": 0.05, "clef-fixture": 0.002, "d1-omni": 0.01, "openjev": 0.005}
+// vllm-d3's 0.10: the ambiguous request's issue question is a near-tie
+// (0.50 against 0.50 on the host), where the device's reduction order reads
+// 0.085 off on the V100 and the laptop alike.
+var decisionDevTol = map[string]float64{"d1-3B": 0.03, "lev": 0.08, "laya": 0.01, "clef": 0.05, "clef-fixture": 0.002, "d1-omni": 0.01, "openjev": 0.005, "vllm-d3": 0.10}
 
 // decisionBlocks is how many blocks a Decider's readout runs: the decoder's,
 // or the encoder segment's (a decision head's blocks with it).
@@ -157,6 +160,9 @@ type decisionDevViolation struct {
 var decisionDevViolations = map[string]decisionDevViolation{
 	// The norm's epsilon is read into the plan (LayerPlan.RMSEps).
 	"d1-3B": {"a norm epsilon of 1", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.RMSEps = 1 })
+	}},
+	"vllm-d3": {"a norm epsilon of 1", func(m *Model) func() {
 		return cfgMut(m, func(c *Config) { c.RMSEps = 1 })
 	}},
 	"lev": {"a norm epsilon of 1", func(m *Model) func() {

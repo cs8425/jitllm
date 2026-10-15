@@ -135,6 +135,8 @@ func main() {
 		err = tokenizeCmd(os.Args[2:])
 	case "convert":
 		err = convertCmd(os.Args[2:])
+	case "upgrade":
+		err = upgradeCmd(os.Args[2:])
 	case "library":
 		err = libraryCmd(os.Args[2:])
 	case "embed":
@@ -165,6 +167,7 @@ func usage() {
   jitllm speed [-devices SPEC] [-p N] [-n N] [-r N] <model.jlm>   llama-bench's pp/tg, warmed
   jitllm batch [-devices SPEC] [-batch N] [-n N] <model.jlm> <prompt...>
   jitllm verify [flags] <model.jlm>
+  jitllm upgrade <model.jlm>...   bring containers from an older jitllm to this build's version, in place
   jitllm convert [-o DIR] [-chat-template FILE] <model.gguf|model-dir|URL|NAME> [mmproj.gguf|URL] [out.jlm]
   jitllm library [-refs]   the models convert fetches by NAME
   jitllm asm <Q4_0|Q8_0|Q4_K>[x4]

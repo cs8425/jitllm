@@ -171,6 +171,9 @@ func (s *State) ngramApply(li int, l *layer, x []float32, n int, order []int,
 			copy(hs, hs[hd:])
 			copy(hs[(hist-1)*hd:], cur)
 		}
+		if o == s && sl == 0 {
+			s.rows.snapTail(s, li, r, c.NGram-1, hs)
+		}
 		for k := 0; k < h; k++ {
 			xk := c.stream(x, k, n, r)
 			s.axpy(xk, g.gv[(r*h+k)*e:(r*h+k+1)*e], 1)
@@ -212,6 +215,9 @@ func (s *State) ngramRows(li, n int, order []int, owner func(r int) (*State, int
 		nn.NGramHashJIT(g.idx, g.hnext, g.hwin, g.konst, g.ids, c.NGramHeadsPer, c.q4eFault != q4eFaultNoEOSReset)
 		for i := range prev {
 			prev[i] = math.Float32frombits(g.hnext[i])
+		}
+		if o == s && sl == 0 {
+			s.rows.snapTail(s, li, r, 0, prev)
 		}
 		for hh, row := range g.idx {
 			if err := s.m.ngram.f.ReadRow(s.m.ngram.e, row, g.raw, g.scr); err != nil {

@@ -500,14 +500,20 @@ func (g *devTier) markNoRoom(width int) {
 // the width and allocate its buffers only to drop them, and a step that runs
 // at the reserved width (batchFor) did that every step on a card the width
 // did not fit. Callers hold g.mu.
+//
+// A wider width than one refused is refused with it: a scratch grows with its
+// rows, and a bidirectional prompt asks for its own length every time (a
+// width a prompt), which rebuilt and dropped a scratch per prompt.
 func (g *devTier) noRoomFor(width int) bool {
-	at, ok := g.noRoom[noRoomKey{g.geoCur, width}]
-	if !ok {
-		return false
+	for k, at := range g.noRoom {
+		if k.geo != g.geoCur || k.width > width {
+			continue
+		}
+		if g.used < at.used || g.limit > at.limit || g.promisedBytes() < at.promised {
+			delete(g.noRoom, k)
+			continue
+		}
+		return true
 	}
-	if g.used < at.used || g.limit > at.limit || g.promisedBytes() < at.promised {
-		delete(g.noRoom, noRoomKey{g.geoCur, width})
-		return false
-	}
-	return true
+	return false
 }

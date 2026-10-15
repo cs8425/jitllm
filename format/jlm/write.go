@@ -45,6 +45,11 @@ type Tensor struct {
 	Data  []byte
 	Load  func() ([]byte, error)
 	Name  string // diagnostics only
+	// Stored says Data (or Load) is already this format's layout -- a packed
+	// type's planes, every sheet's QS, then every sheet's D, then every
+	// sheet's SC -- as a migration reads it out of a container (migrate.go);
+	// the writer places it without packing.
+	Stored bool
 }
 
 // Bytes is the tensor's source bytes, from Data or from Load.
@@ -710,7 +715,7 @@ func (l *layout) write(dst string, src *Source) (*Header, error) {
 		if i+1 < len(es) {
 			go fetch(i + 1)
 		}
-		n, err := writeTensor(out, e, got.b, expPageSize)
+		n, err := writeTensor(out, e, got.b, expPageSize, src.Tensors[i].Stored)
 		if err != nil {
 			return nil, err
 		}
@@ -742,7 +747,7 @@ func (l *layout) write(dst string, src *Source) (*Header, error) {
 
 // writeTensor packs one tensor's source bytes into its place and reports how
 // many bytes it wrote.
-func writeTensor(out *os.File, e *Entry, raw []byte, expPageSize uint64) (uint64, error) {
+func writeTensor(out *os.File, e *Entry, raw []byte, expPageSize uint64, stored bool) (uint64, error) {
 	var n uint64
 	put := func(b []byte, off uint64) error {
 		if _, err := out.WriteAt(b, int64(off)); err != nil {
@@ -775,10 +780,22 @@ func writeTensor(out *os.File, e *Entry, raw []byte, expPageSize uint64) (uint64
 	if err != nil {
 		return n, fmt.Errorf("jlm: %v: %w", e.Role, err)
 	}
+	if stored && len(raw) != int(sheets)*(nq+nd+nsc)*4 {
+		return n, fmt.Errorf("jlm: %v: %d stored bytes for %d sheets of %d words", e.Role, len(raw), sheets, nq+nd+nsc)
+	}
 	for sh := 0; sh < int(sheets); sh++ {
-		qs, dw, sc, err := kernels.PackWeights(q, raw[sh*srcSheet:(sh+1)*srcSheet], int(rows), e.K())
-		if err != nil {
-			return n, fmt.Errorf("jlm: %v sheet %d: %w", e.Role, sh, err)
+		var qs, dw, sc []byte
+		if stored {
+			S := int(sheets)
+			qs = raw[sh*nq*4 : (sh+1)*nq*4]
+			dw = raw[(S*nq+sh*nd)*4 : (S*nq+(sh+1)*nd)*4]
+			sc = raw[(S*(nq+nd)+sh*nsc)*4 : (S*(nq+nd)+(sh+1)*nsc)*4]
+		} else {
+			pq, pd, psc, err := kernels.PackWeights(q, raw[sh*srcSheet:(sh+1)*srcSheet], int(rows), e.K())
+			if err != nil {
+				return n, fmt.Errorf("jlm: %v sheet %d: %w", e.Role, sh, err)
+			}
+			qs, dw, sc = U32Bytes(pq), U32Bytes(pd), U32Bytes(psc)
 		}
 		sq, sd, ssc := uint64(sh*nq*4), uint64(sh*nd*4), uint64(sh*nsc*4)
 		if split {
@@ -786,16 +803,16 @@ func writeTensor(out *os.File, e *Entry, raw []byte, expPageSize uint64) (uint64
 		}
 		for _, w := range []struct {
 			off uint64
-			v   []uint32
+			b   []byte
 		}{
 			{e.QSOff + sq, qs},
 			{e.DOff + sd, dw},
 			{e.SCOff + ssc, sc},
 		} {
-			if len(w.v) == 0 {
+			if len(w.b) == 0 {
 				continue
 			}
-			if err := put(U32Bytes(w.v), w.off); err != nil {
+			if err := put(w.b, w.off); err != nil {
 				return n, err
 			}
 		}
