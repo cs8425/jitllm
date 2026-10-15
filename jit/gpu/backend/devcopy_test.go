@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/kernels"
 )
@@ -171,7 +172,7 @@ func everyDevice(t *testing.T) []backend.Device {
 	infos, err := backend.VulkanDevices()
 	if err == nil {
 		for _, in := range infos {
-			if opened[in.Index] {
+			if opened[in.Index] || !testdevices.Has(t, "vulkan", in.Index) {
 				continue
 			}
 			d, err := backend.OpenVulkan(strconv.Itoa(in.Index))

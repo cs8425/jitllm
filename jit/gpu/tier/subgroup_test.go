@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jitllm/jitllm/engine/nn"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/ir"
 	"github.com/jitllm/jitllm/jit/gpu/vulkan"
@@ -22,6 +23,9 @@ func realDevices(t *testing.T) []backend.Device {
 	var out []backend.Device
 	if n, err := backend.CUDACount(); err == nil && n > 0 {
 		for i := 0; i < n; i++ {
+			if !testdevices.Has(t, "cuda", i) {
+				continue
+			}
 			if d, err := backend.OpenCUDA(i); err == nil {
 				out = append(out, d)
 			}
@@ -32,7 +36,7 @@ func realDevices(t *testing.T) []backend.Device {
 		t.Logf("no Vulkan here: %v", err)
 	}
 	for _, in := range infos {
-		if !in.Compute {
+		if !in.Compute || !testdevices.Has(t, "vulkan", in.Index) {
 			continue
 		}
 		d, err := backend.OpenVulkanWith(strconv.Itoa(in.Index), unpinned)
@@ -44,7 +48,7 @@ func realDevices(t *testing.T) []backend.Device {
 	}
 	// Metal is a real device too: without it every gate below skipped on
 	// Apple Silicon as "no GPU on this host".
-	if d, err := backend.OpenMetalWith(backend.Opts{}); err == nil {
+	if d, err := backend.OpenMetalWith(backend.Opts{Enumerating: true}); err == nil {
 		out = append(out, d)
 	}
 	return out
@@ -138,7 +142,7 @@ func TestSelectionFollowsTheGuaranteeWhenPinningIsOff(t *testing.T) {
 	}
 	seen := map[int]int{}
 	for _, in := range infos {
-		if !in.Compute {
+		if !in.Compute || !testdevices.Has(t, "vulkan", in.Index) {
 			continue
 		}
 		d, err := backend.OpenVulkanWith(strconv.Itoa(in.Index), unpinned)

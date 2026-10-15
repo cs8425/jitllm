@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/kernels"
 )
@@ -46,6 +47,9 @@ func importDevices(t *testing.T) []backend.Device {
 		return out
 	}
 	for i := range infos {
+		if !testdevices.Has(t, "vulkan", i) {
+			continue
+		}
 		d, err := backend.OpenVulkan(strconv.Itoa(i))
 		if err != nil {
 			t.Logf("vulkan device %d: %v", i, err)

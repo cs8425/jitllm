@@ -1,10 +1,9 @@
 package model
 
 import (
-	"os"
-	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -26,10 +25,7 @@ var prefixWindowFixtures = []string{"synth-exaone4.gguf"}
 // as a full layer is walked (kvCache.walkWindow); on a device, where the pages
 // behind the window were never sent home, that restores nothing.
 func TestPrefixCacheRestoresAWindowedLayer(t *testing.T) {
-	specs := []string{"", "cuda", "vulkan", "metal"}
-	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
-		specs = append([]string{""}, strings.Split(v, ",")...)
-	}
+	specs := append([]string{""}, testdevices.Specs("cuda", "vulkan", "metal")...)
 	for _, fx := range prefixWindowFixtures {
 		t.Run(fx, func(t *testing.T) {
 			m, err := Open(jlmOf(t, testmodels.Path(fx)), noTune)

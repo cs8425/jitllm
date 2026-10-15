@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -21,6 +22,7 @@ import (
 // picked by hand left whatever room placement's rounding happened to leave,
 // and on some budgets that held the growth and nothing spilled.
 func TestAFullCardSpillsABlockOntoTheNextOne(t *testing.T) {
+	testdevices.Require(t, "cuda:0")
 	p := testmodels.Path("Llama-3.2-1B-Instruct-Q4_K_M.jlm")
 	if _, err := os.Stat(p); err != nil {
 		t.Skipf("MODEL MISSING: %v (set JITLLM_MODELS to the model directory) -- this gate proved nothing", err)
@@ -61,7 +63,7 @@ func TestAFullCardSpillsABlockOntoTheNextOne(t *testing.T) {
 	first := spillBudget(380_000_000)
 	// open tries cuda:0 beside each second device, capping the ones caps names.
 	open := func(caps map[string]uint64) *tier.GPU {
-		for _, second := range []string{"cuda:1", "vulkan:1"} {
+		for _, second := range testdevices.Within([]string{"cuda:1", "vulkan:1"}) {
 			spec := ""
 			for _, name := range []string{"cuda:0", second} {
 				if spec != "" {

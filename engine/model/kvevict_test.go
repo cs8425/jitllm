@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -102,7 +103,7 @@ func (eg *evictGate) second(t *testing.T, st *State) [][]float32 {
 // open is an arm's device and State, the model wholly placed and the prompt
 // in; squeeze then holds the budget at a few pages of slack.
 func (eg *evictGate) open(t *testing.T, squeeze bool) (*tier.GPU, *State, int) {
-	g, err := tier.OpenWith(tier.WithDevices("cuda:0"), tier.WithDeviceTune(tier.TuneOff),
+	g, err := tier.OpenWith(tier.WithDevices(testdevices.Like(t, "cuda:0")), tier.WithDeviceTune(tier.TuneOff),
 		tier.WithConfig(func(c *tier.Config) {
 			c.KVPage = 64 // the smallest page: several over a short history
 			c.StagedDecode = true

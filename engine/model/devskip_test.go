@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
+	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/vulkan"
 )
 
@@ -27,7 +29,10 @@ func noDevice(t *testing.T, what string, err error) {
 // TestMain fails the binary when any Vulkan enumeration in it shrank, which
 // catches an arm that skipped on a vanished device through a path noDevice
 // does not cover.
-func TestMain(m *testing.M) { os.Exit(vanishedFails(persistRan(m.Run()))) }
+func TestMain(m *testing.M) {
+	testdevices.Install(backend.Restrict)
+	os.Exit(testdevices.Fail(vanishedFails(persistRan(m.Run()))))
+}
 
 // vanishedFails is code, or a failure naming the Vulkan devices that went
 // missing during the run.

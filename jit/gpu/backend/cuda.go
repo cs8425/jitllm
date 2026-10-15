@@ -165,7 +165,7 @@ func (c *cudaDev) peerTo(f *cudaDev) bool {
 }
 
 // openCUDA is what backend.Open uses: the first card.
-func openCUDA(o Opts) (Device, error) { return OpenCUDAWith(0, o) }
+func openCUDA(o Opts) (Device, error) { return OpenCUDAWith(-1, o) }
 
 // CUDACount is how many CUDA devices the driver sees, without opening one.
 // Opening costs a context, a locked OS thread and an owner goroutine, so a
@@ -179,7 +179,19 @@ func CUDACount() (int, error) { return cuda.Count() }
 func OpenCUDA(ord int) (Device, error) { return OpenCUDAWith(ord, Opts{}) }
 
 // OpenCUDAWith is OpenCUDA with this device's open choices.
+//
+// An enumerating open of an ordinal below zero is the default pick: device 0, or the first device an
+// installed Restriction allows.
 func OpenCUDAWith(ord int, opts Opts) (Device, error) {
+	if ord >= 0 || opts.Enumerating {
+		var err error
+		if ord, err = admit("ptx", ord, opts.Enumerating); err != nil {
+			return nil, err
+		}
+	}
+	if ord < 0 && opts.Enumerating {
+		ord = 0
+	}
 	reqs := make(chan func(), 1)
 	type opened struct {
 		d   *cuda.Device

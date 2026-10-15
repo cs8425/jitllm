@@ -2,9 +2,9 @@ package model
 
 import (
 	"os"
-	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -30,7 +30,7 @@ import (
 // one recurrent state a row at a time in position order, which on a device is
 // the run forms of the linear kernels (tier.Stats.RecChainRows, the selection
 // check there: a chunk's rows past its first chained through its state).
-// JITLLM_MIX_DEVICES (comma-separated) names the backends; the default is
+// JITLLM_TEST_DEVICES names the devices; the default is
 // every one this project has.
 func TestSchedulerMixesPromptsIntoDecodeSteps(t *testing.T) {
 	for _, c := range []struct{ name, path string }{
@@ -68,10 +68,7 @@ func mixedModel(t *testing.T, p string) {
 	t.Run("host", func(t *testing.T) { mixedArm(t, m, ids, gens, "") })
 	// Every backend this host has: a step's matvecs and attention are chosen
 	// per device, and a gate that asks for one covers none of the others.
-	specs := []string{"cuda:0", "vulkan:0", "vulkan:1", "metal"}
-	if v := os.Getenv("JITLLM_MIX_DEVICES"); v != "" {
-		specs = strings.Split(v, ",")
-	}
+	specs := testdevices.Specs("cuda:0", "vulkan:0", "vulkan:1", "metal")
 	for _, spec := range specs {
 		t.Run(spec, func(t *testing.T) { mixedArm(t, m, ids, gens, spec) })
 	}

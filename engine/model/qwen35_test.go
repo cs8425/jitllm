@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
 
@@ -14,7 +15,7 @@ import (
 // capture and silently disables graphs.
 func TestHybridDecodeIsCaptured(t *testing.T) {
 	m := hybridModelOpt(t, hyOpt{tiled: true})
-	g, err := tier.OpenWith(tier.WithDevices("cuda:0"), tier.WithDeviceTune(tier.TuneOff))
+	g, err := tier.OpenWith(tier.WithDevices(testdevices.Like(t, "cuda:0")), tier.WithDeviceTune(tier.TuneOff))
 	if err != nil || g == nil {
 		t.Skipf("no cuda device: %v", err)
 	}

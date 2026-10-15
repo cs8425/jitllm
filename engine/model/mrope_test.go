@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -633,7 +634,7 @@ func mRopeKeepsTheFivePrinciples(t *testing.T, name string) {
 				w, win, m.container.Reads()-r0, captures)
 		}
 		t.Run("host", func(t *testing.T) { arm(t, nil) })
-		for _, spec := range []string{"cuda", "vulkan", "metal"} {
+		for _, spec := range testdevices.Specs("cuda", "vulkan", "metal") {
 			t.Run(spec, func(t *testing.T) {
 				gpu, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(spec)}, testTierOpts(t)...)...)
 				if err != nil || gpu == nil {

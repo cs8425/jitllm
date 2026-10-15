@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -22,7 +23,7 @@ var gateUp2Models = []string{"Llama-3.2-1B-Instruct-Q4_K_M.gguf", "Qwen2-1.5B-In
 //
 // gateUp2Devices are the backends the gate runs on, each where this host has
 // one.
-var gateUp2Devices = []string{"cuda", "vulkan", "metal"}
+var gateUp2Devices = testdevices.Specs("cuda", "vulkan", "metal")
 
 // gateUp2Decode decodes steps teacher-forced tokens after a prompt on one
 // fresh tier over devs, twice: with Gate2 off and with it forced on, the

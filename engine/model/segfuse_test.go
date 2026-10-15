@@ -7,6 +7,7 @@ import (
 
 	"github.com/jitllm/jitllm/convert"
 	"github.com/jitllm/jitllm/format/jlm"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -37,7 +38,7 @@ func TestSegFusedPairsOnDevice(t *testing.T) {
 			}
 			defer m.Close()
 			run := func(fuse bool) ([][]float32, tier.Stats) {
-				opts := []tier.Option{tier.WithDevices("cuda:0"), tier.WithDeviceTune(tier.TuneOff),
+				opts := []tier.Option{tier.WithDevices(testdevices.Like(t, "cuda:0")), tier.WithDeviceTune(tier.TuneOff),
 					tier.WithSplit(1)}
 				if !fuse {
 					opts = append(opts, tier.WithConfig(func(c *tier.Config) { c.NoSegFuse = true }))

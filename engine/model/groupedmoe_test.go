@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -79,8 +80,8 @@ func batchedMixtureCase(t *testing.T, name string, float, violate bool) float64 
 	const gen = 12
 	run := func(noBatch bool) ([]float32, []int32, tier.Stats, string, int) {
 		opts := []tier.Option{tier.WithDeviceTune(tier.TuneOff), tier.WithPoisonScratch(true)}
-		if d := os.Getenv("JITLLM_MOE_DEVICES"); d != "" {
-			opts = append(opts, tier.WithDevices(d)) // a model bigger than one card
+		if testdevices.Selected() {
+			opts = append(opts, tier.WithDevices(testdevices.Spec(""))) // a model bigger than one card
 		}
 		g, err := tier.OpenWith(append(opts,
 			tier.WithConfig(func(c *tier.Config) {

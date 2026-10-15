@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jitllm/jitllm/engine/nn"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
@@ -82,7 +83,7 @@ func schedulerOnSplit(t *testing.T, p string) {
 	// that share of the weights plus what the whole model costs a card beside
 	// its weights.
 	var sc uint64
-	if g, err := tier.OpenWith(tier.WithDevices("cuda:0"), tier.WithDeviceTune(tier.TuneOff)); err == nil && g != nil {
+	if g, err := tier.OpenWith(tier.WithDevices(testdevices.Like(t, "cuda:0")), tier.WithDeviceTune(tier.TuneOff)); err == nil && g != nil {
 		sz := NewScheduler(m, rows, seq)
 		if err := sz.st.SetDeviceLayers(g, -1); err == nil && g.Stats().BudgetUsed > m.WeightBytes() {
 			sc = g.Stats().BudgetUsed - m.WeightBytes()
@@ -149,6 +150,7 @@ func schedulerOnSplit(t *testing.T, p string) {
 			if arm.devs == 4 && len(four) < 4 {
 				t.Skipf("%s -- this arm proved nothing here", fourWhy)
 			}
+			testdevices.Require(t, arm.spec)
 			m := m
 			if arm.place != nil {
 				km, err := Open(jlmOf(t, p), noGEMM, WithPlacement(Placement{Blocks: arm.place, Strict: true}))
@@ -271,20 +273,21 @@ func schedulerOnSplit(t *testing.T, p string) {
 	}
 }
 
-// fourDevices is four distinct GPUs to split a model over: JITLLM_FOUR_DEVICES
-// when it names them, otherwise every CUDA device and then each Vulkan GPU
+// fourDevices is four distinct GPUs to split a model over: the first four of
+// JITLLM_TEST_DEVICES when it is set, otherwise every CUDA device and then each Vulkan GPU
 // that is not one of them -- so a host whose CUDA_VISIBLE_DEVICES shows one
 // card still runs the arm on the cards Vulkan sees, the same physical card
 // never counted twice (backend.Identity) and a software rasteriser never
 // counted at all. Fewer than four is the reason, for the arm's skip.
 func fourDevices(t *testing.T) ([]string, string) {
 	t.Helper()
-	if v := os.Getenv("JITLLM_FOUR_DEVICES"); v != "" {
-		specs := strings.Split(v, ",")
-		if len(specs) != 4 {
-			t.Fatalf("JITLLM_FOUR_DEVICES=%q names %d devices, not four", v, len(specs))
+	if testdevices.Selected() {
+		specs := testdevices.Selection()
+		if len(specs) < 4 {
+			return specs, fmt.Sprintf("%d device(s) selected (%s), and the arm needs four",
+				len(specs), strings.Join(specs, ","))
 		}
-		return specs, ""
+		return specs[:4], ""
 	}
 	var specs []string
 	var ids []backend.Identity
@@ -320,7 +323,7 @@ func fourDevices(t *testing.T) ([]string, string) {
 		specs = append(specs, "vulkan:"+strconv.Itoa(in.Index))
 	}
 	if len(specs) < 4 {
-		return specs, fmt.Sprintf("%d distinct GPU(s) here (%s), and the arm needs four (JITLLM_FOUR_DEVICES names them)",
+		return specs, fmt.Sprintf("%d distinct GPU(s) here (%s), and the arm needs four (JITLLM_TEST_DEVICES names them)",
 			len(specs), strings.Join(specs, ","))
 	}
 	return specs, ""

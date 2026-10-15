@@ -398,6 +398,12 @@ type Opts struct {
 	Metal metal.Opts
 	// HIP is where ROCm is looked for. Zero searches the default places.
 	HIP HIPConfig
+	// Enumerating marks an open that is part of finding devices (a default
+	// pick, a loop over a backend's ordinals) rather than a caller naming one.
+	// It changes nothing about the open; an installed Restriction treats a
+	// refused enumerating open as the restriction narrowing the search, and a
+	// refused named open as a violation.
+	Enumerating bool
 }
 
 // OpenWith is Open with the devices' open choices.
@@ -405,7 +411,7 @@ func OpenWith(o Opts) []Device {
 	var out []Device
 	for _, f := range []func(Opts) (Device, error){openCUDA, openHIP, openVulkan, openMetal} {
 		t0 := time.Now()
-		d, err := f(o)
+		d, err := f(enumerating(o))
 		if verbose {
 			name, api := "-", "-"
 			if d != nil {

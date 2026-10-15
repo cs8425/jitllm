@@ -4,11 +4,10 @@ package model
 
 import (
 	"math"
-	"os"
-	"strings"
 	"testing"
 
 	"github.com/jitllm/jitllm/engine/nn"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
 
@@ -24,13 +23,10 @@ import (
 // position computed as a chunk's row, and a flip whose margin is inside
 // their disagreement is the model undecided -- the comparison stops there.
 // A flip wider than the perturbation is a defect. Every backend the host
-// has runs (JITLLM_SPEC_DEVICES narrows it, as -devices does).
+// has runs (JITLLM_TEST_DEVICES narrows it).
 func TestSpecGreedyOnDevice(t *testing.T) {
 	n := specTokens()
-	specs := []string{"cuda:0", "vulkan:0", "metal"} // metal takes no selector
-	if v := os.Getenv("JITLLM_SPEC_DEVICES"); v != "" {
-		specs = strings.Split(v, ",")
-	}
+	specs := testdevices.Specs("cuda:0", "vulkan:0", "metal") // metal takes no selector
 	for name, path := range specModels(t) {
 		t.Run(name, func(t *testing.T) {
 			m := openSpecModel(t, path, noTune, WithKVF16(false))

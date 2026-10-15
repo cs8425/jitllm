@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -53,8 +54,8 @@ func raggedAsPrefill(t *testing.T, m *Model, prompts [][]int32, tiles bool) {
 	open := func(t *testing.T, noRag bool) *tier.GPU {
 		o := append(testTierOpts(t), tier.WithDeviceTune(tier.TuneOff),
 			tier.WithConfig(func(c *tier.Config) { c.NoRagPrefill, c.PreferTiles = noRag, tiles }))
-		if v := os.Getenv("JITLLM_TEST_DEVICES"); v != "" {
-			o = append(o, tier.WithDevices(v))
+		if testdevices.Selected() {
+			o = append(o, tier.WithDevices(testdevices.One("")))
 		}
 		g, err := tier.OpenWith(o...)
 		if err != nil || g == nil {

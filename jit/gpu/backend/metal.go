@@ -36,6 +36,9 @@ func OpenMetalWith(o Opts) (Device, error) { return openMetal(o) }
 // openMetal needs no build tag: metal.Open returns an error on every
 // non-Apple host, which is the same shape as a Linux host with no CUDA.
 func openMetal(o Opts) (Device, error) {
+	if _, err := admit("msl", 0, o.Enumerating); err != nil {
+		return nil, err
+	}
 	c, err := metal.OpenWith(o.Metal)
 	if err != nil {
 		return nil, err

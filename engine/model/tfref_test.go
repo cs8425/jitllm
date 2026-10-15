@@ -14,6 +14,7 @@ import (
 	"github.com/jitllm/jitllm/engine/model"
 	"github.com/jitllm/jitllm/engine/nn"
 	"github.com/jitllm/jitllm/format/jlm"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
 
@@ -29,7 +30,7 @@ import (
 //	JITLLM_REF_NPROMPT  how many of them are the prompt
 //	JITLLM_REF_LOGITS   the reference: raw little-endian f32, one vocabulary
 //	                    row per position from the prompt's last on
-//	JITLLM_REF_DEVICES  a device spec to place every block on, or empty for the host
+//	JITLLM_TEST_DEVICES the device to place every block on, or unset for the host
 //	JITLLM_REF_KVF16    1 for the f16 KV cache, else f32
 func TestTeacherForcedAgainstReference(t *testing.T) {
 	path := os.Getenv("JITLLM_REF_MODEL")
@@ -82,7 +83,7 @@ func TestTeacherForcedAgainstReference(t *testing.T) {
 	}
 	st := m.NewState(len(ids) + 1)
 	defer st.Close()
-	if spec := os.Getenv("JITLLM_REF_DEVICES"); spec != "" {
+	if spec := testdevices.One(""); spec != "" {
 		gpu, err := tier.OpenWith(tier.WithDevices(spec), tier.WithDeviceTune(tier.TuneOff))
 		if err != nil {
 			t.Fatal(err)

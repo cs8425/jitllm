@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jitllm/jitllm/engine/nn"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -227,10 +228,7 @@ func TestSpecLookupGateDiscriminates(t *testing.T) {
 // TestSpecGreedyOnDevice judges a flip: inside the band it is a tie.
 func TestSpecLookupOnDevice(t *testing.T) {
 	n := specTokens()
-	specs := []string{"cuda:0", "vulkan:0", "metal"}
-	if v := os.Getenv("JITLLM_SPEC_DEVICES"); v != "" {
-		specs = strings.Split(v, ",")
-	}
+	specs := testdevices.Specs("cuda:0", "vulkan:0", "metal")
 	for _, name := range lookupModels {
 		t.Run(strings.TrimSuffix(name, ".gguf"), func(t *testing.T) {
 			m := openLookupModel(t, name, noTune, WithKVF16(false))

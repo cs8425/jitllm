@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
 
@@ -187,7 +188,7 @@ func TestMiniCPMVDecodeAfterAPictureDoesNotAllocate(t *testing.T) {
 			s.GPULayers(), m.Cfg.NLayer), w, n, m.container.Reads()-r0, captures)
 	}
 	t.Run("host", func(t *testing.T) { run(t, nil) })
-	for _, spec := range []string{"cuda", "vulkan", "metal"} {
+	for _, spec := range testdevices.Specs("cuda", "vulkan", "metal") {
 		t.Run(spec, func(t *testing.T) {
 			g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(spec)}, testTierOpts(t)...)...)
 			if err != nil || g == nil {

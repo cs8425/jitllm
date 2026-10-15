@@ -2,11 +2,11 @@ package server
 
 import (
 	"context"
-	"os"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	v1 "github.com/jitllm/jitllm/server/gen/jitllm/v1"
 )
 
@@ -16,16 +16,13 @@ import (
 // on: the placement names the target for every block, the response counts
 // the history it moved and the path it took, and the next reply is an
 // unmoved control's token for token (both devices run the same kernels) or
-// within the band two backends agree in (JITLLM_MOVE_DEVICES, default the
+// within the band two backends agree in (JITLLM_TEST_DEVICES, default the
 // laptop's one card under CUDA and Vulkan).
 func TestBlocksMoveBetweenDevicesThroughThePlacementService(t *testing.T) {
-	spec := os.Getenv("JITLLM_MOVE_DEVICES")
-	if spec == "" {
-		spec = "cuda:0,vulkan:1"
-	}
-	devs := strings.Split(spec, ",")
+	devs := testdevices.Take(t, 2, "cuda:0,vulkan:1")
+	spec := strings.Join(devs, ",")
 	if len(devs) != 2 {
-		t.Fatalf("JITLLM_MOVE_DEVICES=%q: want two devices", spec)
+		t.Fatalf("two devices wanted, got %q", spec)
 	}
 	path := modelPath(t, deviceModel)
 	// No memory cache: the control runs first, and the moved session would
@@ -119,13 +116,10 @@ func TestBlocksMoveBetweenDevicesThroughThePlacementService(t *testing.T) {
 // the pooled State kept jitllmd's relocation demo from moving anything
 // ("another session is using it") until -session-pool -1.
 func TestAMoveRunsPastThePool(t *testing.T) {
-	spec := os.Getenv("JITLLM_MOVE_DEVICES")
-	if spec == "" {
-		spec = "cuda:0,vulkan:1"
-	}
-	devs := strings.Split(spec, ",")
+	devs := testdevices.Take(t, 2, "cuda:0,vulkan:1")
+	spec := strings.Join(devs, ",")
 	if len(devs) != 2 {
-		t.Fatalf("JITLLM_MOVE_DEVICES=%q: want two devices", spec)
+		t.Fatalf("two devices wanted, got %q", spec)
 	}
 	path := modelPath(t, deviceModel)
 	e := New(Config{Version: "test", NoMemCache: true})

@@ -143,7 +143,7 @@ func probeDevices(rocm string) ([]DeviceInfo, error) {
 	hipCfg := backend.HIPConfig{Path: rocm}
 	for i := 0; i < backend.HIPCount(hipCfg); i++ {
 		d := DeviceInfo{ID: "hip:" + strconv.Itoa(i), Backend: "hip", Index: i, Kind: KindDiscrete}
-		hd, err := backend.OpenHIPWith(i, backend.Opts{HIP: hipCfg})
+		hd, err := backend.OpenHIPWith(i, backend.Opts{HIP: hipCfg, Enumerating: true})
 		if err != nil {
 			d.Why = err.Error()
 			out = append(out, d)

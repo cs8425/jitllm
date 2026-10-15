@@ -2,10 +2,9 @@ package model
 
 import (
 	"fmt"
-	"os"
-	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
 
@@ -73,10 +72,7 @@ func TestVisionTowerPagesUnderABudget(t *testing.T) {
 // picture's spans, the tower and a bidirectional run must leave nothing behind
 // that a token pays for.
 func TestVisionDecodeDoesNotAllocate(t *testing.T) {
-	specs := []string{"host", "cuda", "vulkan", "metal"}
-	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
-		specs = append([]string{"host"}, strings.Split(v, ",")...)
-	}
+	specs := append([]string{"host"}, testdevices.Specs("cuda", "vulkan", "metal")...)
 	for _, fam := range visionFamilies {
 		t.Run(fam.name, func(t *testing.T) {
 			m, tw := fam.open(t, noTune)

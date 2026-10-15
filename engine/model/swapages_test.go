@@ -3,13 +3,12 @@ package model
 import (
 	"errors"
 	"hash/fnv"
-	"os"
 	"strconv"
-	"strings"
 	"testing"
 	"unsafe"
 
 	"github.com/jitllm/jitllm/engine/nn"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -39,10 +38,7 @@ var windowFixtures = []string{"synth-exaone4.gguf", "synth-cohere2.gguf", "synth
 // (Stats.KVWindowReleased), exactly: every windowed layer gives back every page
 // below the window start of the last position less nn.KVWindowSlack.
 func TestWindowedLayersHoldTheirWindow(t *testing.T) {
-	specs := []string{"cuda", "vulkan", "metal"}
-	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
-		specs = strings.Split(v, ",")
-	}
+	specs := testdevices.Specs("cuda", "vulkan", "metal")
 	for _, name := range windowFixtures {
 		t.Run(name, func(t *testing.T) {
 			m, err := Open(jlmOf(t, testmodels.Path(name)), noTune)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -160,10 +161,7 @@ func TestPostNormDeviceErrorIsAmplification(t *testing.T) {
 	if v := os.Getenv("JITLLM_POSTNORM_MODELS"); v != "" {
 		models = strings.Split(v, ",")
 	}
-	specs := []string{"cuda:0", "vulkan:0", "metal"}
-	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
-		specs = strings.Split(v, ",")
-	}
+	specs := testdevices.Specs("cuda:0", "vulkan:0", "metal")
 	// The oracles: a CPU build of llama.cpp (JITLLM_LLAMACPP_CPU, a directory
 	// holding llama-perplexity and its libraries) and, optionally, the CUDA
 	// build in JITLLM_LCPP.
