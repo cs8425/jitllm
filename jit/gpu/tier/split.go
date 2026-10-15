@@ -635,7 +635,9 @@ func (g *devTier) retuneDecode() {
 	// After the splits settle: the operand prologue is timed at the split
 	// each matvec now runs.
 	g.tuneActIn()
-	g.tuneGateUp2()
+	// After the prologue's verdicts: the FFN's recipes run down in the
+	// form the prologue tuner chose.
+	g.tuneFFN()
 	g.tuneGemm()
 }
 

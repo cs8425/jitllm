@@ -342,6 +342,10 @@ func WithPersistDeps(on bool, grid int) Option {
 	return WithConfig(func(c *Config) { c.Persist, c.PersistDeps, c.PersistGrid = on, on, grid })
 }
 
+// WithFFNForm sets Config.FFNForm: the recipe every dense gated FFN runs,
+// FFNTuned (the default) leaving it to the per-card trial.
+func WithFFNForm(f FFNForm) Option { return WithConfig(func(c *Config) { c.FFNForm = f }) }
+
 // WithGateUpFuse sets Config.GateUpFuse: a dense gated FFN's gate and up in
 // one launch, down forming act(gate)*up in its prologue.
 func WithGateUpFuse(on bool) Option {
