@@ -6429,6 +6429,29 @@ previous trip's MMAs). At 64 tokens the background tuner's trials
 (WithLazyTune) land among the first prompts' kernels and the first
 prompt's rate is a fraction of the third (8B pp64 535 / 778 / 1850 tok/s).
 
+## Cold TTFT: the background tuner held the lock for a whole trial
+
+A fresh process (empty tune cache) prefilling 64-token prompts dipped to a
+third of its rate on the fourth and fifth prompt. Timestamped trials named the
+cause: the lazy split tuner's trial on the output head (Q6_K 128256x4096) held
+g.mu for ten rounds, 21 ms, and a prompt arriving behind it waited. Each round
+now waits for tuneQuiet and takes the lock alone
+(`TestBackgroundTrialYieldsBetweenRounds`).
+
+V100 (CUDA, GPU 1), `speed -p 64 -n 4 -r 8`, a fresh cache each run, base and
+new interleaved, three pairs. Slowest of the eight prompts, tok/s:
+
+    model                  base               new
+    Llama-3.1-8B Q4_K_M    818 / 526 / 802    1414 / 1472 / 1480
+    Llama-3.2-1B Q4_K_M    1176 / 1892 / 1911 4494 / 4342 / 4516
+
+The base's later prompts read ~1900 on the 8B against the new ~1620: that is
+the clock, not the engine. The V100 idles at 1312 MHz and boosts to 1530 under
+load; the base's dense trials kept it boosted, and a warm cache with no trials
+reads ~1700 on the base binary too (an nvidia-smi trace beside the run showed
+both clocks). A row on this card is not comparable across arms unless its
+clock is reported.
+
 ## Gate and up in one launch, each workgroup summing both rows (Gate2)
 
 #167's fusion lost past the 1B (0.95 on 3B, 0.91 on 8B) because every
