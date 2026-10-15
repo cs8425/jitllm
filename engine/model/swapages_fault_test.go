@@ -3,8 +3,6 @@
 package model
 
 import (
-	"os"
-	"strings"
 	"testing"
 
 	"github.com/jitllm/jitllm/internal/testdevices"
