@@ -438,7 +438,7 @@ func FlashPrefillTile(s FlashPrefill70Shape, t FlashTile) (*ir.Kernel, error) {
 		// against) and its sum; the four lanes of a row write eight of its 32
 		// replicas each.
 		padded := (hd + 31) / 32 * 32
-		pb := b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, row0, row),
+		pb := b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, rowOf(b.Add(ir.U32, row0, row)),
 			c(int64(s.Heads))), h), c(int64(S))), spl), c(int64(padded+64)))
 		partialML(b, pOut, pb, b.Max(ir.F32, m, f(-1e30)), l, part, hd, 4)
 		for d := 0; d < dpl; d++ {

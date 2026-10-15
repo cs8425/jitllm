@@ -61,6 +61,8 @@ type pagedPrefill struct {
 	ragThreads int
 	ragWG      int
 	ragK       map[int]backend.Kernel
+	// ragMerge is the mapped wide merge by slot count, with sinks.
+	ragMerge map[int]backend.Kernel
 	// flash80 says flash is kernels.FlashPrefill80, the m16n8k16 form, or
 	// its m16n8k8 twin on sm_75 (FlashPrefill80K8).
 	flash80         bool
@@ -193,7 +195,7 @@ func (g *devTier) initPagedPrefill(bs *blockScratch) error {
 			}
 		}
 	}
-	if pf.ragBuild != nil && !p.AttnSinks {
+	if pf.ragBuild != nil {
 		g.RagForms++
 	}
 	if pf.flash != nil && p.AttnSinks {
@@ -447,6 +449,9 @@ func (pf *pagedPrefill) free() {
 		}
 	}
 	for _, k := range pf.ragK {
+		closeKern(k)
+	}
+	for _, k := range pf.ragMerge {
 		closeKern(k)
 	}
 	bufs := []backend.Buf{pf.sc, pf.wt, pf.part, pf.run[0], pf.run[1], pf.buf[0], pf.buf[1]}

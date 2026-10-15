@@ -7877,7 +7877,7 @@ func (g *devTier) layersSession(s backend.Session) {
 								// nothing of their own.
 								tabRag = dec
 							}
-							err = pk.ragAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag)
+							err = pk.ragAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk)
 							g.RagPrefills++
 						}
 					} else if !skipAttn && useFlash {
