@@ -64,7 +64,7 @@ func TestOpenJevPicturesMatchLlamaCpp(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ans, d.InputTokens(), int(nn.RaggedRows.Load()-ragged0)
+		return ans, d.InputTokens(), int(nn.RaggedRows.Load() - ragged0)
 	}
 	ans, tokens, padded := decide()
 	if tokens != gold.Usage.InputTokens {
