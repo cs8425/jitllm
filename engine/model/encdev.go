@@ -88,15 +88,8 @@ func (s *State) borrowsJIT() bool {
 // A decoder embedding model's session is placed the same way.
 func (e *Embedder) SetDeviceLayers(d nn.Device, max int) error {
 	if e.st != nil {
-		// A bidirectional decoder (EmbeddingGemma) is not offered: its
-		// blocks would run under the decoder path's causal mask on a device
-		// (embedPrefill refuses that), so it embeds on the host until they
-		// are planned non-causal.
-		if e.m.Cfg.NonCausal && d != nil {
-			e.st.noteDecline(fmt.Sprintf("%s's decoder blocks attend bidirectionally, which the "+
-				"device's decoder path does not plan; it embeds on the host", e.m.Cfg.Arch))
-			return nil
-		}
+		// A bidirectional decoder's (EmbeddingGemma's) blocks are planned
+		// non-causal (planFor) and placed the same way.
 		return e.st.SetDeviceLayers(d, max)
 	}
 	if e.seg == nil {
