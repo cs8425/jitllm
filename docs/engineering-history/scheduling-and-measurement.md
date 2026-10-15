@@ -1669,3 +1669,22 @@ crew takes an extra lock, and the thread-class calls are empty.
 The cost is the prefill beside a decoder: it loses about 30% against the
 shared pools (154 -> 106). It is the trade, and `WithServingSplit(false)` /
 `JITLLM_SERVING_SPLIT=0` is the other arm.
+
+## RULE 11f's cases: a cache that existed, a store that existed
+
+Both cases are work proposed or built beside machinery that already did it.
+
+- **A device expert cache.** It was proposed as new work. `streamBank` in
+  `jit/gpu/tier/layer.go` already is one: the host side of a block whose routed
+  experts are assembled per token, with its own residency. The task was to read
+  it and extend it, not to write a second cache beside it.
+- **Decision prefixes.** Decisions grew a decision-only prefix mechanism (PR
+  #148, closed unmerged) and then a cache path that copied rows.
+  `engine/model/kvshare.go`'s `SharedStore` already shared prefix pages between
+  sessions without copying them, which is also what "KV is never held twice"
+  requires. The copy path held a shared row once per session; the mechanism
+  that existed held it once.
+
+A PR's "what existed and was reused" section could not have been written for
+either at the time, which is how the duplication was found late instead of at
+the proposal.
