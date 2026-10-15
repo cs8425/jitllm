@@ -679,6 +679,8 @@ type State struct {
 	// that one's key.
 	recMark int
 	recLast []int32
+	// recBatch is sealRecOnDevice's block list, kept.
+	recBatch []int32
 	// recPrefill says a chunked prefill is running, which keeps its restore
 	// points itself (recRowPoint).
 	recPrefill bool
@@ -3389,8 +3391,8 @@ func (s *State) Reset() {
 			s.retireErr = fmt.Errorf("model: the recurrent state on the device could not be reset%s", why)
 		}
 	}
-	s.kv.retireTail(s.pos)
 	s.aliasMark(0, s.pos+1)
+	s.kv.retireTail(s.pos)
 	s.kv.reset()
 	s.kvErr.Store(nil)
 	s.kvSkipped = 0

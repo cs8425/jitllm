@@ -1436,6 +1436,9 @@ type RowsRoomer interface {
 type KVShareDevice interface {
 	PublishKV(li, page int, key string) bool
 	MapKV(li, page int, key string, end int) bool
+	// PublishKVs is PublishKV for many names in one call: name i is block
+	// lis[i]'s page pages[i] by keys[i]. False when any was refused.
+	PublishKVs(lis, pages []int32, keys []string) bool
 }
 
 // RecShareDevice is a device that keeps a linear block's restore points where
@@ -1444,6 +1447,8 @@ type KVShareDevice interface {
 // LoadRec copies it into the session's state. Nothing crosses the bus.
 type RecShareDevice interface {
 	SnapRec(li int, key string) bool
+	// SnapRecs is SnapRec for every block of lis at one point, in one call.
+	SnapRecs(lis []int32, key string) bool
 	HasRec(li int, key string) bool
 	LoadRec(li int, key string) bool
 }

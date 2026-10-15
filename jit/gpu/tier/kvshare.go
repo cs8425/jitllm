@@ -153,6 +153,9 @@ func (g *devTier) cowPages(sid uint64, kp *kvPool, l *kvLayerPool, s seqID, star
 		if id == 0 || !l.isNamed(id) {
 			continue
 		}
+		// A page wholly past start holds nothing the sequence keeps: a fresh
+		// one, not a copy.
+		fresh := j*P >= start
 		if len(l.free) < 1 && l.reclaimNamed(1) == 0 {
 			if err := g.growKVLayer(kp, l, l.n+1); err != nil && !g.evictForRoom(sid, kp, l, 1) {
 				return err
@@ -164,18 +167,20 @@ func (g *devTier) cowPages(sid uint64, kp *kvPool, l *kvLayerPool, s seqID, star
 		nid := l.free[len(l.free)-1]
 		l.free = l.free[:len(l.free)-1]
 		kw, vw := l.geom.kWords(P), l.geom.vWords(P)
-		if err := g.dev.Copy(l.k, int(nid)*kw*4, l.k, int(id)*kw*4, kw*4); err != nil {
-			return err
-		}
-		if vw > 0 {
-			if err := g.dev.Copy(l.v, int(nid)*vw*4, l.v, int(id)*vw*4, vw*4); err != nil {
+		if !fresh {
+			if err := g.dev.Copy(l.k, int(nid)*kw*4, l.k, int(id)*kw*4, kw*4); err != nil {
 				return err
 			}
+			if vw > 0 {
+				if err := g.dev.Copy(l.v, int(nid)*vw*4, l.v, int(id)*vw*4, vw*4); err != nil {
+					return err
+				}
+			}
+			g.KVPagesCopied++
 		}
 		l.releaseID(id)
 		ids[j] = nid
 		g.tabPend = append(g.tabPend, tabWrite{l.tab, kp.ranges[s].off + j, ids[j : j+1]})
-		g.KVPagesCopied++
 	}
 	return nil
 }
@@ -186,6 +191,32 @@ func (g *devTier) PublishKV(li, page int, key string) bool { return g.publishKVs
 // MapKV is mapKV for the zero session (nn.KVShareDevice).
 func (g *devTier) MapKV(li, page int, key string, end int) bool {
 	return g.mapKVs(0, li, page, key, end)
+}
+
+// PublishKVs is publishKV for the zero session over many names.
+func (g *devTier) PublishKVs(lis, pages []int32, keys []string) bool {
+	return g.publishKVsBatch(0, lis, pages, keys)
+}
+
+// publishKVsBatch names session sid's pages, name i block lis[i]'s page
+// pages[i] by keys[i], under one lock: a prompt's names in one call.
+func (g *devTier) publishKVsBatch(sid uint64, lis, pages []int32, keys []string) bool {
+	sv := g.as(sid)
+	if sv == nil {
+		return false
+	}
+	defer sv.done()
+	g = sv
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ok := true
+	for i := range lis {
+		kp, l := g.sharedLayer(int(lis[i]))
+		if l == nil || !g.publishKV(kp, l, seqID{sid, 0}, int(pages[i]), keys[i]) {
+			ok = false
+		}
+	}
+	return ok
 }
 
 // sharedLayer is block li's pool when its pages can be named: paged, and not

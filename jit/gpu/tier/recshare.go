@@ -168,6 +168,26 @@ func (g *devTier) freeRecSnaps(li int) {
 	g.recSnapOrder = kept
 }
 
+// SnapRecs is snapRec for every block of lis, under one lock.
+func (g *devTier) SnapRecs(lis []int32, key string) bool { return g.snapRecs(0, lis, key) }
+
+func (g *devTier) snapRecs(sid uint64, lis []int32, key string) bool {
+	sv := g.as(sid)
+	if sv == nil {
+		return false
+	}
+	defer sv.done()
+	g = sv
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, li := range lis {
+		if !g.snapRec(sid, int(li), key) {
+			return false
+		}
+	}
+	return true
+}
+
 // SnapRec, HasRec and LoadRec are the zero session's (nn.RecShareDevice).
 func (g *devTier) SnapRec(li int, key string) bool { return g.recShareCall(0, li, key, 0) }
 func (g *devTier) HasRec(li int, key string) bool  { return g.recShareCall(0, li, key, 1) }

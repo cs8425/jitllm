@@ -151,16 +151,38 @@ func (s *State) recChunkPoint(slot, pos int) {
 		return
 	}
 	for li := s.lo; li < len(s.onDev); li++ {
-		if !s.onDev[li] || s.rconv[li] == nil {
+		if !s.onDev[li] || s.rconv[li] == nil || s.recDev(li) != nil {
 			continue
 		}
-		// Kept on the card where it keeps points; else brought home.
-		if s.recDev(li) == nil && !s.migrateRecLayer(li, false) {
+		// Brought home where the device keeps no points.
+		if !s.migrateRecLayer(li, false) {
 			s.kv.syncFailed++
 			return
 		}
 		s.sealRecLayer(li, pos)
 	}
+	s.sealRecOnDevice(pos)
+}
+
+// sealRecOnDevice keeps the point at pos of every block whose device keeps
+// its restore points, in one call (nn.RecShareDevice.SnapRecs).
+func (s *State) sealRecOnDevice(pos int) bool {
+	key, _ := s.recPointKey(pos)
+	if key == "" {
+		return false
+	}
+	s.recBatch = s.recBatch[:0]
+	var d nn.RecShareDevice
+	for li := range s.rconv {
+		if s.rconv[li] == nil {
+			continue
+		}
+		if x := s.recDev(li); x != nil {
+			d = x
+			s.recBatch = append(s.recBatch, int32(li))
+		}
+	}
+	return d == nil || d.SnapRecs(s.recBatch, key)
 }
 
 // recPointAt reports whether every linear block's summary for position pos is

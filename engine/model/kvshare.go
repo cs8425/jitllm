@@ -452,8 +452,8 @@ func (s *kvPages) sharedBytes() uint64 {
 // back to its pool.
 func (kc *kvCache) publishSealed(li, n int, key string) {
 	s := &kc.layers[li]
-	if d := kc.devAt(li); d != nil {
-		d.PublishKV(li, n, key) // named where it lives, on the card
+	if kc.devAt(li) != nil {
+		kc.queuePublish(li, n, key) // named where it lives, on the card
 		return
 	}
 	if s.isShared(n) {

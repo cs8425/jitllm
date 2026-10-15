@@ -438,6 +438,10 @@ type kvCache struct {
 	// flight.
 	recAt func(pos int) bool
 	mark  int
+	// pubLi, pubPage and pubKey are the names a sharing session's device
+	// pages are to be given, sent in one call (flushPublish).
+	pubLi, pubPage []int32
+	pubKey         []string
 	// devAt is the device a block's history lives on when it names its
 	// pages (State.kvDevAt), set by ShareKV; mapEnd is the position a page
 	// mapped there is written to, and mapped counts the planes mapped.
@@ -1555,6 +1559,9 @@ func (s *State) SealPrompt(lg []float32) error {
 	// position has passed, and a short prompt would store nothing.
 	s.kv.tailStored += int64(s.kv.sealTail(s.pos))
 	s.aliasMark(s.kvSkipped, s.pos)
+	if s.kv.share != nil {
+		s.kv.flushPublish() // the prompt's names on the card, in one call
+	}
 	s.sealRecurrentTail(s.pos)
 	// A prompt whose head projected only picked rows (HostPick, nn.Head.Pick)
 	// left lg as the last full projection made it: not this prompt's logits,
@@ -2078,6 +2085,29 @@ func kvChunkFills(fill int) []int {
 	return out
 }
 
+// queuePublish is a name for page n of block li on the card, sent with the
+// prompt's others (flushPublish).
+func (kc *kvCache) queuePublish(li, n int, key string) {
+	if key == "" {
+		return
+	}
+	kc.pubLi = append(kc.pubLi, int32(li))
+	kc.pubPage = append(kc.pubPage, int32(n))
+	kc.pubKey = append(kc.pubKey, key)
+}
+
+// flushPublish sends the queued names to the device, in one call.
+func (kc *kvCache) flushPublish() {
+	if len(kc.pubLi) > 0 {
+		if d := kc.devAt(int(kc.pubLi[0])); d != nil {
+			d.PublishKVs(kc.pubLi, kc.pubPage, kc.pubKey)
+		}
+	}
+	kc.pubLi, kc.pubPage = kc.pubLi[:0], kc.pubPage[:0]
+	clear(kc.pubKey)
+	kc.pubKey = kc.pubKey[:0]
+}
+
 // retireTail is a sharing session letting its sequence go at pos: the page
 // it was writing into is handed to the store under the key of its fill
 // (pageKeyFill) and named by the chunks it holds, so the next prompt that
@@ -2096,6 +2126,7 @@ func (kc *kvCache) retireTail(pos int) {
 			kc.aliasPage(li, pos/s.p, kc.chunkKey(e))
 		}
 	}
+	kc.flushPublish()
 }
 
 // publishTail hands every layer's partial page at pos to the shared store
@@ -2110,7 +2141,8 @@ func (kc *kvCache) publishTail(pos int) int {
 		cur := pos / s.p
 		if d := kc.devAt(li); d != nil {
 			// On the card, named where it lives.
-			if f := pos - cur*s.p; f > 0 && d.PublishKV(li, cur, kc.pageKeyFill(li, cur, f)) {
+			if f := pos - cur*s.p; f > 0 && d != nil {
+				kc.queuePublish(li, cur, kc.pageKeyFill(li, cur, f))
 				n++
 			}
 			continue
@@ -2165,7 +2197,8 @@ func (kc *kvCache) aliasPage(li, n int, key string) bool {
 		return false
 	}
 	if d := kc.devAt(li); d != nil {
-		return d.PublishKV(li, n, key) // one more name for the page on the card
+		kc.queuePublish(li, n, key) // one more name for the page on the card
+		return d != nil
 	}
 	if !s.isShared(n) {
 		return false
@@ -2699,15 +2732,15 @@ func (s *State) sealRecurrent(pos int) {
 		return
 	}
 	for li := range s.rconv {
-		// A placed block's summary is the device's; the host's copy is stale,
-		// and the point is kept there when the device keeps points.
-		if s.rconv[li] == nil || s.devAt(li) && s.recDev(li) == nil {
+		// A placed block's summary is the device's; the host's copy is stale.
+		if s.rconv[li] == nil || s.devAt(li) {
 			continue
 		}
 		if !s.sealRecLayer(li, pos) {
 			return
 		}
 	}
+	s.sealRecOnDevice(pos)
 }
 
 // sealRecurrentTail snapshots the recurrent summary at a prompt boundary rather
@@ -2731,10 +2764,11 @@ func (s *State) sealRecurrentTail(pos int) {
 	// The prompt's end, beside the points the prefill kept on the way
 	// (recpoint.go), under the fill-named key its partial page has.
 	for li := range s.rconv {
-		if s.rconv[li] != nil && !s.sealRecLayer(li, pos) {
+		if s.rconv[li] != nil && s.recDev(li) == nil && !s.sealRecLayer(li, pos) {
 			return
 		}
 	}
+	s.sealRecOnDevice(pos)
 }
 
 // attnLayer is any layer with pages, so that pageKey has a page size to hash.

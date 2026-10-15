@@ -1446,6 +1446,54 @@ func (g *GPU) SnapRec(li int, key string) bool { return g.recShare(0, li, key, 0
 func (g *GPU) HasRec(li int, key string) bool  { return g.recShare(0, li, key, 1) }
 func (g *GPU) LoadRec(li int, key string) bool { return g.recShare(0, li, key, 2) }
 
+// SnapRecs and PublishKVs are the zero session's batches (nn.RecShareDevice,
+// nn.KVShareDevice).
+func (g *GPU) SnapRecs(lis []int32, key string) bool { return g.snapRecs(0, lis, key) }
+func (g *GPU) PublishKVs(lis, pages []int32, keys []string) bool {
+	return g.publishKVsBatch(0, lis, pages, keys)
+}
+
+// ownerOf is the device holding every block of lis, nil when they are
+// spread over more than one (or one is on the host).
+func (g *GPU) ownerOf(lis []int32) *devTier {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var d *devTier
+	for _, li := range lis {
+		o := g.own[int(li)]
+		if o == nil || d != nil && o != d {
+			return nil
+		}
+		d = o
+	}
+	return d
+}
+
+func (g *GPU) snapRecs(sid uint64, lis []int32, key string) bool {
+	if d := g.ownerOf(lis); d != nil {
+		return d.snapRecs(sid, lis, key)
+	}
+	for _, li := range lis {
+		if !g.recShare(sid, int(li), key, 0) {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *GPU) publishKVsBatch(sid uint64, lis, pages []int32, keys []string) bool {
+	if d := g.ownerOf(lis); d != nil {
+		return d.publishKVsBatch(sid, lis, pages, keys)
+	}
+	ok := true
+	for i := range lis {
+		if !g.publishKV(sid, int(lis[i]), int(pages[i]), keys[i]) {
+			ok = false
+		}
+	}
+	return ok
+}
+
 func (g *GPU) recShare(sid uint64, li int, key string, op int) bool {
 	g.mu.Lock()
 	d := g.own[li]

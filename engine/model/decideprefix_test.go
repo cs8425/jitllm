@@ -20,7 +20,7 @@ func boardRequests(t testing.TB, n int) [][]byte {
 	t.Helper()
 	var out [][]byte
 	for r := range n {
-		out = append(out, boardRequest(3+r, 35, '.')) // he walks right along row 35
+		out = append(out, boardRequest(3+r, 75, '.')) // he walks right along row 75
 	}
 	return out
 }
@@ -28,7 +28,7 @@ func boardRequests(t testing.TB, n int) [][]byte {
 // boardRequest is one board with Pac-Man at (px, py), every open tile not
 // yet eaten drawn as fill: a pellet, or for the violation a ghost.
 func boardRequest(px, py int, fill byte) []byte {
-	const w, h = 19, 41
+	const w, h = 19, 81
 	var rows []string
 	for y := range h {
 		var b strings.Builder
@@ -173,7 +173,7 @@ func decisionPrefixGate(t *testing.T, m *Model, g *tier.GPU, spec string, n int,
 			t.Fatalf("request %d aliases no shared page", i)
 		}
 		if i > 0 && warm.PromptRestored() == r0 {
-			t.Fatalf("request %d restored nothing: its prompt shares the board above row 35 with the last", i)
+			t.Fatalf("request %d restored nothing: its prompt shares the board above row 75 with the last", i)
 		}
 	}
 	t.Logf("%d prompt positions restored over %d requests", warm.PromptRestored(), len(reqs))
@@ -212,7 +212,7 @@ func decisionPrefixGate(t *testing.T, m *Model, g *tier.GPU, spec string, n int,
 	defer func() { staleKeyFault = nil }()
 	// The first prompts it names are a board of ghosts', which every later
 	// board then restores in place of its own.
-	state, qs := parseRequest(t, boardRequest(3, 35, 'B'))
+	state, qs := parseRequest(t, boardRequest(3, 75, 'B'))
 	if _, err := stale.Decide(state, qs, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func devicePrefixViolation(t *testing.T, m *Model, spec string, n int, reqs [][]
 	// and writes there, and the first again, which maps its own pages back:
 	// in place, they hold the ghosts' rows.
 	moved := false
-	for i, b := range [][]byte{reqs[0], boardRequest(3, 35, 'B'), reqs[0]} {
+	for i, b := range [][]byte{reqs[0], boardRequest(3, 75, 'B'), reqs[0]} {
 		state, qs := parseRequest(t, b)
 		a, err := d.Decide(state, qs, nil)
 		if err != nil {
