@@ -6451,3 +6451,61 @@ load; the base's dense trials kept it boosted, and a warm cache with no trials
 reads ~1700 on the base binary too (an nvidia-smi trace beside the run showed
 both clocks). A row on this card is not comparable across arms unless its
 clock is reported.
+
+## Gate and up in one launch, each workgroup summing both rows (Gate2)
+
+#167's fusion lost past the 1B (0.95 on 3B, 0.91 on 8B) because every
+workgroup of down redid act(gate)*up and its quantize over the full FFN width.
+Gate2 (`kernels.MatVecShape.Gate2`) moves the fusion the other way: up's
+gated matvec carries the gate's weight as a second stream, sums both rows in
+one pass over the shared operand, reduces the gate's partials in the order the
+gate's own launch reduces them, and writes act(gate)*up. Down keeps its own
+operand, so nothing is recomputed: one launch goes per block.
+
+It is bit-identical on PTX, whose lowering fixes every rounding
+(`backend.TestMatVecGate2IsTheTwoLaunches`, Q8_0/Q4_K/Q6_K at split 1 and the
+in-group splits; `model.TestGateUp2MatchesTwoLaunches` on Llama-3.2-1B with
+every block placed with and without the graph and at a half seam; the swap
+violation `TestGateUp2SeesASwap` moves 384768 of 513024 logits). On SPIR-V it
+is not: Fma lowers to an OpFMul and OpFAdd without NoContraction, and the
+NVIDIA Vulkan driver contracted the two kernels' sums differently (378 of
+1024 Q4_K rows differed in low bits). MSL compiles with fast math. So the tier
+builds it on PTX only (`kernels.Gate2Exact`); elsewhere the backend gate holds
+it to NMSE 1e-10.
+
+V100 (sm_70, CUDA, GPU 1), `verify -ab gateup2`, n=24 interleaved, -n 64,
+`JITLLM_GPU_TUNE=1`, two passes, A/A first in each:
+
+    model                  A/A      Gate2 vs two launches (pass 1 / pass 2)
+    Llama-3.2-1B Q4_K_M    0.9998   1.0222 (IQR 0.8%) / 1.0250 (IQR 0.7%)
+    Llama-3.2-3B Q4_K_M    1.0004   1.0279 (IQR 1.1%) / 1.0202 (IQR 0.9%)
+    Llama-3.1-8B Q4_K_M    1.0011   1.0097 (IQR 0.4%) / 1.0076 (IQR 0.2%)
+
+It is the default (`Config.GateUp2`; `JITLLM_GPU_GATEUP2=0` is the other
+arm). `TestDecodeDoesNotAllocate` holds at zero engine allocations on CUDA
+with it on. No per-shape tuner yet: it won on every shape measured.
+
+## A prompt chunk's block-end add folded into the next block's norm
+
+On the binary16 GEMM path the FFN norm already took the attention's residual
+add into its launch (`RMSNormF16TRows` with add); the add after down ran
+alone, and the next block's attention norm read its result back. That add is
+now held for the next norm (`foldAddNorm`): x = x2 + ffn and h = RMSNorm(x)
+in one launch, the same bits, since the norm reads the sum it stores. A held
+add whose next block's norm is not the plain one runs alone (`foldTakes`), as
+does the last block's. Gates: `TestAddNormFoldMatchesTheAdd` (Llama-3.2-1B,
+prompt and decoded logits bit-identical, every block placed with and without
+the graph and a half seam; 14 of 15 adds folded) and its violation
+`TestAddNormFoldSeesABrokenAdd` (every logit moves).
+
+V100 (CUDA, GPU 1), `verify -ab addnorm`, four 512-token prompts a round,
+n=20 interleaved, `JITLLM_GPU_TUNE=1`, A/A first, two passes; the SM clock
+is the modal reading of a 250 ms nvidia-smi trace over each arm:
+
+    model               A/A              folded vs alone    IQR    SM clock
+    Llama-3.2-1B        0.9999 / 1.0000  1.0078 / 1.0072    0.3%   1530 MHz
+    Llama-3.1-8B        0.9983 / 1.0015  1.0013 / 1.0011    0.8%/1.4%  1440-1530 MHz
+
+The 1B gains 0.7-0.8%; the 8B's GEMMs hide it inside the noise (and pull the
+card off its boost clock, which the 1B holds). On by default;
+`JITLLM_GPU_NO_ADDNORM=1` is the other arm.

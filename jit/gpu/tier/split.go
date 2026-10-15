@@ -614,6 +614,7 @@ func (g *devTier) retuneDecode() {
 			}
 			if u.m.gated != nil || u.m.wantGated {
 				u.m.gated = g.gatedKernel(key.q, key.k, key.rows, best, bestGrp, g.bs.p.Act)
+				u.m.gate2 = g.gate2Kernel(key.q, key.k, key.rows, best, bestGrp, g.bs.p.Act)
 			}
 		}
 		g.splits[key], g.groupSplit[key] = best, bestGrp
