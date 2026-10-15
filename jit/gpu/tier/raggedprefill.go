@@ -93,7 +93,7 @@ func (g *devTier) ragPrep(bs *blockScratch) bool {
 	pk := bs.pkv
 	pk.ragRows = 0
 	pf := pk.pf
-	if pf == nil || pf.ragBuild == nil || pf.fs.Splits != 0 || pk.st != nil || g.NoRagPrefill {
+	if pf == nil || pf.ragBuild == nil || pk.st != nil || g.NoRagPrefill {
 		return false
 	}
 	wg := pf.ragWG
@@ -119,6 +119,27 @@ func (g *devTier) ragPrep(bs *blockScratch) bool {
 			return false
 		}
 		pf.ragK[n] = c
+	}
+	// Sinks: the table's launch writes each row's one split's partials, and
+	// the wide merge takes the same table to add the sink and write the
+	// rows (FlashShape.Map).
+	if pf.fs.Splits > 0 && pf.ragMerge[n] == nil {
+		ms := kernels.FlashShape{Heads: pf.fs.Heads, KVHeads: pf.fs.KVHeads, Dim: pf.fs.Dim, Rows: n,
+			Splits: pf.fs.Splits, Sink: true, Map: true}
+		k, err := kernels.FlashAttentionMergeWide(ms)
+		if err != nil {
+			g.LastErr = "ragged prefill: " + err.Error()
+			return false
+		}
+		c, err := g.compileShared(k)
+		if err != nil {
+			g.LastErr = "ragged prefill: " + err.Error()
+			return false
+		}
+		if pf.ragMerge == nil {
+			pf.ragMerge = map[int]backend.Kernel{}
+		}
+		pf.ragMerge[n] = c
 	}
 	if pk.pMapBytes < 4*n {
 		if pk.pMap != nil {
@@ -181,11 +202,20 @@ func (pk *pagedScratch) ragWrites(w func(backend.Buf, []byte)) {
 
 // ragAttend launches the run table's flash prefill over the chunk rows,
 // through desc (the full or the windowed set).
-func (pk *pagedScratch) ragAttend(lc *launcher, q, k, v, n, out, tab, desc backend.Buf) error {
-	fs := pk.pf.fs
+// With sinks (one split) it writes the partials and the mapped merge adds
+// the sink and writes the rows.
+func (pk *pagedScratch) ragAttend(lc *launcher, q, k, v, n, out, tab, desc, sink backend.Buf) error {
+	pf := pk.pf
+	fs := pf.fs
 	fs.Map, fs.Rows = true, pk.ragRows
-	return lc.launch(pk.pf.ragK[pk.ragRows], pk.pf.ragGroups(fs), pk.pf.ragThreads,
-		q, k, v, n, out, tab, desc, pk.pMap)
+	if fs.Splits == 0 {
+		return lc.launch(pf.ragK[pk.ragRows], pf.ragGroups(fs), pf.ragThreads, q, k, v, n, out, tab, desc, pk.pMap)
+	}
+	if err := lc.launch(pf.ragK[pk.ragRows], pf.ragGroups(fs), pf.ragThreads, q, k, v, n, pf.part, tab, desc, pk.pMap); err != nil {
+		return err
+	}
+	lc.la(pf.ragMerge[pk.ragRows], pk.ragRows*fs.Heads*fs.Dim, pf.part, out, sink, pk.pMap)
+	return nil
 }
 
 // ragFree gives back the run table's buffers. They are a few words a row,

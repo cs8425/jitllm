@@ -31,8 +31,9 @@ type FlashPrefill70Shape struct {
 	// the last padded with that sequence's last row, so a workgroup's rows are
 	// one sequence's as the paged form demands, and q and the output stay at
 	// the step's own rows. A padded slot computes its row's output again, the
-	// same arithmetic, and stores the same values. Paged only, and no splits:
-	// a merge would read partials for rows the table does not name.
+	// same arithmetic, and stores the same values. Paged only. With splits
+	// the partials are at the rows, and FlashAttentionMergeWide takes the
+	// same table (FlashShape.Map).
 	Map bool
 }
 
@@ -50,9 +51,6 @@ func flashPrefillCheck(what string, s FlashPrefill70Shape) error {
 	}
 	if err := checkPage(what, s.Page); err != nil {
 		return err
-	}
-	if s.Map && s.Splits != 0 {
-		return fmt.Errorf("kernels: %s: a run table (Map) writes the output, so it takes no splits", what)
 	}
 	if s.KStride != 0 || s.Window != 0 || s.Splits < 0 || s.F16 && s.KVHeads*s.Dim%4 != 0 {
 		return fmt.Errorf("kernels: %s: a paged shape has no KStride and no Window (the window is "+
@@ -516,14 +514,14 @@ func FlashPrefill70(s FlashPrefill70Shape) (*ir.Kernel, error) {
 				for _, mk := range []int64{1, 4, 8, 16} {
 					t = b.Add(ir.F32, t, b.ShuffleXor(ir.F32, t, mk))
 				}
-				partialML(b, pOut, pbOf(b.Add(ir.U32, wrow0, colOf(j, i))), b.Max(ir.F32, m[j][x], f(-1e30)), t, rep, hd, 16)
+				partialML(b, pOut, pbOf(rowOf(b.Add(ir.U32, wrow0, colOf(j, i)))), b.Max(ir.F32, m[j][x], f(-1e30)), t, rep, hd, 16)
 			}
 		}
 		for dt := 0; dt < dts; dt++ {
 			for j := 0; j < 2; j++ {
 				for i := 0; i < 8; i++ {
 					dim := b.Add(ir.U32, c(int64(32*dt)), b.Add(ir.U32, q8, v.dRow(i)))
-					b.Store(pOut, b.Add(ir.U32, pbOf(b.Add(ir.U32, wrow0, colOf(j, i))), dim), o[dt][j][i], 0)
+					b.Store(pOut, b.Add(ir.U32, pbOf(rowOf(b.Add(ir.U32, wrow0, colOf(j, i)))), dim), o[dt][j][i], 0)
 				}
 			}
 		}

@@ -20,22 +20,28 @@ import (
 // violation -- the table's rows reading their keys through the emptied
 // descriptors (rows fault "ragtab") -- must part.
 func TestRaggedStepAttendsAsAPrefill(t *testing.T) {
-	path := testmodels.Path("lfm2/LFM2-350M-Q4_K_M.gguf")
-	if _, err := os.Stat(path); err != nil {
-		testmodels.Missing(t, "MODEL MISSING: %v (set JITLLM_MODELS) (RULE 11)", err)
-	}
-	m, err := Open(jlmOf(t, path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close()
-	vocab := min(m.Cfg.NVocab, 30000)
-	prompts := [][]int32{linPrompt(130, vocab), linPrompt(170, vocab)[3:], linPrompt(90, vocab)[5:]}
-	for _, arm := range []struct {
-		name  string
-		tiles bool
-	}{{"default", false}, {"tiles", true}} {
-		t.Run(arm.name, func(t *testing.T) { raggedAsPrefill(t, m, prompts, arm.tiles) })
+	// LFM2-350M, and gpt-oss's fixture for the sinks (one split, the mapped
+	// merge adding the sink).
+	for _, name := range []string{"lfm2/LFM2-350M-Q4_K_M.gguf", "synth-gptoss.gguf"} {
+		t.Run(name, func(t *testing.T) {
+			path := testmodels.Path(name)
+			if _, err := os.Stat(path); err != nil {
+				testmodels.Missing(t, "MODEL MISSING: %v (set JITLLM_MODELS) (RULE 11)", err)
+			}
+			m, err := Open(jlmOf(t, path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			vocab := min(m.Cfg.NVocab, 30000)
+			prompts := [][]int32{linPrompt(130, vocab), linPrompt(170, vocab)[3:], linPrompt(90, vocab)[5:]}
+			for _, arm := range []struct {
+				name  string
+				tiles bool
+			}{{"default", false}, {"tiles", true}} {
+				t.Run(arm.name, func(t *testing.T) { raggedAsPrefill(t, m, prompts, arm.tiles) })
+			}
+		})
 	}
 }
 

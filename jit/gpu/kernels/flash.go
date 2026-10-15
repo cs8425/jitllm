@@ -27,6 +27,10 @@ type FlashShape struct {
 	Warps          int
 	Scale, Softcap float32
 	F16, Sink      bool
+	// Map is FlashAttentionMergeWide's run table, pMap after its other
+	// parameters: Rows is the table's slots, and slot i merges and writes
+	// row pMap[i] (FlashPrefill70Shape.Map, whose partials are at the rows).
+	Map bool
 	// Page > 0 reads K and V from paged pools of Page positions a page
 	// (docs/design/device-kv-paging.md; paged.go has the layout). The kernel
 	// takes pTab and pRow after its output, before the sinks; every row's key
@@ -436,7 +440,11 @@ func FlashAttentionMergeWide(s FlashShape) (*ir.Kernel, error) {
 	if s.Splits < 1 || s.Heads < 1 || s.Rows < 1 || s.Dim < 1 {
 		return nil, fmt.Errorf("kernels: FlashAttentionMergeWide: invalid shape %+v", s)
 	}
-	b := ir.New("flashmergewide", [3]int{128, 1, 1})
+	name := "flashmergewide"
+	if s.Map {
+		name += "_map"
+	}
+	b := ir.New(name, [3]int{128, 1, 1})
 	p, out := b.Param("pPart", ir.F32), b.Param("pOut", ir.F32)
 	var sink ir.Value
 	if s.Sink {
@@ -446,6 +454,15 @@ func FlashAttentionMergeWide(s FlashShape) (*ir.Kernel, error) {
 	flat := b.Min(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, b.CTAID(), b.NTID()), b.TID()), u(s.Rows*s.Heads*s.Dim-1))
 	item := b.Div(ir.U32, flat, u(s.Dim))
 	dim := b.Rem(ir.U32, flat, u(s.Dim))
+	if s.Map {
+		// The slot's row, through the table: the item and the output
+		// element are that row's.
+		pMap := b.Param("pMap", ir.U32)
+		head := b.Rem(ir.U32, item, u(s.Heads))
+		row := b.Load(ir.U32, pMap, b.Div(ir.U32, item, u(s.Heads)), 0)
+		item = b.Add(ir.U32, b.Mul(ir.U32, row, u(s.Heads)), head)
+		flat = b.Add(ir.U32, b.Mul(ir.U32, item, u(s.Dim)), dim)
+	}
 	padded := (s.Dim + 31) / 32 * 32
 	stride := int64(padded + 64)
 	base := b.Mul(ir.U32, item, u(s.Splits*(padded+64)))

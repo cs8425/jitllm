@@ -39,8 +39,9 @@ func TestFlashPrefillRunTable(t *testing.T) {
 				{Heads: 8, KVHeads: 2, Dim: 64, Scale: .125, Page: 64},
 				{Heads: 8, KVHeads: 4, Dim: 128, Scale: .088, Page: 64, F16: true, Softcap: 50},
 				{Heads: 8, KVHeads: 4, Dim: 256, Scale: .0625, Page: 64},
+				{Heads: 8, KVHeads: 2, Dim: 64, Scale: .125, Page: 64, Splits: 1},
 			} {
-				t.Run(fmt.Sprintf("k%d/%s/%s/d%d", fk.k, d.API(), d.Name(), fs.Dim), func(t *testing.T) {
+				t.Run(fmt.Sprintf("k%d/%s/%s/d%d/S%d", fk.k, d.API(), d.Name(), fs.Dim, fs.Splits), func(t *testing.T) {
 					runTableCase(t, d, fs, fk.form)
 				})
 				ran++
@@ -54,8 +55,9 @@ func TestFlashPrefillRunTable(t *testing.T) {
 		for _, fs := range []kernels.FlashPrefill70Shape{
 			{Heads: 8, KVHeads: 2, Dim: 64, Scale: .125, Page: 64},
 			{Heads: 8, KVHeads: 4, Dim: 128, Scale: .088, Page: 64, F16: true, Softcap: 50},
+			{Heads: 8, KVHeads: 2, Dim: 64, Scale: .125, Page: 64, Splits: 1},
 		} {
-			t.Run(fmt.Sprintf("tile/%s/%s/d%d", d.API(), d.Name(), fs.Dim), func(t *testing.T) {
+			t.Run(fmt.Sprintf("tile/%s/%s/d%d/S%d", d.API(), d.Name(), fs.Dim, fs.Splits), func(t *testing.T) {
 				runTableCase(t, d, fs, flashTileForm)
 			})
 			ran++
@@ -65,8 +67,9 @@ func TestFlashPrefillRunTable(t *testing.T) {
 		for _, fs := range []kernels.FlashPrefill70Shape{
 			{Heads: 8, KVHeads: 2, Dim: 64, Scale: .125, Page: 64},
 			{Heads: 8, KVHeads: 4, Dim: 128, Scale: .088, Page: 64, F16: true, Softcap: 50},
+			{Heads: 8, KVHeads: 2, Dim: 64, Scale: .125, Page: 64, Splits: 1},
 		} {
-			t.Run(fmt.Sprintf("v70/%s/%s/d%d", d.API(), d.Name(), fs.Dim), func(t *testing.T) {
+			t.Run(fmt.Sprintf("v70/%s/%s/d%d/S%d", d.API(), d.Name(), fs.Dim, fs.Splits), func(t *testing.T) {
 				runTableCase(t, d, fs, flash70Form)
 			})
 			ran++
@@ -225,8 +228,37 @@ func runFlash(t *testing.T, d backend.Device, fs kernels.FlashPrefill70Shape, fo
 	if fs.Map {
 		args = append(args, g.up(u32bytes(mp)))
 	}
+	// With a split the kernel writes partials, and the wide merge -- with
+	// the same table where the launch has one -- adds the sink and writes
+	// the rows.
+	var merge backend.Kernel
+	var margs []backend.Buf
+	if fs.Splits > 0 {
+		ms := kernels.FlashShape{Heads: fs.Heads, KVHeads: fs.KVHeads, Dim: fs.Dim, Rows: fs.Rows,
+			Splits: fs.Splits, Sink: true, Map: fs.Map}
+		mk, err := kernels.FlashAttentionMergeWide(ms)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if merge, err = d.Compile(mk); err != nil {
+			t.Fatal(err)
+		}
+		defer merge.Close()
+		// Partials at the rows: sized for every row the table can name.
+		part := g.up(f32bytes(nanFill(kernels.FlashPartialFloats(kernels.FlashShape{Heads: fs.Heads, Dim: fs.Dim,
+			Rows: max(rows, fs.Rows), Splits: fs.Splits}))))
+		args[4] = part
+		_, sinks := prefillInputs(ms)
+		margs = []backend.Buf{part, oo, g.up(f32bytes(sinks))}
+		if fs.Map {
+			margs = append(margs, args[len(args)-1])
+		}
+	}
 	d.Session(func(se backend.Session) {
 		err = se.Launch(c, groups, threads, args...)
+		if err == nil && merge != nil {
+			err = se.Launch(merge, (fs.Rows*fs.Heads*fs.Dim+127)/128, 128, margs...)
+		}
 		if err == nil {
 			err = se.Sync()
 		}
