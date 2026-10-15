@@ -97,7 +97,7 @@ func TestDecisionRelocatesMidPrompt(t *testing.T) {
 				}
 				placed := d.st.GPULayers()
 				if placed == 0 {
-					t.Fatalf("%s took no block: %v", g.Name(), g.Err())
+					t.Fatalf("%s took no block: %v %v (budgets %+v)", g.Name(), g.Err(), d.st.DeviceDeclines(), g.Budgets())
 				}
 				headHome = d.st.headReady == nil
 				if _, err := d.st.Prefill(ids[a:b]); err != nil {
