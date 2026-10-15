@@ -44,6 +44,11 @@ const (
 	// (A..Z then a..z, each one token) at the prompt's last row, a noul
 	// shown true first (openjev/openjev).
 	DecisionOpenJev
+	// DecisionVllmD3 is lev's codes (A..Z then AA..ZZ, each one token) read
+	// at the prompt's last row over a qwen35 whose attention is not causal
+	// (vllm-sr/d3), one prompt per question; its confidence is one minus the
+	// normalised entropy, and it reads a null state and null instructions.
+	DecisionVllmD3
 )
 
 var decisionNames = map[DecisionKind]string{
@@ -53,6 +58,7 @@ var decisionNames = map[DecisionKind]string{
 	DecisionClef:    "clef",
 	DecisionD1Omni:  "lfm2-d1-omni",
 	DecisionOpenJev: "openjev",
+	DecisionVllmD3:  "vllm-d3",
 }
 
 // String is the name llama.cpp writes as <arch>.decision.type.

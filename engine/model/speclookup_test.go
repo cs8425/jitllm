@@ -26,6 +26,7 @@ var lookupModels = []string{
 	"Llama-3.2-1B-Instruct-Q4_K_M.gguf",
 	"synth-qwen35-hybrid-mtp.gguf",
 	"synth-mamba2.gguf",
+	"synth-qwen4exp.gguf",
 }
 
 // copyPrompt asks for a paragraph again: what prompt lookup exists for.
