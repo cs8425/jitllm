@@ -40,14 +40,19 @@ const (
 	// head -- and a scorer at each option's <|mask|>, a noul read as [false,
 	// true]. Images or a voice clip enter as a prefix of embedding rows.
 	DecisionD1Omni
+	// DecisionOpenJev reads the next-token logits of one letter per option
+	// (A..Z then a..z, each one token) at the prompt's last row, a noul
+	// shown true first (openjev/openjev).
+	DecisionOpenJev
 )
 
 var decisionNames = map[DecisionKind]string{
-	DecisionLev:    "lev",
-	DecisionLFM2D1: "lfm2-d1",
-	DecisionLaya:   "laya",
-	DecisionClef:   "clef",
-	DecisionD1Omni: "lfm2-d1-omni",
+	DecisionLev:     "lev",
+	DecisionLFM2D1:  "lfm2-d1",
+	DecisionLaya:    "laya",
+	DecisionClef:    "clef",
+	DecisionD1Omni:  "lfm2-d1-omni",
+	DecisionOpenJev: "openjev",
 }
 
 // String is the name llama.cpp writes as <arch>.decision.type.

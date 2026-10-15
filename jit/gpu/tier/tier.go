@@ -34,6 +34,9 @@ type resident struct {
 	k         int
 	t         kernels.Quant
 	ok        bool // false = declined, do not retry
+	// why is the decline's reason, given again to whoever asks for the
+	// declined tensor later, so a second offer names it too.
+	why string
 	// shared says one buffer serves several blocks: a streamed mixture's
 	// compact expert bank, live only between a block's suspension and its own
 	// FFN. The per-block free walk must skip it and must not refund it; see
@@ -171,6 +174,10 @@ type Config struct {
 	// their prologue (kernels.ActIn): the A/B arm and bisection switch for
 	// the operand prologue alone. NoFuse turns it off too.
 	NoActFuse bool
+	// NoAddNormFold keeps a prompt chunk's block-end residual add a launch
+	// of its own instead of folding it into the next block's attention norm
+	// (the binary16 GEMM path's add-and-norm kernel): the A/B arm.
+	NoAddNormFold bool
 	// GateUp2 runs a dense gated FFN's gate and up as one Gate2 matvec
 	// (kernels.MatVecShape.Gate2): each workgroup sums its rows of both
 	// matrices over the one operand and writes act(gate)*up: the bits the
@@ -294,6 +301,10 @@ type Config struct {
 	// kernels.FlashPrefillTile on Metal -- the other arm of those kernels'
 	// gates and measurements.
 	NoFlashPrefill bool
+	// NoRagPrefill keeps a ragged step's prompt chunks on the decode plan, a
+	// row at a time, instead of the run-table flash prefill
+	// (raggedprefill.go) -- the other arm of its gates and measurements.
+	NoRagPrefill bool
 	// SpillingTiles lets the batched GEMM run a tile whose kernel spills
 	// registers to local memory. By default a tile the device's compiler
 	// reports spilling (backend.KernelResources.SpillBytes) is passed over
@@ -767,6 +778,9 @@ type Stats struct {
 	// that quantized for the int8 matvec (QuantizeAct). Each is a conversion
 	// launch, and a pass over the float row, that did not run.
 	NormF16, ActF16Fused, QuantActs int
+	// AddNormFolded counts block-end residual adds a prompt chunk folded
+	// into the next block's attention norm (Config.NoAddNormFold).
+	AddNormFolded int
 	// KVPrewarmPages counts pages a pool grew ahead of its history
 	// (PrewarmKV): the growth a State's first prompt no longer pays.
 	KVPrewarmPages int
@@ -1008,6 +1022,13 @@ type Stats struct {
 	// kernels.FlashPrefill80, scores, softmax and accumulate in one kernel
 	// on m16n8k16 (sm_80 on).
 	FlashPrefill80 int
+	// RagPrefills counts run-table prefill launches inside ragged steps
+	// (raggedprefill.go): the selection check that a step's prompt chunks
+	// attended as a prefill rather than through the decode plan.
+	RagPrefills int
+	// RagForms counts batched scratches built with a flash prefill that has a
+	// run-table form: where it is 0, ragged steps keep the decode plan.
+	RagForms int
 	// PagedPrefillPasses counts the passes those launches ran over a history
 	// longer than one launch attends -- the selection check for the fold.
 	PagedPrefillPasses int
@@ -1226,6 +1247,7 @@ func (s *Stats) add(o Stats) {
 	s.GemmDeep += o.GemmDeep
 	s.GemmInt8 += o.GemmInt8
 	s.NormF16 += o.NormF16
+	s.AddNormFolded += o.AddNormFolded
 	s.ActF16Fused += o.ActF16Fused
 	s.QuantActs += o.QuantActs
 	s.KVPrewarmPages += o.KVPrewarmPages
@@ -1318,6 +1340,8 @@ func (s *Stats) add(o Stats) {
 	s.PagedPrefill70 += o.PagedPrefill70
 	s.PagedAccMMA += o.PagedAccMMA
 	s.FlashPrefill80 += o.FlashPrefill80
+	s.RagPrefills += o.RagPrefills
+	s.RagForms += o.RagForms
 	s.PagedPrefillPasses += o.PagedPrefillPasses
 	s.EmbedLaunches += o.EmbedLaunches
 	s.HeadFolds += o.HeadFolds
@@ -2842,10 +2866,18 @@ func (g *devTier) resident(block, slot int, q kernels.Quant, w []byte, nrows, k 
 		// resident. Sharing one entry would launch a kernel against a
 		// differently strided payload (a silent out-of-bounds read), and
 		// refusing on a mismatch would stop a bank from ever being placed.
+		if !r.ok && r.why != "" {
+			g.LastErr = r.why
+		}
 		return r
 	}
 	r := &resident{nrows: nrows, k: k, t: q}
 	g.res[key] = r
+	defer func() {
+		if !r.ok {
+			r.why = g.LastErr
+		}
+	}()
 
 	// Price it before packing it: declining after a pack costs a full read and
 	// fresh host memory to learn the answer is no. PackedWords is the same

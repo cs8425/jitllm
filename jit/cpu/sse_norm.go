@@ -144,7 +144,10 @@ func EmitLayerNormSSE(n int, bias bool) ([]byte, error) { return emitRowStatSSE(
 // EmitGaussTopKSSE and EmitMagMatchSSE are EmitGaussTopK and EmitMagMatch
 // (layernorm.go) on legacy SSE.
 func EmitGaussTopKSSE(n int) ([]byte, error) { return emitRowStatSSE(n, false, RowGauss) }
-func EmitMagMatchSSE(n int) ([]byte, error)  { return emitRowStatSSE(n, false, RowMag) }
+
+// EmitRowStdSSE is EmitRowStd on legacy SSE.
+func EmitRowStdSSE(n int) ([]byte, error)   { return emitRowStatSSE(n, false, RowStd) }
+func EmitMagMatchSSE(n int) ([]byte, error) { return emitRowStatSSE(n, false, RowMag) }
 
 // emitRowStatSSE is emitRowStat on legacy SSE. XMM15 holds the match's
 // target, and the gaussian's zero in pass 3.
@@ -215,9 +218,20 @@ func emitRowStatSSE(n int, bias bool, mode RowMode) ([]byte, error) {
 		a.SUBSS(t, t, XMM12)
 		a.MULSS(t, t, t)
 	})
-	bcastSS(&a, XMM14, At(RBX, 0)) // 1/n
+	if mode == RowStd {
+		bcastSS(&a, XMM14, At(RBX, 12)) // 1/(n-1)
+	} else {
+		bcastSS(&a, XMM14, At(RBX, 0)) // 1/n
+	}
 	a.MULPS(XMM0, XMM0, XMM14)
 	switch mode {
+	case RowStd:
+		a.SQRTPS(XMM0, XMM0)
+		bcastSS(&a, XMM15, At(RBX, 4)) // eps
+		a.ADDPS(XMM0, XMM0, XMM15)
+		bcastSS(&a, XMM14, At(RBX, 8)) // 1.0
+		a.DIVPS(XMM14, XMM14, XMM0)
+		a.SHUFPS(XMM13, XMM14, XMM14, 0)
 	case RowMag:
 		bcastSS(&a, XMM14, At(RBX, 4)) // eps
 		a.MAXPS(XMM0, XMM0, XMM14)
@@ -251,6 +265,9 @@ func emitRowStatSSE(n int, bias bool, mode RowMode) ([]byte, error) {
 			a.MAXPS(t, t, XMM15)
 		case RowMag:
 			a.MULPS(t, t, XMM13)
+		case RowStd:
+			a.SUBPS(t, t, XMM12)
+			a.MULPS(t, t, XMM13)
 		default:
 			a.SUBPS(t, t, XMM12)
 			a.MULPS(t, t, XMM13)
@@ -280,6 +297,9 @@ func emitRowStatSSE(n int, bias bool, mode RowMode) ([]byte, error) {
 			a.SUBSS(XMM8, XMM8, XMM13)
 			a.MAXSS(XMM8, XMM8, XMM15)
 		case RowMag:
+			a.MULSS(XMM8, XMM8, XMM13)
+		case RowStd:
+			a.SUBSS(XMM8, XMM8, XMM12)
 			a.MULSS(XMM8, XMM8, XMM13)
 		default:
 			a.SUBSS(XMM8, XMM8, XMM12)

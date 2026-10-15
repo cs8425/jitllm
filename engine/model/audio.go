@@ -43,6 +43,8 @@ type audioTower struct {
 	// The front end's tables, rows of F32: the windowed DFT bases (NFFT/2+1
 	// rows of NFFT) and the filterbank (MelBins rows of NFFT/2+1).
 	dftCos, dftSin, mel tensor
+	// melFloor is the log's floor, 2^-24 a feature, added before the log.
+	melFloor []float32
 
 	// The subsampling: conv0 a matrix (channels x 9 taps), the depthwise
 	// layers' taps tap-major, the pointwise layers matrices.
@@ -76,10 +78,9 @@ type audBlock struct {
 	convN, convNB             []float32
 	gluV, gluG, pw2           tensor
 	gluVB, gluGB, pw2B        []float32
-	dw, dwB, bnS, bnB         []float32
-	// bnShift is the folded BatchNorm's shift with the depthwise bias folded
-	// in, dwB*bnS + bnB: a device's one affine launch.
-	bnShift                   []float32
+	// bnB is the BatchNorm's shift with the depthwise bias folded in at
+	// conversion (jlm.RoleABNShift): the module's one affine.
+	dw, bnS, bnB              []float32
 	ff2N, ff2NB, ff2UB, ff2DB []float32
 	ff2Up, ff2Down            tensor
 	outN, outNB               []float32
@@ -239,7 +240,6 @@ func buildAudio(c *jlm.File, m *Model) (*audioTower, error) {
 		mat(&b.gluG, jlm.RoleAGLUGate, bi, -1, d, d)
 		vec(&b.gluGB, jlm.RoleAGLUGateB, bi, -1, d)
 		vec(&b.dw, jlm.RoleADW, bi, -1, kt*d)
-		vec(&b.dwB, jlm.RoleADWB, bi, -1, d)
 		vec(&b.bnS, jlm.RoleABNScale, bi, -1, d)
 		vec(&b.bnB, jlm.RoleABNShift, bi, -1, d)
 		mat(&b.pw2, jlm.RoleAPW2, bi, -1, d, d)
@@ -255,13 +255,6 @@ func buildAudio(c *jlm.File, m *Model) (*audioTower, error) {
 	}
 	if err != nil {
 		return nil, err
-	}
-	for j := range a.blocks {
-		b := &a.blocks[j]
-		b.bnShift = make([]float32, d)
-		for c := range b.bnShift {
-			b.bnShift[c] = b.dwB[c]*b.bnS[c] + b.bnB[c]
-		}
 	}
 	a.tables()
 	for _, w := range []*tensor{&a.subOut, &a.ad1, &a.ad2, &a.resDown, &a.resUp} {
@@ -300,6 +293,10 @@ func (a *audioTower) tables() {
 	}
 	a.dftCos, a.dftSin = f32Tensor(cs, bins, n), f32Tensor(sn, bins, n)
 	a.mel = f32Tensor(slaneyFilterbank(int(a.cfg.SampleRate), n, nm), nm, bins)
+	a.melFloor = make([]float32, nm)
+	for i := range a.melFloor {
+		a.melFloor[i] = 1.0 / (1 << 24)
+	}
 }
 
 // slaneyFilterbank is librosa.filters.mel(sr, n_fft, n_mels, norm="slaney")
@@ -370,9 +367,8 @@ func (m *Model) audioPageIn(j int) error {
 // and kept, so a warm clip of a size seen before allocates nothing.
 type audioRun struct {
 	cap                                    int
-	sig, frames, re, im, mel, melT, ones   []float32
-	pre, neg                               []float32
-	dot                                    [1]float32
+	sig, frames, re, im, mel, melT         []float32
+	pre                                    []float32
 	pad0, col, x0, pad1, x1, x2, pad2, x3  []float32
 	x4, x5, x6                             []float32
 	x, h, q, k, v, qu, qv, p, t, ff, g, cv []float32
@@ -454,38 +450,15 @@ func (e *Embedder) encodeAudio(samples []float32) ([]float32, error) {
 	if err := e.mm(mel, a.mel, re, all); err != nil {
 		return nil, err
 	}
-	floor := growA(&r.ones, max(nm, valid))
-	for i := range floor[:nm] {
-		floor[i] = 1.0 / (1 << 24)
-	}
-	e.addBiasRows(mel, floor[:nm], all)
+	e.addBiasRows(mel, a.melFloor, all)
 	nn.Ln32JIT(mel)
-	// Each feature over the clip's frames: transposed, normalised, back.
+	// Each feature over the clip's frames: transposed, standardised over its
+	// unbiased deviation by a generated row kernel (nn.RowStd32JIT), back.
 	melT := growA(&r.melT, nm*valid)
 	nn.Copy32JIT(melT, valid, 1, mel, 1, nm, nm, valid)
-	ones := floor[:valid]
-	for i := range ones {
-		ones[i] = 1
-	}
 	for f := 0; f < nm; f++ {
 		row := melT[f*valid : (f+1)*valid]
-		s, err := e.dotF32(row, ones)
-		if err != nil {
-			return nil, err
-		}
-		neg := growA(&r.neg, valid)
-		copy(neg, ones)
-		nn.Scale32JIT(neg, -s/float32(valid))
-		nn.Axpy32JIT(row, neg, 1)
-		ss, err := e.dotF32(row, row)
-		if err != nil {
-			return nil, err
-		}
-		std := math.Sqrt(float64(ss) / float64(valid-1))
-		if math.IsNaN(std) {
-			std = 0
-		}
-		nn.Scale32JIT(row, float32(1/(std+1e-5)))
+		nn.RowStd32JIT(row, row, 1e-5)
 	}
 	clear(mel)
 	nn.Copy32JIT(mel, 1, nm, melT, valid, 1, nm, valid)
@@ -603,16 +576,6 @@ func (e *Embedder) audioDW(pad, out *[]float32, x []float32, t, f, ch int, w, b 
 	return o, to, fo, nil
 }
 
-// dotF32 is x . w on the generated f32 matvec.
-func (e *Embedder) dotF32(x, w []float32) (float32, error) {
-	out := e.aud.dot[:]
-	b := unsafe.Slice((*byte)(unsafe.Pointer(&w[0])), 4*len(w))
-	if !e.jit.MatVecHost(out, quant.F32, b, x, 1, len(x)) {
-		return 0, fmt.Errorf("model: no generated f32 matvec of width %d on this host", len(x))
-	}
-	return out[0], nil
-}
-
 // rowsLNW is y[r] = LayerNorm(x[r]; w, b) over n rows of width wd at eps.
 func (e *Embedder) rowsLNW(y, x, w, b []float32, n, wd int, eps float64) {
 	j := &e.rg.rows
@@ -708,7 +671,6 @@ func (e *Embedder) audioBlocks(x []float32, t int) error {
 		e.addBiasRows(gg, b.gluGB, t)
 		nn.SigmoidMul32JIT(gg, gv) // gg = sigma(gate) * value
 		e.audioDepthwise(tt, gg, b.dw, t, d, kt)
-		e.addBiasRows(tt, b.dwB, t)
 		e.actMul(tt, e.audioRowsOf(b.bnS, t, d), nn.ActIdentity)
 		e.addBiasRows(tt, b.bnB, t)
 		e.actRows(tt, nn.ActSiLU)

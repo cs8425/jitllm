@@ -2051,6 +2051,17 @@ func (s *State) planFor(li int) *nn.LayerPlan {
 	}
 	s.k3Plan(li, &plan)
 	s.q4ePlan(li, &plan)
+	if c.NonCausal {
+		// A bidirectional decoder (EmbeddingGemma): its blocks are non-causal
+		// blocks, as an encoder's are -- the sequence one call, every row over
+		// the call's rows, a sliding layer inside each row's symmetric window
+		// (nn.RowWindowDevice; embedstate.go's embedTell). The row windows
+		// are the window, so the causal one (SWAWindow) is off: with both, a
+		// 600-row sequence read NaN past the causal window's 512 rows.
+		plan.NonCausal = true
+		plan.Windowed = c.SWA(li)
+		plan.SWAWindow = 0
+	}
 	return &plan
 }
 
@@ -2547,8 +2558,14 @@ func (m *Model) bankWeight(t tensor) nn.Weight {
 		Packed: &nn.Packed{Sheet: sheet, Sheets: sheets}}
 }
 
+// wt is t for a device: K is the width it was packed at, which is k but for
+// a ragged tower's matrices (tensor.kp; nn.LayerPlan.KPad).
 func wt(t tensor) nn.Weight {
-	return nn.Weight{T: t.typ, Data: t.data, Rows: t.rows, K: t.k, Packed: t.packed}
+	k := t.k
+	if t.kp != 0 {
+		k = t.kp
+	}
+	return nn.Weight{T: t.typ, Data: t.data, Rows: t.rows, K: k, Packed: t.packed}
 }
 
 // SetHeadOnDevice chooses whether the output norm and the vocabulary projection

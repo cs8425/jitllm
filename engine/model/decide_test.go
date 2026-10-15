@@ -77,6 +77,9 @@ var decisionCases = []struct {
 	// both (its F16 products). Its confidence is its own code's (the chosen
 	// option's probability).
 	{"d1-omni", d1OmniModel, "d1-omni-600M-F16", jlm.DecisionD1Omni, true, 0.005},
+	// llama.cpp's own openjev test model (ggml-org/tinyopenjev-for-testing-gguf):
+	// a random qwen35 whose answers sit far from saturation.
+	{"openjev", "openjev/tinyopenjev-for-testing-Q8_0.gguf", "tinyopenjev-for-testing-Q8_0", jlm.DecisionOpenJev, false, 0.01},
 }
 
 // decisionRequests are the request bodies in testdata/decision: an object
@@ -198,6 +201,8 @@ func TestDecisionReadoutIsLoadBearing(t *testing.T) {
 		{"lev-one-order", "lev/lev-Q8_0.gguf", "lev-Q8_0", "support", jlm.DecisionLev, "one-order", []string{"intent", "team"}},
 		{"lev-unsorted", "lev/lev-Q8_0.gguf", "lev-Q8_0", "support", jlm.DecisionLev, "unsorted", []string{"intent", "urgent", "frustration", "refund", "team"}},
 		{"lev-uncalibrated", "lev/lev-Q8_0.gguf", "lev-Q8_0", "support", jlm.DecisionLev, "uncalibrated", []string{"intent", "urgent"}},
+		{"openjev-false-first", "openjev/tinyopenjev-for-testing-Q8_0.gguf", "tinyopenjev-for-testing-Q8_0", "ambiguous", jlm.DecisionOpenJev, "false-first", []string{"compensate", "churn", "damage"}},
+		{"openjev-uncalibrated", "openjev/tinyopenjev-for-testing-Q8_0.gguf", "tinyopenjev-for-testing-Q8_0", "ambiguous", jlm.DecisionOpenJev, "uncalibrated", []string{"compensate", "churn", "damage"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := openDecision(t, c.gguf, c.kind)

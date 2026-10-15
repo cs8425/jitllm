@@ -114,6 +114,9 @@ func flashPrefill80(s FlashPrefill70Shape, k8 bool) (*ir.Kernel, error) {
 	if k8 {
 		name += "_k8"
 	}
+	if s.Map {
+		name += "_map"
+	}
 
 	b := ir.New(name, [3]int{FlashPrefill80Threads, 1, 1})
 	// mma is one m16n8k16 product, or its two m16n8k8 halves.
@@ -131,6 +134,12 @@ func flashPrefill80(s FlashPrefill70Shape, k8 bool) (*ir.Kernel, error) {
 	pOut := b.Param("pOut", ir.F32)
 	pTab, pDesc := b.Param("pTab", ir.U32), b.Param("pRow", ir.U32)
 	c := func(v int64) ir.Value { return b.Const(ir.U32, v) }
+	// rowOf is a query slot's row: itself, or the run table's (Map).
+	rowOf := func(slot ir.Value) ir.Value { return slot }
+	if s.Map {
+		pMap := b.Param("pMap", ir.U32)
+		rowOf = func(slot ir.Value) ir.Value { return b.Load(ir.U32, pMap, slot, 0) }
+	}
 	f := b.ConstF32
 	negInf := b.Bitcast(ir.F32, c(0xFF800000))
 	zero := f(0)
@@ -162,14 +171,14 @@ func flashPrefill80(s FlashPrefill70Shape, k8 bool) (*ir.Kernel, error) {
 	// The workgroup's keys, [keyStart of its first row, keyEnd of its last),
 	// in 32-key tiles from a multiple of 32, which lie in one page each; this
 	// split's run of them.
-	span := tileSpanOf(b, pDesc, row0, b.Add(ir.U32, row0, c(int64(rowsWG-1))))
+	span := tileSpanOf(b, pDesc, rowOf(row0), rowOf(b.Add(ir.U32, row0, c(int64(rowsWG-1)))))
 	kStart, ntiles := span.tileRun(b, spl, S, tk)
 	hlo := b.Sub(ir.U32, span.hi, span.lo)
 
 	// The lane's two query rows and their keys.
 	var rows, kst, kend [2]ir.Value
 	for x := 0; x < 2; x++ {
-		rows[x] = b.Add(ir.U32, wrow0, b.Add(ir.U32, lg, c(int64(8*x))))
+		rows[x] = rowOf(b.Add(ir.U32, wrow0, b.Add(ir.U32, lg, c(int64(8*x)))))
 		kst[x], kend[x] = pagedDesc(b, pDesc, rows[x], PRowStart), pagedDesc(b, pDesc, rows[x], PRowEnd)
 	}
 	// The queries, once, as A fragments: rows g and g+8, dims 2q.. and +8 of
@@ -197,7 +206,7 @@ func flashPrefill80(s FlashPrefill70Shape, k8 bool) (*ir.Kernel, error) {
 	for it := int64(0); ds > 1 && it < int64(rowsWG*hd/2)/nthQ; it++ {
 		w := b.Add(ir.U32, tid, c(nthQ*it))
 		qi, p := b.Div(ir.U32, w, c(int64(hd/2))), b.Rem(ir.U32, w, c(int64(hd/2)))
-		src := b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, row0, qi), c(int64(s.Heads))), h),
+		src := b.Add(ir.U32, b.Mul(ir.U32, b.Add(ir.U32, b.Mul(ir.U32, rowOf(b.Add(ir.U32, row0, qi)), c(int64(s.Heads))), h),
 			c(int64(hd))), b.Shl(ir.U32, p, c(1)))
 		e := b.LoadV(ir.F32, pQ, src, 0, 2)
 		b.Store(shQ, b.Add(ir.U32, b.Mul(ir.U32, qi, c(int64(qs))), p), b.PackF16(e[0], e[1]), 0)

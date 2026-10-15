@@ -36,7 +36,7 @@ func ClampWindow(window, k int) int {
 // thread. A surplus group or thread re-does the last window or word and
 // writes the same bits; every shared slot a thread reads belongs to a real
 // owner (RULE 13).
-func quantizeWide(n, window int, kind *ActKind) (*ir.Kernel, error) {
+func quantizeWide(n, window int, kind *ActKind, pad *rowPad) (*ir.Kernel, error) {
 	if window%32 != 0 || n%window != 0 {
 		return nil, fmt.Errorf("kernels: Quantize: window %d does not tile %d elements", window, n)
 	}
@@ -51,6 +51,8 @@ func quantizeWide(n, window int, kind *ActKind) (*ir.Kernel, error) {
 	name := "quantizewide"
 	if kind != nil {
 		name = "quantizeactwide"
+	} else if pad != nil {
+		name = "quantizepaddedwide"
 	}
 	b := ir.New(name, [3]int{g, 1, 1})
 	var pX, pG, pU, pOut ir.Value
@@ -68,6 +70,9 @@ func quantizeWide(n, window int, kind *ActKind) (*ir.Kernel, error) {
 	tid := b.TID()
 	gid := b.CTAID()
 	value := func(at ir.Value, store bool) ir.Value {
+		if kind == nil && pad != nil {
+			return pad.load(b, pX, at)
+		}
 		if kind == nil {
 			return b.Load(ir.F32, pX, at, 0)
 		}

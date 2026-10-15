@@ -33,7 +33,7 @@ import (
 // near-tie, a nine-way rating distribution whose top two sit 0.02 apart
 // (ambiguous question 3, p 0.47 against 0.49): the laptop's 0.058 on five
 // blocks is the same. Its violations move the answers 0.65-0.69.
-var decisionDevTol = map[string]float64{"d1-3B": 0.03, "lev": 0.08, "laya": 0.01, "clef": 0.05, "clef-fixture": 0.002, "d1-omni": 0.01}
+var decisionDevTol = map[string]float64{"d1-3B": 0.03, "lev": 0.08, "laya": 0.01, "clef": 0.05, "clef-fixture": 0.002, "d1-omni": 0.01, "openjev": 0.005}
 
 // decisionBlocks is how many blocks a Decider's readout runs: the decoder's,
 // or the encoder segment's (a decision head's blocks with it).
@@ -162,6 +162,9 @@ var decisionDevViolations = map[string]decisionDevViolation{
 	"lev": {"a norm epsilon of 1", func(m *Model) func() {
 		return cfgMut(m, func(c *Config) { c.RMSEps = 1 })
 	}},
+	"openjev": {"a norm epsilon of 1", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.RMSEps = 1 })
+	}},
 	"d1-omni": {"a norm epsilon of 1", func(m *Model) func() {
 		return cfgMut(m, func(c *Config) { c.RMSEps = 1 })
 	}},
@@ -235,8 +238,7 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 						all := func(n int) bool { return n == nb }
 						got, placed, why, picked := decideOn(t, m, g, -1, all)
 						if placed != nb {
-							t.Skipf("%s held %d of %d blocks (%s): this card is too small for the every-block arm",
-								spec, placed, nb, why)
+							cardTooSmall(t, why, "%s held %d of %d blocks in the every-block arm", spec, placed, nb)
 						}
 						worst := decisionDiff(t, host, got)
 						t.Logf("every block on %s: worst difference from the host %.5f", spec, worst)
