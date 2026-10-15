@@ -111,8 +111,14 @@ strata_run() {
 }
 # The B arm of a jitllm A/B (STRATA_VS_AA with JITLLM_B or JITLLM_ENV_B):
 # another build or other settings, under the same gates and interleave.
+# JITLLM_B_UNPINNED=1 runs the B arm on every socket (the 2-socket arm).
 jitllm_run_b() {
+  local pin=("${PIN[@]}")
+  [ -n "${JITLLM_B_UNPINNED:-}" ] && PIN=()
   JITLLM="${JITLLM_B:-$JITLLM}" JITLLM_ENV="${JITLLM_ENV_B:-$JITLLM_ENV}" jitllm_run
+  local rc=$?
+  PIN=("${pin[@]}")
+  return $rc
 }
 A=jitllm_run
 B=strata_run
