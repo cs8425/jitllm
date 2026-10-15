@@ -104,8 +104,13 @@ func (s *State) relocateRows(took []int, rows int) {
 		}
 	}
 	room := func() bool { return true }
-	if rr, ok := s.ld.(nn.RowsRoomer); ok {
+	if rr, ok := s.ld.(nn.RowsRoomer); ok && s.devCount() > 0 {
 		room = func() bool { return rr.RowsRoom(rows, s.nseq) }
+		// Counted once a step: blocks go home for the step's room here,
+		// or all at once in forwardRows when relocation is off.
+		if !room() {
+			s.roomHome++
+		}
 	}
 	sd, ok := s.ld.(nn.SeqKVDevice)
 	if !ok || !sd.PerSequenceKV() || s.nseq == 1 {
@@ -113,12 +118,14 @@ func (s *State) relocateRows(took []int, rows int) {
 		s.relocateUntil(end, room)
 		return
 	}
-	var bases, ends []int
+	// The State's own slices, so a warm step allocates nothing.
+	bases, ends := s.rlBases[:0], s.rlEnds[:0]
 	for q, k := range took {
 		if k > 0 {
 			bases, ends = append(bases, q*s.maxSeq), append(ends, s.bpos[q]+k)
 		}
 	}
+	s.rlBases, s.rlEnds = bases, ends
 	s.relocateUntil(end, func() bool { return room() && sd.ReserveKVSeqs(bases, ends) })
 }
 

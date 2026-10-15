@@ -14,6 +14,9 @@ import (
 // ids and markers (prompt.encode), the trunk's first 32 values at each
 // marker, the head's logits and system_one's probabilities.
 type d1OmniGold struct {
+	Usage struct {
+		InputTokens int `json:"input_tokens"`
+	} `json:"usage"`
 	Questions []struct {
 		ID      string      `json:"id"`
 		IDs     []int32     `json:"ids"`

@@ -115,7 +115,11 @@ type Decider struct {
 	// omniPre is d1-omni's picture prefix for the request in flight, rows of
 	// NEmbd (none for text), and omniVis the vision segment that encodes it.
 	omniPre []float32
-	omniVis *State
+	// omniSpoken says the prefix is a voice clip's (DecideAudio), and
+	// omniClip is the clip as the tower reads it.
+	omniSpoken bool
+	omniClip   []float32
+	omniVis    *State
 	// vscores is each variant's scores (variantScores): a question's
 	// variants are answered together, so each keeps its own.
 	vscores [][]float32
@@ -193,6 +197,17 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 		}
 		d.maxOptions = len(d.labels)
 	case jlm.DecisionLFM2D1:
+	case jlm.DecisionOpenJev:
+		// One letter per option, each of which must be one token
+		// (server-decision.cpp).
+		for _, c := range "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" {
+			id, ok := d.single(string(c))
+			if !ok {
+				return nil, fmt.Errorf("model: openjev's label %q is not one token", c)
+			}
+			d.labels = append(d.labels, id)
+		}
+		d.maxOptions = len(d.labels)
 	case jlm.DecisionClef:
 		d.st = m.NewState(maxSeq)
 		if err := d.clefInit(); err != nil {
@@ -240,7 +255,15 @@ func (d *Decider) Close() error {
 // (Embedder.SetDevice).
 func (d *Decider) SetDevice(dev nn.Device, max int) error {
 	if d.emb != nil {
-		return d.emb.SetDeviceLayers(dev, max)
+		if err := d.emb.SetDeviceLayers(dev, max); err != nil {
+			return err
+		}
+		// An audio tower's blocks go where the encoder's do, every one the
+		// device takes (d1-omni's).
+		if max != 0 {
+			return d.emb.setAudioDevice(dev)
+		}
+		return d.emb.setAudioDevice(nil)
 	}
 	if err := d.st.SetDeviceLayers(dev, max); err != nil {
 		return err
@@ -398,7 +421,7 @@ func (d *Decider) variants(q *DecisionQuestion) int {
 // order is the question's options in the order the prompt shows them: d1
 // shows a noul true first.
 func (d *Decider) order(q *DecisionQuestion) []DecisionOption {
-	if (d.kind == jlm.DecisionLFM2D1 || d.kind == jlm.DecisionClef) && q.Type == jlm.QuestionNoul && d.violation != "false-first" {
+	if (d.kind == jlm.DecisionLFM2D1 || d.kind == jlm.DecisionClef || d.kind == jlm.DecisionOpenJev) && q.Type == jlm.QuestionNoul && d.violation != "false-first" {
 		return []DecisionOption{q.Options[1], q.Options[0]}
 	}
 	return q.Options
@@ -586,6 +609,11 @@ func (d *Decider) promptText(state jinja.Value, q *DecisionQuestion, v int) (str
 			n = levRatings
 		}
 		for _, id := range d.labels[:n] {
+			groups = append(groups, []int32{id})
+		}
+	case jlm.DecisionOpenJev:
+		// The template writes the letters itself.
+		for _, id := range d.labels[:len(opts)] {
 			groups = append(groups, []int32{id})
 		}
 	case jlm.DecisionLFM2D1:
@@ -1159,6 +1187,9 @@ type DecisionBody struct {
 	// (DecisionVideos).
 	Images []string
 	Videos []VideoURLs
+	// Audio is the voice clips' data URLs (data:audio/...): at most one, and
+	// never beside a picture (d1-omni's).
+	Audio []string
 }
 
 // ParseDecisionRequest reads a /v1/systemone body, every object's keys in the
@@ -1169,6 +1200,20 @@ func ParseDecisionRequest(body []byte) (DecisionBody, error) {
 	out.Model, out.State, out.Questions, out.Images, err = parseDecisionRequest(body)
 	if err != nil {
 		return out, err
+	}
+	// A voice clip rides "files" beside the pictures (llama.cpp's server
+	// tells them apart by content; here by the URL's media type).
+	pics := out.Images[:0]
+	for _, u := range out.Images {
+		if strings.HasPrefix(u, "data:audio/") {
+			out.Audio = append(out.Audio, u)
+		} else {
+			pics = append(pics, u)
+		}
+	}
+	out.Images = pics
+	if len(out.Audio) > 1 || len(out.Audio) == 1 && len(out.Images) > 0 {
+		return out, fmt.Errorf("a request has images or one audio clip, not both")
 	}
 	v, _ := jinja.FromJSON(body)
 	out.Videos, err = DecisionVideos(v.AsDict())

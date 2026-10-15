@@ -30,6 +30,9 @@ type DecisionRequest struct {
 	// Videos are the request's videos (Clef's); a request with one runs on
 	// its own too.
 	Videos []VideoFrames
+	// Audio is the request's voice clip, 16 kHz mono samples (d1-omni's);
+	// a request with one runs on its own (DecideAudio).
+	Audio []float32
 }
 
 // decisionBatchRows is the most prompts one batch session runs at once.
@@ -103,7 +106,7 @@ func (d *Decider) job(i int) *batchJob {
 // (out[i].Err); an error running the batch fails it whole.
 func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) {
 	out := make([]DecisionResult, len(reqs))
-	n := 0
+	n, alone := 0, 0
 	for r := range reqs {
 		rq, res := &reqs[r], &out[r]
 		if res.Err = d.Prepare(rq.State, rq.Questions, len(rq.Images)); res.Err != nil {
@@ -118,9 +121,15 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 		// both requests as one batch took 19.8x (d1) and 19.1x (lev) the
 		// requests alone. A batch on the host is faster than alone (0.64x d1,
 		// 0.84x lev) and stays one.
+		if len(rq.Audio) > 0 {
+			res.Answers, res.Err = d.DecideAudio(rq.State, rq.Questions, rq.Audio)
+			res.InputTokens = d.InputTokens()
+			continue
+		}
 		if len(rq.Images) > 0 || len(rq.Videos) > 0 || d.batchAlone() {
 			res.Answers, res.Err = d.DecideMedia(rq.State, rq.Questions, rq.Images, rq.Videos)
 			res.InputTokens = d.InputTokens()
+			alone += res.InputTokens
 			continue
 		}
 		first := n
@@ -164,6 +173,8 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 	if err := d.runJobs(jobs); err != nil {
 		return nil, err
 	}
+	// InputTokens counts the requests that ran alone too.
+	d.input += alone
 	// The answers, each from its question's variants, in the request's order.
 	at := 0
 	for r := range reqs {
@@ -275,10 +286,11 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 
 // batchAlone reports whether DecideBatch runs each request alone: a decoder
 // readout whose blocks sit on a device. A gate turns it off to hold the
-// device's batch session to the requests alone.
+// device's batch session to the requests alone, and "batch-alone", which
+// puts a batch of one into the batch session, turns it off with the rest.
 func (d *Decider) batchAlone() bool {
 	return d.kind != jlm.DecisionLaya && d.kind != jlm.DecisionClef && d.st != nil &&
-		d.st.GPULayers() > 0 && d.violation != "device-batch"
+		d.st.GPULayers() > 0 && d.violation != "device-batch" && d.violation != "batch-alone"
 }
 
 // layaPackRows is the most rows a packed encoder pass holds: a device's

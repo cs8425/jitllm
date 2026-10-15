@@ -105,6 +105,8 @@ type kernKey struct {
 	// one more parameter and a different output, so its own entry.
 	gated bool
 	act   kernels.ActKind
+	// gate2 is a Gate2 matvec: the gate's weight as a second stream.
+	gate2 bool
 }
 
 // chooseSplit picks how many threads share a row: the fallback table when the
@@ -169,6 +171,16 @@ type Config struct {
 	// their prologue (kernels.ActIn): the A/B arm and bisection switch for
 	// the operand prologue alone. NoFuse turns it off too.
 	NoActFuse bool
+	// NoAddNormFold keeps a prompt chunk's block-end residual add a launch
+	// of its own instead of folding it into the next block's attention norm
+	// (the binary16 GEMM path's add-and-norm kernel): the A/B arm.
+	NoAddNormFold bool
+	// GateUp2 runs a dense gated FFN's gate and up as one Gate2 matvec
+	// (kernels.MatVecShape.Gate2): each workgroup sums its rows of both
+	// matrices over the one operand and writes act(gate)*up, the bits the
+	// gate's launch and up's gated launch write, where the backend's lowering
+	// makes that exact (kernels.Gate2Exact). On by default.
+	GateUp2 bool
 	// ActInPrefetch is how many weight words each thread of an operand-prologue
 	// matvec prefetches before its prologue (kernels.ActIn.Prefetch): 0 is the
 	// default (8), -1 none.
@@ -713,6 +725,9 @@ type Stats struct {
 	// GateUpWhy is why the last block's gate and up could not be fused.
 	GateUpWhy                              string
 	RagQKVFused, RagResFused, RagGateFused int
+	// GateUp2Runs counts gated FFNs whose gate and up ran as one Gate2
+	// launch (Config.GateUp2).
+	GateUp2Runs int
 	// PersistLaunches counts persistent kernels launched (Config.Persist),
 	// PersistParts the per-op launches they ran, PersistPhases their
 	// grid-barrier-separated phases, PersistCompiles the compositions built
@@ -756,6 +771,9 @@ type Stats struct {
 	// that quantized for the int8 matvec (QuantizeAct). Each is a conversion
 	// launch, and a pass over the float row, that did not run.
 	NormF16, ActF16Fused, QuantActs int
+	// AddNormFolded counts block-end residual adds a prompt chunk folded
+	// into the next block's attention norm (Config.NoAddNormFold).
+	AddNormFolded int
 	// KVPrewarmPages counts pages a pool grew ahead of its history
 	// (PrewarmKV): the growth a State's first prompt no longer pays.
 	KVPrewarmPages int
@@ -979,6 +997,9 @@ type Stats struct {
 	// RecZeroSource counts the bytes of zeros those copies read, uploaded
 	// once a zeroing.
 	RecZeroSource uint64
+	// RecZeroHost counts seat zeroings written from the host because the
+	// kept zeros could not be had on the device (recZeroLayers).
+	RecZeroHost int
 	// PagedStagedLaunches counts decode attentions that ran the staged
 	// kernels rather than FlashDecodeKV (kernels.ChooseDecodePlan).
 	PagedStagedLaunches int
@@ -1193,6 +1214,7 @@ func (s *Stats) add(o Stats) {
 		s.PersistWhy = o.PersistWhy
 	}
 	s.RagGateFused += o.RagGateFused
+	s.GateUp2Runs += o.GateUp2Runs
 	s.RagHeadOne += o.RagHeadOne
 	s.SampleReads += o.SampleReads
 	s.PickReads += o.PickReads
@@ -1218,6 +1240,7 @@ func (s *Stats) add(o Stats) {
 	s.GemmDeep += o.GemmDeep
 	s.GemmInt8 += o.GemmInt8
 	s.NormF16 += o.NormF16
+	s.AddNormFolded += o.AddNormFolded
 	s.ActF16Fused += o.ActF16Fused
 	s.QuantActs += o.QuantActs
 	s.KVPrewarmPages += o.KVPrewarmPages
@@ -1306,6 +1329,7 @@ func (s *Stats) add(o Stats) {
 	s.RecZeroBytes += o.RecZeroBytes
 	s.RecZeroCopies += o.RecZeroCopies
 	s.RecZeroSource += o.RecZeroSource
+	s.RecZeroHost += o.RecZeroHost
 	s.PagedPrefill70 += o.PagedPrefill70
 	s.PagedAccMMA += o.PagedAccMMA
 	s.FlashPrefill80 += o.FlashPrefill80
@@ -1687,6 +1711,10 @@ type devShared struct {
 	// device's and not a session's: their calls are one at a time
 	// (GPU.convMu).
 	convTo launchTo
+	// convCall is the convolutional submission's arguments, and convFn its
+	// method value, made once (conv.go).
+	convCall convCallArgs
+	convFn   func(backend.Session)
 	// roomGen moves every time this device may have gained room: a refund, or
 	// a budget raised. A caller that gave blocks up reads it to know when
 	// asking for them back could succeed. See GPU.RoomGen.
@@ -1951,7 +1979,9 @@ type GPU struct {
 	// its submissions, in the scratch every convolutional block there shares
 	// (conv.go), so two sessions' calls go one after the other.
 	convTmp [2][]float32
-	convMu  sync.Mutex
+	// convRuns is ConvLayers' runs, reused under convMu.
+	convRuns []run
+	convMu   sync.Mutex
 	// rowsErr is why the last LayersRows failed, naming the device: the
 	// devices' LastErr summed by Stats is whichever wrote last, not the one
 	// that refused.
@@ -2056,6 +2086,9 @@ func New(slots []Slot, options ...Option) (*GPU, error) {
 	// (PersistByDefaultForTest), so the regression gates run through it.
 	cfg.Persist = persistDefault
 	cfg.PersistDeps = persistDepsDefault
+	// Gate2 is the default where it is exact (kernels.Gate2Exact): on a V100
+	// it read 1.008-1.028 of the two launches on Llama 1B, 3B and 8B.
+	cfg.GateUp2 = true
 	for _, f := range o.cfg {
 		f(cfg)
 	}
@@ -3164,7 +3197,7 @@ func (g *devTier) kernel(q kernels.Quant, k, rows, split, rowt int, bias bool) b
 // launch, which wins on small matvecs and loses on big-k ones, so it is chosen
 // per shape by tuneSplit rather than switched on.
 func (g *devTier) kernelMode(q kernels.Quant, k, rows, split, rowt int, bias, groupSplit bool) backend.Kernel {
-	kk := kernKey{q, k, rows, split, bias, rowt, groupSplit, false, 0}
+	kk := kernKey{q, k, rows, split, bias, rowt, groupSplit, false, 0, false}
 	if c, ok := g.kerns[kk]; ok {
 		return c
 	}
@@ -3222,6 +3255,33 @@ func (g *devTier) gatedKernel(q kernels.Quant, k, rows, split int, groupSplit bo
 	}
 	ker, err := kernels.MatVec(kernels.MatVecShape{Center: g.center, T: q, K: k, Rows: rows, Split: split,
 		GroupSplit: groupSplit, Gate: true, GateAct: act})
+	if err != nil {
+		g.kerns[kk], g.LastErr = nil, err.Error()
+		return nil
+	}
+	c, err := g.dev.Compile(ker)
+	if err != nil {
+		g.kerns[kk], g.LastErr = nil, err.Error()
+		g.Failed++
+		return nil
+	}
+	g.kerns[kk] = c
+	return c
+}
+
+// gate2Kernel is the FFN up projection summing the gate's row beside its own
+// and writing act(gate)*up (kernels.MatVecShape.Gate2), or nil where the
+// backend cannot make it exact or the split writes partials.
+func (g *devTier) gate2Kernel(q kernels.Quant, k, rows, split int, groupSplit bool, act kernels.ActKind) backend.Kernel {
+	if split > 1 && !groupSplit || !kernels.Gate2Exact(g.dev.API()) || kernels.IsFloat(q) {
+		return nil
+	}
+	kk := kernKey{t: q, k: k, rows: rows, split: split, rowt: 1, group: groupSplit, gate2: true, act: act}
+	if c, ok := g.kerns[kk]; ok {
+		return c
+	}
+	ker, err := kernels.MatVec(kernels.MatVecShape{Center: g.center, T: q, K: k, Rows: rows, Split: split,
+		GroupSplit: groupSplit, Gate2: true, GateAct: act})
 	if err != nil {
 		g.kerns[kk], g.LastErr = nil, err.Error()
 		return nil

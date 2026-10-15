@@ -62,7 +62,7 @@ type SchedulerStats struct {
 	// MaxSeqs is the most sequences one step carried rows of.
 	MaxSeqs int
 	// RoomHome is the steps whose device had no room for them
-	// (nn.RowsRoomer), so the session's blocks came home first.
+	// (nn.RowsRoomer), so blocks came home before the step.
 	RoomHome int
 }
 
