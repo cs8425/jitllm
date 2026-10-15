@@ -3726,25 +3726,54 @@ kernel carrying ~3.9 us of event):
   fixed ~100 us (its four or five pool regions) and ~66 us an expert, 2.9 MB
   at 44 GB/s; Strata's pool reads 35.6 GB/s.
 
-**The row** (`scripts/vs-strata.sh`, the build at "model: the pool spins
-across a device's wait", one V100, node 0 for both engines, decode 128
-tokens, speculation off in both, 20 ABBA rounds, each sample a fresh process;
-jitllm with `JITLLM_EXPERTS=host JITLLM_PRELOAD_WAIT=1 JITLLM_WARMUP=2`: the
-preload and two untimed runs of the same prompt and 128 tokens are its
-warm-up, as Strata's page-locked copy and profile fill are its, and neither
-is on the clock):
+**The rows** (`scripts/vs-strata.sh`, the build at "backend: a CUDA queue's
+staging arena", one V100, node 0 for both engines, decode 128 tokens,
+speculation off in both, 20 ABBA rounds, each sample a fresh process, the
+quiet gate on node 0's CPUs and the measured card). jitllm runs with
+`JITLLM_EXPERTS=host JITLLM_PRELOAD_WAIT=1 JITLLM_WARMUP=2
+JITLLM_IGNORE_EOS=1`, its two warm-ups on a text of their own
+(`JITLLM_WARMUP_PROMPT`, an essay about the printing press). The preload and
+the warm-ups are its warm-up, as Strata's page-locked copy and profile fill
+are Strata's; neither is on the clock. Strata runs its build-v100 (CUDA 12)
+variant; its docs ask compute capability 7.5 or newer.
 
-| pass | jitllm | Strata | median ratio | IQR/median |
-|---|---|---|---|---|
-| A/A (jitllm both arms) | 21.4-22.6 tok/s | -- | 1.0004 | 0.020 |
-| 1 | 21.6-22.6 | 15.3-17.5 | **1.2631** | 0.020 |
-| 2 | 21.6-22.3 | 15.4-17.5 | **1.2645** | 0.020 |
+| prompt | pass | median ratio (jitllm / Strata) | IQR/median |
+|---|---|---|---|
+| A/A, jitllm both arms | -- | 0.9770 | 0.075 |
+| "The capital of France is" | a | **1.0341** | 0.045 |
+| "The capital of France is" | b | **1.0334** | 0.018 |
+| "The theory of relativity explains" | a | **1.2988** | 0.035 |
+| "The theory of relativity explains" | b | **1.2955** | 0.026 |
 
-Strata's absolute rate is the 17.5 tok/s recorded for it on this box (three
-of forty samples read 15.3-15.4). Bytes a token: the host reads 48 x 4.6
-misses x 2.9 MB = 0.64 GB of experts in 48 x 405 us = 19.4 ms of `moeFFN`,
-33 GB/s including each call's fixed regions (a read wall for node 0 measured
-in the same process is owed); the card reads its 7.35 GiB base and the hits.
+jitllm read 16.8-18.2 tok/s and Strata 15.9-17.5 on the first prompt.
+"Once upon a time" could not be measured: Strata accepted drafts on it with
+no drafter given (`--suffix-draft 0`, no `--mtp`), which the harness refuses
+as a speculated sample.
+
+An earlier pair of passes read 1.2631 and 1.2645 on the first prompt with
+the warm-ups on the measured prompt itself. That primes the cache with the
+very text it then serves; the rows above do not, and replace them.
+
+**The rate depends on the text.** With the tune cache frozen every process
+decodes the same tokens and the samples agree; but the tuners' per-shape
+picks move the rounding, the greedy path parts, and the hit rate with it:
+six tune states of one build read 20.1-27.5 tok/s on one prompt, at hit
+rates 47.5-62.3%, the slowest and fastest states three cache entries apart
+(Q8_0 10240x2560 split 8 or 10, 2560x6144 32 or 24, 2560x640 10 or 5). A row
+on one prompt is one text's row, hence the two prompts above.
+
+**Time to first token**, from the same samples' logs (median): jitllm
+prefills five tokens in 285-287 ms and six in 337-340; Strata prefills four
+in 212.3-212.5 ms and five in 223.9-224.3, its last prompt token taken as its
+first decode step. Per prompt token that is 57 ms against 53 for the first
+prompt and 56 against 45 for the second. From process start Strata's first
+token came 51-55 s in (its page-locked copy), jitllm's after its 35-41 s
+preload wait and the warm-ups.
+
+Bytes a token: the host reads 48 x 4.6 misses x 2.9 MB = 0.64 GB of experts
+in 48 x 405 us = 19.4 ms of `moeFFN`, 33 GB/s including each call's fixed
+regions (a read wall for node 0 measured in the same process is owed); the
+card reads its 7.35 GiB base and the hits.
 
 **The prompt.** Strata prefills the first four tokens in 213 ms; jitllm's
 batched chunk of five took 590-612 ms in the same samples, every row's experts
@@ -3755,20 +3784,6 @@ experts on the host, a prompt of up to eight tokens runs through the decode
 path itself, where each token splits between the card's cache and the host
 (`WithPrefillForwardRows`, unset: 210-248 ms; alternating runs of one build,
 `JITLLM_PREFILL_FORWARD=0` against the default).
-
-**The rate depends on the text, and a sample is one text.** With the tune
-cache frozen, every process decodes the same tokens and the samples agree to
-2%; but the tuners' per-shape picks (the split of three Q8_0 shapes, a few
-microseconds each) move the rounding, the greedy path parts, and the hit rate
-with it: six tune states of one build read 20.1-27.5 tok/s, the fastest at a
-62.3% hit rate and the slowest at 47.5%, and the slowest and fastest states
-differ in three cache entries (Q8_0 10240x2560 split 8 or 10, 2560x6144 32 or
-24, 2560x640 10 or 5). A row taken over one prompt is one text's row. The rows
-below the campaign's are therefore taken over three prompts, with the
-warm-ups on a fourth text (`JITLLM_WARMUP_PROMPT`) so the caches are not
-primed by the text being measured, and every sample decodes all 128 tokens
-(`JITLLM_IGNORE_EOS`; Strata's runs do not stop at an end of generation
-either).
 
 **Another mixture: Mixtral-8x7B-Instruct Q4_K_M** (24.5 GiB, eight
 experts of ~99 MB a block, top-2) on the same card and node, 128 tokens,
