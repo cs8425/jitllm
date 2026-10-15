@@ -28,8 +28,8 @@ func TestMatVecGate2IsTheTwoLaunches(t *testing.T) {
 	for _, d := range devs {
 		defer d.Close()
 		for _, q := range []kernels.Quant{kernels.Q8_0, kernels.Q4_K, kernels.Q6_K} {
-			for _, sh := range [][2]int{{1024, 4096}, {256, 2048}, {96, 768}} {
-				for _, sp := range []int{1, 2, 8, 32} {
+			for _, sh := range [][2]int{{1024, 4096}, {256, 2048}, {96, 768}, {8192, 2048}} {
+				for _, sp := range []int{1, 2, 4, 8, 16, 32, 64} {
 					for _, a := range []kernels.ActKind{kernels.ActSiLU, kernels.ActGELU} {
 						if sp > 1 && !kernels.GroupSplitOK(sh[0], sp) || (sh[1]/q.Elems()*q.Elems()/32)%sp != 0 {
 							continue

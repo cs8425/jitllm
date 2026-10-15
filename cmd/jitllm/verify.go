@@ -894,7 +894,7 @@ func abRun(m *model.Model, g *tier.GPU, which string, n, rounds, depth int) {
 		b = bench.Case{Name: "gate+up, down forming act(gate)*up", Fn: func(it int) { g.GateUpFuse = true; step(it) }}
 	case "gateup2":
 		a = bench.Case{Name: "gate, up gated", Fn: func(it int) { g.GateUp2 = false; step(it) }}
-		b = bench.Case{Name: "gate and up in one Gate2 launch", Fn: func(it int) { g.GateUp2 = true; step(it) }}
+		b = bench.Case{Name: "gate and up in one Gate2 launch", Fn: func(it int) { g.GateUp2, g.GateUp2Force = true, true; step(it) }}
 	case "gateup2-aa":
 		a = bench.Case{Name: "gate, up gated", Fn: func(it int) { g.GateUp2 = false; step(it) }}
 		b = bench.Case{Name: "gate, up gated (again)", Fn: func(it int) { g.GateUp2 = false; step(it) }}

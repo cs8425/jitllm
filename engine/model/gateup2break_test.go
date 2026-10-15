@@ -3,7 +3,6 @@
 package model
 
 import (
-	"math"
 	"testing"
 
 	"github.com/jitllm/jitllm/internal/testmodels"
@@ -11,9 +10,10 @@ import (
 )
 
 // TestGateUp2SeesASwap is TestGateUp2MatchesTwoLaunches' violation (RULE
-// 10): with the Gate2 launch handed up's weight as the gate's
-// (tier.SwapGateUp2ForTest), its logits must leave the two-launch arm's. If
-// they do not, the bit-identity says nothing about which weight is which.
+// 10), on every backend this host has: with the Gate2 launch handed up's
+// weight as the gate's (tier.SwapGateUp2ForTest), its logits must leave the
+// two-launch arm's by more than the bound the gate allows off PTX
+// (the bound on gateUp2Devices).
 func TestGateUp2SeesASwap(t *testing.T) {
 	m := gateUp2Model(t, gateUp2Models[0])
 	if m == nil {
@@ -22,23 +22,28 @@ func TestGateUp2SeesASwap(t *testing.T) {
 	defer m.Close()
 	ids := m.Vocab.Encode("The river rose every spring until the bridges were islands, and", true)
 	toks := []int32{100, 137, 174, 211}
-	cache := t.TempDir()
-	off, _, _ := gateUp2Decode(t, m, ids, toks, false, true, -1, cache)
-	defer tier.SwapGateUp2ForTest(tier.SwapGateUp2ForTest(true))
-	on, st, _ := gateUp2Decode(t, m, ids, toks, true, true, -1, cache)
-	if st.GateUp2Runs == 0 {
-		t.Fatal("no FFN ran Gate2: the violation reached nothing")
-	}
-	diff := 0
-	for i := range on {
-		for j := range on[i] {
-			if math.Float32bits(on[i][j]) != math.Float32bits(off[i][j]) {
-				diff++
-			}
+	ran := 0
+	for _, dev := range gateUp2Devices {
+		cache := t.TempDir()
+		old := tier.SwapGateUp2ForTest(true)
+		off, on, st, _ := gateUp2Decode(t, m, dev, ids, toks, true, -1, cache)
+		tier.SwapGateUp2ForTest(old)
+		if off == nil {
+			t.Logf("%s: no such device here", dev)
+			continue
 		}
+		if st.GateUp2Runs == 0 {
+			t.Fatalf("%s: no FFN ran Gate2: the violation reached nothing", dev)
+		}
+		nmse, diff := gateUp2NMSE(on, off)
+		bound := denseStepBand * orderControl(t, m, dev)
+		if w := gateUp2Worst(on, off); w <= bound {
+			t.Fatalf("%s: gate and up swapped and the worst step stayed inside the bound (%.3g <= %.3g, %d differ)", dev, w, bound, diff)
+		}
+		t.Logf("%s seen: NMSE %.3g with gate and up swapped, %d of %d logits differ", dev, nmse, diff, len(on)*len(on[0]))
+		ran++
 	}
-	if diff == 0 {
-		t.Fatal("gate and up swapped in the Gate2 launch and the logits did not move")
+	if ran == 0 {
+		testmodels.Missing(t, "no device ran")
 	}
-	t.Logf("seen: %d of %d logits differ with gate and up swapped", diff, len(on)*len(on[0]))
 }
