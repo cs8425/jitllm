@@ -250,9 +250,13 @@ func checkContainer(path string, archKnown func(jlm.Arch) bool) (*doctorContaine
 	}
 	c.Version = v
 	if v != jlm.Version {
+		next := "re-run jitllm convert on the model this container was made from, with this build"
+		if jlm.Upgradable(v) {
+			next = "upgrade it in place: jitllm upgrade " + path
+		}
 		return c, []doctorProblem{{Code: "container-version",
-			Message: fmt.Sprintf("%s is container version %d and this build reads %d (there is no backward compatibility, on purpose)", path, v, jlm.Version),
-			Next:    "re-run jitllm convert on the model this container was made from, with this build"}}, nil
+			Message: fmt.Sprintf("%s is container version %d and this build reads %d", path, v, jlm.Version),
+			Next:    next}}, nil
 	}
 	f, err := jlm.Open(path)
 	if err != nil {
