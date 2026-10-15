@@ -45,3 +45,11 @@ func SwapGateUp2ForTest(on bool) bool {
 	gateUp2Swapped = on
 	return old
 }
+
+// BreakAddNormForTest makes every folded block-end add (Config.NoAddNormFold
+// false) add the wrong row, and returns the setting it replaced.
+func BreakAddNormForTest(on bool) bool {
+	old := addNormBroken
+	addNormBroken = on
+	return old
+}

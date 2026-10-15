@@ -6484,3 +6484,28 @@ V100 (sm_70, CUDA, GPU 1), `verify -ab gateup2`, n=24 interleaved, -n 64,
 It is the default (`Config.GateUp2`; `JITLLM_GPU_GATEUP2=0` is the other
 arm). `TestDecodeDoesNotAllocate` holds at zero engine allocations on CUDA
 with it on. No per-shape tuner yet: it won on every shape measured.
+
+## A prompt chunk's block-end add folded into the next block's norm
+
+On the binary16 GEMM path the FFN norm already took the attention's residual
+add into its launch (`RMSNormF16TRows` with add); the add after down ran
+alone, and the next block's attention norm read its result back. That add is
+now held for the next norm (`foldAddNorm`): x = x2 + ffn and h = RMSNorm(x)
+in one launch, the same bits, since the norm reads the sum it stores. A held
+add whose next block's norm is not the plain one runs alone (`foldTakes`), as
+does the last block's. Gates: `TestAddNormFoldMatchesTheAdd` (Llama-3.2-1B,
+prompt and decoded logits bit-identical, every block placed with and without
+the graph and a half seam; 14 of 15 adds folded) and its violation
+`TestAddNormFoldSeesABrokenAdd` (every logit moves).
+
+V100 (CUDA, GPU 1), `verify -ab addnorm`, four 512-token prompts a round,
+n=20 interleaved, `JITLLM_GPU_TUNE=1`, A/A first, two passes; the SM clock
+is the modal reading of a 250 ms nvidia-smi trace over each arm:
+
+    model               A/A              folded vs alone    IQR    SM clock
+    Llama-3.2-1B        0.9999 / 1.0000  1.0078 / 1.0072    0.3%   1530 MHz
+    Llama-3.1-8B        0.9983 / 1.0015  1.0013 / 1.0011    0.8%/1.4%  1440-1530 MHz
+
+The 1B gains 0.7-0.8%; the 8B's GEMMs hide it inside the noise (and pull the
+card off its boost clock, which the 1B holds). On by default;
+`JITLLM_GPU_NO_ADDNORM=1` is the other arm.

@@ -171,6 +171,10 @@ type Config struct {
 	// their prologue (kernels.ActIn): the A/B arm and bisection switch for
 	// the operand prologue alone. NoFuse turns it off too.
 	NoActFuse bool
+	// NoAddNormFold keeps a prompt chunk's block-end residual add a launch
+	// of its own instead of folding it into the next block's attention norm
+	// (the binary16 GEMM path's add-and-norm kernel): the A/B arm.
+	NoAddNormFold bool
 	// GateUp2 runs a dense gated FFN's gate and up as one Gate2 matvec
 	// (kernels.MatVecShape.Gate2): each workgroup sums its rows of both
 	// matrices over the one operand and writes act(gate)*up, the bits the
@@ -763,6 +767,9 @@ type Stats struct {
 	// that quantized for the int8 matvec (QuantizeAct). Each is a conversion
 	// launch, and a pass over the float row, that did not run.
 	NormF16, ActF16Fused, QuantActs int
+	// AddNormFolded counts block-end residual adds a prompt chunk folded
+	// into the next block's attention norm (Config.NoAddNormFold).
+	AddNormFolded int
 	// KVPrewarmPages counts pages a pool grew ahead of its history
 	// (PrewarmKV): the growth a State's first prompt no longer pays.
 	KVPrewarmPages int
@@ -1222,6 +1229,7 @@ func (s *Stats) add(o Stats) {
 	s.GemmDeep += o.GemmDeep
 	s.GemmInt8 += o.GemmInt8
 	s.NormF16 += o.NormF16
+	s.AddNormFolded += o.AddNormFolded
 	s.ActF16Fused += o.ActF16Fused
 	s.QuantActs += o.QuantActs
 	s.KVPrewarmPages += o.KVPrewarmPages
