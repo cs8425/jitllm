@@ -122,8 +122,7 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 		case placed == 0:
 			t.Fatalf("%s took no block: %s", g.Name(), g.Err())
 		case n < 0 && placed != want:
-			t.Skipf("%s held %d of %d blocks: this card is too small for the every-block arm (%s)",
-				g.Name(), placed, want, g.Err())
+			cardTooSmall(t, g.Err(), "%s held %d of %d blocks in the every-block arm", g.Name(), placed, want)
 		}
 	}
 	ps := decisionPrompts(t, d)

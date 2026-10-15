@@ -77,7 +77,7 @@ func TestDecisionMovesBetweenCards(t *testing.T) {
 			st := decisionSegment(d)
 			nb := decisionBlocks(m)
 			if got := len(st.placedOn(a)); got != nb {
-				t.Skipf("%s held %d of %d blocks: every block must be on it to move them all (%s)", a, got, nb, g.Err())
+				cardTooSmall(t, g.Err(), "%s held %d of %d blocks: every block must be on it to move them all", a, got, nb)
 			}
 			// move sends every block to the named device and checks it went,
 			// with nothing computed again.
