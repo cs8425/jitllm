@@ -833,7 +833,7 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	ignoreEOS := os.Getenv("JITLLM_IGNORE_EOS") == "1"
 	var forced []int32
 	for _, f := range strings.FieldsFunc(os.Getenv("JITLLM_FORCE_IDS"), func(r rune) bool { return r == ',' || r == ' ' }) {
-		v, err := strconv.Atoi(f)
+		v, err := strconv.ParseInt(f, 10, 32)
 		if err != nil {
 			return fmt.Errorf("JITLLM_FORCE_IDS: %q is not a token id", f)
 		}
