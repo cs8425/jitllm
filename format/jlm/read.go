@@ -30,6 +30,9 @@ type File struct {
 	Path string
 	H    *Header
 	FP   Fingerprint
+	// ver is the version the container was opened at: Version, or an older
+	// one a migration reads (migrate.go).
+	ver uint32
 
 	// mu is the one lock over residency: two States decoding on a container
 	// that evicts would otherwise race in claim(). It guards pages, filled,
@@ -185,6 +188,7 @@ func openAt(path string, want uint32) (*File, error) {
 		return nil, err
 	}
 	f.H = h
+	f.ver = want
 
 	// One read for everything between the header and the dense region: the KV
 	// block, the tensor table and the fingerprint are contiguous by construction
@@ -204,7 +208,7 @@ func openAt(path string, want uint32) (*File, error) {
 			return nil, fmt.Errorf("jlm: reading the metadata of %s: %w", path, err)
 		}
 	}
-	if f.cfg, err = decodeConfig(f.meta[h.CfgOff : h.CfgOff+h.CfgLen]); err != nil {
+	if f.cfg, err = decodeConfigAt(f.meta[h.CfgOff:h.CfgOff+h.CfgLen], want); err != nil {
 		fh.Close()
 		closeDirect(direct)
 		return nil, err
