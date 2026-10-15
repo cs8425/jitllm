@@ -18,8 +18,8 @@ func TestEveryVersionHasItsMigration(t *testing.T) {
 		t.Fatalf("Version is %d and there is no migration from %d (migrate.go): every bump adds one",
 			Version, Version-1)
 	}
-	if !Upgradable(29) {
-		t.Fatalf("version 29 no longer upgrades to %d: a migration in the chain is missing", Version)
+	if !Upgradable(26) {
+		t.Fatalf("version 26 no longer upgrades to %d: a migration in the chain is missing", Version)
 	}
 	for v := range migrations {
 		if v >= Version {

@@ -2,6 +2,7 @@ package jlm
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -354,7 +355,18 @@ func RowBytes(e *Entry) (uint64, error) { return verbatimBytes(e.Type, e.Dims[0]
 // model does not fit in host RAM, so the layout is decided from arithmetic
 // (kernels.PackedWords) before any tensor is packed.
 func Write(dst string, src *Source, fp Fingerprint) (*Header, error) {
-	l, err := layoutOf(src, fp)
+	return writeAt(dst, src, fp, Version)
+}
+
+// writeAt is Write as a version v container, for the migration that writes
+// v (migrate.go): the version word and the config record are v's, and every
+// other byte is the current layout, which each migration's step gate holds
+// to v's own writer (TestEachStepIsItsVersionsWriter).
+func writeAt(dst string, src *Source, fp Fingerprint, v uint32) (*Header, error) {
+	if v < 28 && src.Config != nil && src.Config.NMTP != 0 {
+		return nil, fmt.Errorf("jlm: a version %d container cannot state %d prediction blocks", v, src.Config.NMTP)
+	}
+	l, err := layoutOf(src, fp, v)
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +378,7 @@ func Write(dst string, src *Source, fp Fingerprint) (*Header, error) {
 // It is the same layout Write takes, so a conversion that plans cleanly
 // cannot fail an hour in on anything the shapes decide.
 func Plan(src *Source, fp Fingerprint) (*Header, uint64, error) {
-	l, err := layoutOf(src, fp)
+	l, err := layoutOf(src, fp, Version)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -380,9 +392,10 @@ type layout struct {
 	h                     *Header
 	cfgb, visb, vocb, fpb []byte
 	expPageSize, total    uint64
+	ver                   uint32 // the version word written
 }
 
-func layoutOf(src *Source, fp Fingerprint) (*layout, error) {
+func layoutOf(src *Source, fp Fingerprint, ver uint32) (*layout, error) {
 	if src == nil || src.Config == nil {
 		return nil, fmt.Errorf("jlm: Write needs a Source with a Config")
 	}
@@ -521,7 +534,7 @@ func layoutOf(src *Source, fp Fingerprint) (*layout, error) {
 	expPageSize = alignUp(expPageSize)
 
 	// --- layout -------------------------------------------------------------
-	cfgb := encodeConfig(src.Config)
+	cfgb := encodeConfigAt(src.Config, ver)
 	visb := encodeVision(src.Vision)
 	vocb := encodeVocab(src.Vocab)
 	fpb := encodeFP(fp)
@@ -620,7 +633,7 @@ func layoutOf(src *Source, fp Fingerprint) (*layout, error) {
 		total = es[i].QSOff + qs
 	}
 	return &layout{es: es, h: h, cfgb: cfgb, visb: visb, vocb: vocb, fpb: fpb,
-		expPageSize: expPageSize, total: total}, nil
+		expPageSize: expPageSize, total: total, ver: ver}, nil
 }
 
 // write is pass 2: the bytes, one tensor at a time.
@@ -646,6 +659,7 @@ func (l *layout) write(dst string, src *Source) (*Header, error) {
 	cfgb, visb, vocb, fpb := l.cfgb, l.visb, l.vocb, l.fpb
 	hdr := make([]byte, HeaderBytes)
 	h.encode(hdr)
+	binary.LittleEndian.PutUint32(hdr[8:], l.ver)
 	tab := encodeTable(es)
 
 	tmp := dst + ".part"
