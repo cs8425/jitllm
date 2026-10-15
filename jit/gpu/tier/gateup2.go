@@ -177,6 +177,9 @@ func (g *devTier) timeGateUp2(ls []*layer) (float64, bool) {
 		}
 		ratios = append(ratios, b/a)
 	}
+	if len(ratios) == 0 {
+		return 0, false // every round timed zero: a clock too coarse to resolve it
+	}
 	sort.Float64s(ratios)
 	med := ratios[len(ratios)/2]
 	iqr := ratios[len(ratios)*3/4] - ratios[len(ratios)/4]
