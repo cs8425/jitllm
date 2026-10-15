@@ -34,6 +34,9 @@ type resident struct {
 	k         int
 	t         kernels.Quant
 	ok        bool // false = declined, do not retry
+	// why is the decline's reason, given again to whoever asks for the
+	// declined tensor later, so a second offer names it too.
+	why string
 	// shared says one buffer serves several blocks: a streamed mixture's
 	// compact expert bank, live only between a block's suspension and its own
 	// FFN. The per-block free walk must skip it and must not refund it; see
@@ -2842,10 +2845,18 @@ func (g *devTier) resident(block, slot int, q kernels.Quant, w []byte, nrows, k 
 		// resident. Sharing one entry would launch a kernel against a
 		// differently strided payload (a silent out-of-bounds read), and
 		// refusing on a mismatch would stop a bank from ever being placed.
+		if !r.ok && r.why != "" {
+			g.LastErr = r.why
+		}
 		return r
 	}
 	r := &resident{nrows: nrows, k: k, t: q}
 	g.res[key] = r
+	defer func() {
+		if !r.ok {
+			r.why = g.LastErr
+		}
+	}()
 
 	// Price it before packing it: declining after a pack costs a full read and
 	// fresh host memory to learn the answer is no. PackedWords is the same
