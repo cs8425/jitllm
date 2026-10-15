@@ -41,6 +41,35 @@ func (s *State) Prefill(tokens []int32) ([]float32, error) {
 	return s.prefillInto(0, tokens)
 }
 
+// prefillBidir is Prefill over a prompt whose rows all attend to each other
+// (a non-causal decoder's, vllm-d3's): PrefillMixed's one bidirectional run,
+// through the token path, so a warm prompt allocates nothing (the mixed
+// path's per-row sources do).
+func (s *State) prefillBidir(tokens []int32) ([]float32, error) {
+	defer s.m.enterPager()()
+	if s.batched {
+		return nil, errBatch{}
+	}
+	if err := s.retireErr; err != nil {
+		s.retireErr = nil
+		return nil, err
+	}
+	n := len(tokens)
+	if n > nn.MaxDevicePrefillChunk {
+		return nil, fmt.Errorf("model: a bidirectional prompt of %d rows is longer than one %d-row chunk",
+			n, nn.MaxDevicePrefillChunk)
+	}
+	p := s.seqPos(0)
+	s.bidir = append(s.bidir[:0], nn.KeyRun{Lo: p, Hi: p + n})
+	defer func() {
+		if kd, ok := s.ld.(nn.KeyRunDevice); ok {
+			kd.SetKeyRuns(nil, nil)
+		}
+		s.bidir = s.bidir[:0]
+	}()
+	return s.prefillInto(0, tokens)
+}
+
 // PrefillSeq runs a prompt into ROW slot of a batch session, leaving the other
 // rows untouched.
 //
@@ -212,6 +241,23 @@ func (s *State) PrefillSeqMixed(slot int, spans ...Span) ([]float32, error) {
 func (s *State) bidirRuns(slot int, spans []Span) error {
 	c := s.c
 	p := s.seqPos(slot)
+	if s.bidirAll {
+		// The whole prompt is one run (a non-causal decoder's, its pictures'
+		// rows among the text's).
+		n := 0
+		for _, sp := range spans {
+			n += sp.n(c.NEmbd)
+		}
+		if s.batched {
+			return fmt.Errorf("model: PrefillMixed: a bidirectional span in a batch slot is not implemented")
+		}
+		if n > nn.MaxDevicePrefillChunk {
+			return fmt.Errorf("model: PrefillMixed: a bidirectional prompt of %d rows is longer "+
+				"than one %d-row chunk", n, nn.MaxDevicePrefillChunk)
+		}
+		s.bidir = append(s.bidir, nn.KeyRun{Lo: p, Hi: p + n})
+		return nil
+	}
 	for _, sp := range spans {
 		n := sp.n(c.NEmbd)
 		if sp.Bidir && n > 0 {

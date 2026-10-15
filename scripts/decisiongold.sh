@@ -14,7 +14,8 @@
 # mmproj-d1-omni-600M-F16.gguf into $JITLLM_MODELS/d1-omni/, and d1's mmproj-d1-3B-F16.gguf into
 # $JITLLM_MODELS/d1/ for the picture requests (pictures.json,
 # chatpicture.json), and ggml-org/tinyopenjev-for-testing-gguf
-# tinyopenjev-for-testing-Q8_0.gguf and its mmproj into $JITLLM_MODELS/openjev/.
+# tinyopenjev-for-testing-Q8_0.gguf and its mmproj into $JITLLM_MODELS/openjev/,
+# and ggml-org/vllm-d3-edge-GGUF vllm-d3-edge-Q8_0.gguf and its mmproj into $JITLLM_MODELS/vllm-d3/.
 # llama.cpp b11514 (ggml-org/llama.cpp releases, llama-b11514-bin-ubuntu-x64)
 # or newer.
 set -eu
@@ -73,4 +74,6 @@ want d1-omni-600M-F16 && gold d1-omni/d1-omni-600M-F16.gguf d1-omni-600M-F16
 want tinyopenjev-for-testing-Q8_0 && gold openjev/tinyopenjev-for-testing-Q8_0.gguf tinyopenjev-for-testing-Q8_0
 want tinyopenjev-for-testing-Q8_0 && gold openjev/tinyopenjev-for-testing-Q8_0.gguf tinyopenjev-for-testing-Q8_0 openjev/mmproj-tinyopenjev-for-testing-Q8_0.gguf chatpicture
 want d1-omni-600M-F16 && gold d1-omni/d1-omni-600M-F16.gguf d1-omni-600M-F16 d1-omni/mmproj-d1-omni-600M-F16.gguf pictures voice
+want vllm-d3-edge-Q8_0 && gold vllm-d3/vllm-d3-edge-Q8_0.gguf vllm-d3-edge-Q8_0
+want vllm-d3-edge-Q8_0 && gold vllm-d3/vllm-d3-edge-Q8_0.gguf vllm-d3-edge-Q8_0 vllm-d3/mmproj-vllm-d3-edge-Q8_0.gguf pictures chatpicture
 true

@@ -6046,6 +6046,14 @@ func (g *devTier) layersCall(sid uint64, lo, hi, pos, n int, x, cs, csSWA []floa
 		if (!ok || bbs == nil) && dbs == nil {
 			return false
 		}
+		if (!ok || bbs == nil) && bidirCheck(g.bidir, pos, 1, &dbs.p, true) != "" && g.attendsIn(lo, hi) {
+			// One row at a time cuts a bidirectional run the chunk holds,
+			// which attention cannot read row by row: refused before any
+			// block runs (nothing has advanced), so the chunk restarts on
+			// the host whole.
+			g.LastErr = "a bidirectional chunk this device has no batched scratch for"
+			return false
+		}
 		if !ok || bbs == nil {
 			g.mu.Lock()
 			g.PromptSplits++
@@ -6504,7 +6512,10 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	if g.canRecord() && R == 1 {
 		nCap = (int(n) + scoreGrain - 1) / scoreGrain * scoreGrain
 	}
-	if len(g.bidir) > 0 && !p.NonCausal {
+	// A call with no attention block in it (the head alone, or a hybrid's
+	// linear blocks, which scan their rows in order) cuts no run: a run is
+	// a key count, and only attention reads one.
+	if len(g.bidir) > 0 && !p.NonCausal && g.attendsIn(lo, hi) {
 		if why := bidirCheck(g.bidir, pos, nrow, p, g.pagedPlan(p)); why != "" {
 			return refuse("rows [%d,%d): %s", pos, pos+nrow, why)
 		}
@@ -10046,6 +10057,17 @@ func qPad(p *nn.LayerPlan, qdim int) int {
 		return p.KPad
 	}
 	return qdim
+}
+
+// attendsIn reports whether a block of [lo, hi) on this device attends: not
+// a linear block's recurrence.
+func (g *devTier) attendsIn(lo, hi int) bool {
+	for li := lo; li < hi; li++ {
+		if l := g.layers[li]; l != nil && !l.linear {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *devTier) batchMV(m mv, ntok, tok int) (mv, bool) {
