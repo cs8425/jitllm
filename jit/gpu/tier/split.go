@@ -452,7 +452,6 @@ func (g *devTier) timeSplitRound(kern, red backend.Kernel, r *resident, d, out, 
 	t0 := time.Now()
 	var err error
 	g.dev.Session(func(s backend.Session) {
-		backend.MarkTrial(s) // a profile tells a tuner's trial from the work
 		for i := 0; i < iters; i++ {
 			dst := out
 			if split > 1 && !grp {
@@ -896,7 +895,6 @@ func (g *devTier) timeSequences(cs []splitCand, rs []*resident, rows int, sel ba
 		}
 	}()
 	g.dev.Session(func(s backend.Session) {
-		backend.MarkTrial(s) // a profile tells a tuner's trial from the work
 		rec, ok := s.(backend.Recorder)
 		if !ok || g.NoGraph {
 			return
@@ -920,7 +918,6 @@ func (g *devTier) timeSequences(cs []splitCand, rs []*resident, rows int, sel ba
 			}
 			t0 := time.Now()
 			g.dev.Session(func(s backend.Session) {
-				backend.MarkTrial(s) // a profile tells a tuner's trial from the work
 				for r := 0; r < reps && err == nil; r++ {
 					if recs[i] != nil {
 						err = s.(backend.Recorder).Replay(recs[i])

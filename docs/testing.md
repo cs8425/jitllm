@@ -91,7 +91,8 @@ PATH from the image's MinGW or Strawberry Perl. Windows-only test code uses
 build constraints or portable calls: the cross-process GPU test lock is
 `internal/testlock` (flock on Unix, LockFileEx on Windows), and
 `GOOS=windows ./scripts/vet` type-checks every test file for Windows from a
-Linux box, with no allowlist: a vet finding fails the job.
+Linux box; `scripts/vet` allows three more `unsafe.Pointer` findings there,
+the OS addresses of VirtualAlloc and MapViewOfFile (the script argues them).
 
 ## Getting the models
 

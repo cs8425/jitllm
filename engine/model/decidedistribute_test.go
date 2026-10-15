@@ -193,11 +193,6 @@ func TestDecisionMovesBetweenCards(t *testing.T) {
 				if m.IsEncoder() {
 					backTol = decisionDevTol["laya"]
 				}
-				// Answers are held to the device band, logits (above) to the
-				// relocation one: vllm-d3's are 0.10 and 0.026.
-				if !sameKernels(a, b) && !m.IsEncoder() {
-					tol = max(tol, decisionDevTol[c.name])
-				}
 				if !(wb <= tol) || !(wa <= backTol) {
 					t.Errorf("moved between questions, the answers moved %.6f on %s and %.6f back", wb, b, wa)
 				}
@@ -393,8 +388,7 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 							t.Fatalf("request %d ran %d tokens in the batch and %d alone", i, r.InputTokens, tokens[i])
 						}
 					}
-					// A non-causal model's prompts run one at a time (runJobs).
-					if !m.IsEncoder() && c.kind != jlm.DecisionClef && !d.nonCausal() {
+					if !m.IsEncoder() && c.kind != jlm.DecisionClef {
 						st := d.BatchStats()
 						t.Logf("batch: %d steps, %d prompt rows, at most %d prompts in a step; %d of %d blocks on the device",
 							st.Steps, st.PromptRows, st.MaxSeqs, d.BatchDeviceBlocks(), decisionBlocks(m))
@@ -459,12 +453,6 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 					if m.IsEncoder() {
 						d.emb.violation = "sequences-attend-across"
 						defer func() { d.emb.violation = "" }()
-					} else if d.nonCausal() {
-						// A non-causal model's prompts run alone; the
-						// violation runs them as rows of a batch session,
-						// where they attend causally.
-						d.violation = "batch-alone"
-						defer func() { d.violation = "" }()
 					} else {
 						d.batch.chunkPos = func(base, j, k int) int { return base + k - 1 - j }
 						defer func() { d.batch.chunkPos = nil }()

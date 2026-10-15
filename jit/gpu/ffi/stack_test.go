@@ -11,10 +11,11 @@ import (
 // can break silently: a heap object must never hold a pointer into a goroutine
 // stack.
 //
-// A call copies its arguments into one of its binding's heap frames, so no
-// address of a stack slot reaches goffi (see frames). The count is the gate
-// that the frames are reused: building the arguments per call, in the
-// wrapper's frame or a new object, reads one allocation or more.
+// The allocation count is an exact proxy: noescape keeps each argument in the
+// frame, so the ps array holds stack addresses, legal only while ps stays in
+// the frame too. It leaves only through an escaping parameter, which shows up
+// as an allocation. Against the violation (call taking a slice) this reads
+// 1.000. See prepared.call for how such an object breaks.
 //
 // The count is only meaningful uninstrumented: -race reads 0, but
 // -gcflags=all=-d=checkptr=2 instruments every unsafe.Pointer conversion and

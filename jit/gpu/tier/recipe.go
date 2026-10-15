@@ -100,7 +100,6 @@ func (g *devTier) timeRecipes(arms []func(s backend.Session) error) (med []float
 		t0 := time.Now()
 		var err error
 		g.dev.Session(func(s backend.Session) {
-			backend.MarkTrial(s) // a profile tells a tuner's trial from the work
 			for r := 0; r < reps && err == nil; r++ {
 				err = arms[i](s)
 			}

@@ -1544,7 +1544,7 @@ func (g *devTier) stagedGemm(m mv, ntok int, tiles []kernels.VoltaTile, f16k, fi
 			return mv{}, false
 		}
 		out := mv{kern: c, act: a, actN: ntok * m.k / sub, rows: m.rows, split: split, bias: m.bias,
-			q: m.q, k: m.k, threads: kernels.GemmVoltaGroups(s, tl) * tl.Threads(), width: tl.Threads(), redN: m.rows * ntok}
+			q: m.q, k: m.k, threads: kernels.GemmVoltaGroups(s, tl) * tl.Threads(), width: tl.Threads(), redN: m.rows * ntok, vt: tl}
 		if split > 1 {
 			if out.red = g.reduceKernel(m.rows*ntok, split); out.red == nil ||
 				!g.sizePart(m.rows*ntok*split) {

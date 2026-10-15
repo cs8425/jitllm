@@ -221,7 +221,7 @@ func specVerifyCapped(t *testing.T, m *Model, dev nn.Device, prompt, toks []int3
 		func() {
 			defer m.enterPager()()
 			rs.kv.note(rs.seqPos(0), toks[i:i+k]...)
-			if err := rs.stepRows(embedSrc(rs, toks[i:i+k]), toks[i:i+k], &out); err != nil {
+			if err := rs.stepRows(embedSrc(rs, toks[i:i+k]), &out); err != nil {
 				t.Fatal(err)
 			}
 		}()

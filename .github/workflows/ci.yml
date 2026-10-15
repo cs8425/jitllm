@@ -20,7 +20,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # scripts/vet is plain go vet, every analyzer on and no allowlist.
+  # scripts/vet's allowlist is written against go1.27's vet (go1.26's does not
+  # report the finding it allows, and the script fails when it is absent).
   GO_VERSION: "1.27.x"
   # Five modules: the engine, server/, common/, ui/ and tui/.
   GO_SUMS: |

@@ -6539,3 +6539,32 @@ Ratios >1 mean gate2in is faster:
 3B and 8B were not measured: the card's disks had no room for their
 version-30 containers. The win is the launch and the h/a round trip it
 removes, about 1% of a 1B token, smaller as the FFN's weight traffic grows.
+
+## q, k and v as one prompt GEMM grid
+
+The 8B prompt profile put k and v (1024x4096) at split 2 with a reduce each:
+their two GEMMs and 68 reduces were about 7.4 ms of a 132 ms 512-token
+prompt. `kernels.GemmVoltaSegments` runs q, k and v as one grid over one
+binary16 operand, MatVecSegments' construction for the GEMM: each segment runs
+GemmVolta's own body for its shape, unsplit, in its own run of workgroups,
+with the staging buffers declared once at the largest size. A projection that
+reads another operand layout (Q6_K's v beside Q4_K's q) runs alone. It is
+bit-identical to each segment's own launch (`TestGemmVoltaSegmentsIsTheLaunches`,
+the sm_70 tile on a V100 and the m16n8 tiles on an RTX 3050 Ti) and to three
+GEMMs held to one k each (`TestQKVGemmMatchesThreeGemms`, with its swap
+violation); against the shipping three it sits inside the step gate's band.
+
+It loses, so it is opt-in (`Config.QKVGemm`, `JITLLM_GPU_QKVGEMM=1`). The
+sm_70 m4n4 Q4_K tile already sits at the 255-register cap, and the segment
+guard spills a word (8 bytes; admitted to measure it, `qkvSpillMax`). V100
+(CUDA, GPU 1), `verify -ab qkvgemm`, four 512-token prompts a round, n=20,
+`JITLLM_GPU_TUNE=1`, A/A first, two passes, SM clock the modal nvidia-smi
+reading:
+
+    model           A/A              grid vs three       IQR        SM clock
+    Llama-3.2-1B    1.0004 / 0.9995  0.9923 / 0.9938    0.2-0.5%   1530 MHz
+    Llama-3.1-8B    1.0034 / 1.0025  1.0024 / 0.9890    1.5-1.8%   1447-1530 MHz
+
+The split-k it removes was buying its own parallelism: the unsplit k and v
+blocks finish late in q's grid. What would change it: a register-lighter tile
+for the segments, or segments that keep k's split.

@@ -1143,6 +1143,9 @@ type mv struct {
 	// actN threads.
 	act  backend.Kernel
 	actN int
+	// vt is the GemmVolta tile a binary16 twin was built at (stagedGemm), so
+	// a block's q, k and v can be put in one grid (qkvGemm); zero elsewhere.
+	vt kernels.VoltaTile
 }
 
 // kvPair is one sequence's attention history for one block.
@@ -6055,14 +6058,6 @@ func (g *devTier) layersCall(sid uint64, lo, hi, pos, n int, x, cs, csSWA []floa
 		if (!ok || bbs == nil) && dbs == nil {
 			return false
 		}
-		if (!ok || bbs == nil) && bidirCheck(g.bidir, pos, 1, &dbs.p, true) != "" && g.attendsIn(lo, hi) {
-			// One row at a time cuts a bidirectional run the chunk holds,
-			// which attention cannot read row by row: refused before any
-			// block runs (nothing has advanced), so the chunk restarts on
-			// the host whole.
-			g.LastErr = "a bidirectional chunk this device has no batched scratch for"
-			return false
-		}
 		if !ok || bbs == nil {
 			g.mu.Lock()
 			g.PromptSplits++
@@ -6523,10 +6518,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	if g.canRecord() && R == 1 {
 		nCap = (int(n) + scoreGrain - 1) / scoreGrain * scoreGrain
 	}
-	// A call with no attention block in it (the head alone, or a hybrid's
-	// linear blocks, which scan their rows in order) cuts no run: a run is
-	// a key count, and only attention reads one.
-	if len(g.bidir) > 0 && !p.NonCausal && g.attendsIn(lo, hi) {
+	if len(g.bidir) > 0 && !p.NonCausal {
 		if why := bidirCheck(g.bidir, pos, nrow, p, g.pagedPlan(p)); why != "" {
 			return refuse("rows [%d,%d): %s", pos, pos+nrow, why)
 		}
@@ -6752,10 +6744,7 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	if bs.pkv != nil {
 		// The width, and whether the decode plan runs beside it (ragAlone):
 		// two launch sequences a recording names.
-		ragMap = 2 * bs.pkv.ragRows
-		if bs.pkv.ragAlone {
-			ragMap++
-		}
+		ragMap = bs.pkv.ragKey()
 	}
 	if rag != nil {
 		ragN, ragRuns = len(rag.pos), len(rag.runs)
@@ -7555,6 +7544,39 @@ func (g *devTier) layersSession(s backend.Session) {
 							mvIn(l.mvq, l.mvq.kernIn, l.wq, bs.q, ain, l.nAttn, l.mvq.bias)
 							mvIn(l.mvk, l.mvk.kernIn, l.wk, bs.k, ain, l.nAttn, l.mvk.bias)
 							mvIn(l.mvv, l.mvv.kernIn, l.wv, bs.v, ain, l.nAttn, l.mvv.bias)
+						} else if qs, ok := g.qkvGemm(l, R, rag != nil); ok {
+							// q, k and v as one grid over one binary16 operand
+							// (GemmVoltaSegments); a projection left out runs alone.
+							if qs.act != actMemoK || fsrc != actMemoSrc {
+								lc.la(qs.act, qs.actN, fsrc, g.f16Buf)
+								g.ActF16Launches++
+							}
+							actMemoK, actMemoSrc = qs.act, fsrc
+							all := [3]struct {
+								m   mv
+								r   *resident
+								out backend.Buf
+							}{{l.mvq, l.wq, bs.q}, {l.mvk, l.wk, bs.k}, {l.mvv, l.wv, bs.v}}
+							var arr [16]backend.Buf
+							bufs := append(arr[:0], g.f16Buf)
+							for _, i := range qs.segs {
+								sg := all[i]
+								w := sg.r
+								if qkvGemmSwapped && i > 0 && qs.has(3-i) && all[3-i].r.t == w.t && all[3-i].m.rows == sg.m.rows {
+									w = all[3-i].r
+								}
+								bufs = append(bufs, w.qs, w.d, w.sc, sg.out)
+								if sg.m.bias != nil {
+									bufs = append(bufs, sg.m.bias)
+								}
+							}
+							lc.law(qs.kern, qs.threads, qs.width, bufs...)
+							g.QKVGemmRuns++
+							for i, sg := range all {
+								if !qs.has(i) {
+									mvrun(sg.m, sg.r, sg.out)
+								}
+							}
 						} else {
 							mvrun(l.mvq, l.wq, bs.q)
 							mvrun(l.mvk, l.wk, bs.k)
@@ -7902,7 +7924,11 @@ func (g *devTier) layersSession(s backend.Session) {
 								// nothing of their own.
 								tabRag = dec
 							}
-							err = pk.ragAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk)
+							if pk.ragStaged {
+								err = pk.ragStagedAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk, win)
+							} else {
+								err = pk.ragAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk)
+							}
 							g.RagPrefills++
 						}
 					} else if !skipAttn && useFlash {
@@ -10088,17 +10114,6 @@ func qPad(p *nn.LayerPlan, qdim int) int {
 		return p.KPad
 	}
 	return qdim
-}
-
-// attendsIn reports whether a block of [lo, hi) on this device attends: not
-// a linear block's recurrence.
-func (g *devTier) attendsIn(lo, hi int) bool {
-	for li := lo; li < hi; li++ {
-		if l := g.layers[li]; l != nil && !l.linear {
-			return true
-		}
-	}
-	return false
 }
 
 func (g *devTier) batchMV(m mv, ntok, tok int) (mv, bool) {
