@@ -1664,6 +1664,7 @@ func (s *State) ensureLayer(li int) func(*nn.LayerWeights) error {
 		// read/upload pipeline).
 		w.Ensure, w.EnsureExperts = dst.Ensure, dst.EnsureExperts
 		w.PrefetchExperts, w.HostExperts, w.HostExpertsRows = dst.PrefetchExperts, dst.HostExperts, dst.HostExpertsRows
+		w.ExpertUses = dst.ExpertUses
 		*dst = w
 		return nil
 	}
@@ -1687,6 +1688,7 @@ func (s *State) ensureSelected(li int) func(*nn.LayerWeights, []uint32) error {
 		// Carry every callback over; see ensureLayer.
 		w.Ensure, w.EnsureExperts = dst.Ensure, dst.EnsureExperts
 		w.PrefetchExperts, w.HostExperts = dst.PrefetchExperts, dst.HostExperts
+		w.ExpertUses = dst.ExpertUses
 		*dst = w
 		return nil
 	}
@@ -1811,7 +1813,7 @@ func (s *State) offerRange(lo, hi int) {
 		if bh, ok := ld.(nn.BlockHolder); ok && !named && bh.HoldsBlock(li) {
 			w := nn.LayerWeights{Ensure: s.ensureLayer(li), EnsureExperts: s.ensureSelected(li),
 				PrefetchExperts: s.prefetchSelected(li), HostExperts: s.hostExpertsFor(li),
-				HostExpertsRows: s.hostExpertsRowsFor(li)}
+				HostExpertsRows: s.hostExpertsRowsFor(li), ExpertUses: s.hot.layer(li)}
 			plan := *s.planFor(li)
 			if adm.PrepLayer(li, &plan, &w) {
 				s.markOnDev(li)
@@ -1953,6 +1955,7 @@ func (s *State) blockWeights(li int) (nn.LayerWeights, error) {
 	w.Ensure, w.EnsureExperts = s.ensureLayer(li), s.ensureSelected(li)
 	w.PrefetchExperts = s.prefetchSelected(li)
 	w.HostExperts, w.HostExpertsRows = s.hostExpertsFor(li), s.hostExpertsRowsFor(li)
+	w.ExpertUses = s.hot.layer(li)
 	if c.MoE() {
 		// The expert banks are fetched by the tier through Ensure once it
 		// admits the block: pageIn does not read them (the host fetches
@@ -3011,6 +3014,7 @@ func (s *State) PrewarmGPU(n int) <-chan struct{} {
 				w.Ensure, w.EnsureExperts = s.ensureLayer(li), s.ensureSelected(li)
 				w.PrefetchExperts, w.HostExperts = s.prefetchSelected(li), s.hostExpertsFor(li)
 				w.HostExpertsRows = s.hostExpertsRowsFor(li)
+				w.ExpertUses = s.hot.layer(li)
 			}
 			s.ldCand.PrewarmLayer(li, &s.plan, &w)
 		}
