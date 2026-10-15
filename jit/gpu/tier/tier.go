@@ -940,7 +940,10 @@ type Stats struct {
 	// SplitRowSteps counts the block-steps of several rows whose experts were
 	// split between the cache and the host (streamBank.splitRows).
 	SplitRowSteps int
-	TSplitHost    time.Duration
+	// SplitQueued counts admitted sheets sent on the copy queue beside the
+	// launches (backend.Uploader) rather than in their order.
+	SplitQueued int
+	TSplitHost  time.Duration
 	// TLateWrite is the wall of writing the host's expert sum back after
 	// the card's queued work (the hits, the shared expert), and TAdmit of
 	// taking experts into the caches.
@@ -1366,6 +1369,7 @@ func (s *Stats) add(o Stats) {
 	s.CacheBytes += o.CacheBytes
 	s.SplitHits += o.SplitHits
 	s.SplitAdmits += o.SplitAdmits
+	s.SplitQueued += o.SplitQueued
 	s.TSplitHost += o.TSplitHost
 	s.TLateWrite += o.TLateWrite
 	s.TAdmit += o.TAdmit
@@ -1663,9 +1667,17 @@ type devShared struct {
 	// swapsLeft is this token's Config.SplitSwaps still to spend, and swapLi
 	// the block that last admitted (streamBank.admit).
 	swapsLeft, swapLi int
-	packWG            sync.WaitGroup
-	copyWG            sync.WaitGroup
-	packEnd           int
+	// adm is admissions queued for flushAdmits (their items in admItems),
+	// admPub those sent on the copy queue and not yet taken into use, upRing
+	// the page-locked ring they go through and ringUsed its fill.
+	adm      []admJob
+	admPub   []admJob
+	admItems []streamItem
+	upRing   []byte
+	ringUsed int
+	packWG   sync.WaitGroup
+	copyWG   sync.WaitGroup
+	packEnd  int
 	*Config
 	mu sync.Mutex
 	// tot is the device's counters (Stats). A view names them through its
@@ -2610,6 +2622,10 @@ func (g *devTier) Close() {
 				hp.UnpinHost(b)
 				g.pin[i] = nil
 			}
+		}
+		if g.upRing != nil {
+			hp.UnpinHost(g.upRing)
+			g.upRing = nil
 		}
 	}
 	// nil entries are compile failures, cached so they are not retried; Close
