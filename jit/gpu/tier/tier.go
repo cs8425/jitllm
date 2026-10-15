@@ -495,6 +495,10 @@ type Config struct {
 	// instead of running its experts on the host, which is that block's
 	// default (GPU.AutoStream).
 	NoHybrid bool
+	// NoSplitRows runs every expert of a hybrid block's step of several rows
+	// on the host, as before the split covered them: the control arm of
+	// streamBank.splitRows, which runs the rows' cached experts on the card.
+	NoSplitRows bool
 	// NoHybridCache gives a hybrid block no expert cache on the card. With
 	// one (the default, sized from the room left after placement), the
 	// experts the cache holds run on the card while the host runs the rest
@@ -928,7 +932,10 @@ type Stats struct {
 	CachesDropped                     int
 	CacheBytes                        uint64
 	SplitRuns, SplitHits, SplitAdmits int
-	TSplitHost                        time.Duration
+	// SplitRowSteps counts the block-steps of several rows whose experts were
+	// split between the cache and the host (streamBank.splitRows).
+	SplitRowSteps int
+	TSplitHost    time.Duration
 	// TLateWrite is the wall of writing the host's expert sum back after
 	// the card's queued work (the hits, the shared expert), and TAdmit of
 	// taking experts into the caches.
@@ -1347,6 +1354,7 @@ func (s *Stats) add(o Stats) {
 	s.HybridRows += o.HybridRows
 	s.THybrid += o.THybrid
 	s.SplitRuns += o.SplitRuns
+	s.SplitRowSteps += o.SplitRowSteps
 	s.CachesDropped += o.CachesDropped
 	s.CacheBytes += o.CacheBytes
 	s.SplitHits += o.SplitHits
