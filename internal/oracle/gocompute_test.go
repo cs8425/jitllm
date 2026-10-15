@@ -23,6 +23,7 @@ import (
 var goComputeAllowed = map[string]string{
 	// Measurement, not model arithmetic: timing statistics and accounting.
 	"jit/gpu/tier/split.go:timeSequences": "median/IQR of the split tuner's timings",
+	"jit/gpu/tier/recipe.go:timeRecipes":  "per-round ratios, median and IQR of the recipe tuner's timings",
 	"engine/model/hotness.go:ExpertUses":  "expert-use accounting for the report",
 	// Diagnostics that compare the device against a reference, off by default.
 	"jit/gpu/tier/tier.go:verify":           "Config verify: a device matvec against the dequantized reference, a debugging knob",
