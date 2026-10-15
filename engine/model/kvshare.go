@@ -320,6 +320,21 @@ func (m *SharedStore) forget(e *sharedPage) {
 // compressed entries are a second history keyed by entry), and a session with
 // blocks on a device (a device page shared between sessions is not
 // implemented).
+// UnshareKV ends ShareKV: the session's references go, and it keeps no store
+// and no namespace. The sequence starts over (Reset).
+func (s *State) UnshareKV() {
+	if s.kv.share == nil {
+		return
+	}
+	s.Reset()
+	s.kv.unshareAll()
+	s.kv.store, s.kv.share = NoStore{}, nil
+	for li := s.kv.lo; li < len(s.kv.layers); li++ {
+		s.kv.layers[li].sh = nil
+	}
+	s.kv.ns = ""
+}
+
 func (s *State) ShareKV(st *SharedStore) error {
 	switch {
 	case st == nil:

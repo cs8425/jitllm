@@ -154,6 +154,9 @@ type ttft struct {
 	// shared is the model's pages held once (model.SharedStore), which its
 	// Deciders share through: nil with Config.NoMemCache.
 	shared *model.SharedStore
+	// chatShares says a generate shares through shared too: a server with no
+	// prompt store on disk, which the copying cache writes through to.
+	chatShares bool
 	// kv is what a State is pointed at: the memory cache, or the memory cache
 	// over Config.PromptStore (layered) when the server has one.
 	kv model.KVStore
@@ -179,6 +182,7 @@ func (e *Engine) initTTFT(lm *LoadedModel, o LoadOptions) {
 	if !e.cfg.NoMemCache && !lm.m.IsEncoder() {
 		t.store = model.NewBoundedMemStore(1)
 		t.shared = model.NewSharedStore()
+		t.chatShares = e.cfg.PromptStore == nil
 		// The namespace names this load: the store is the model's own, and
 		// the KV width and page geometry are fixed for its life.
 		t.ns = fmt.Sprintf("jitllmd/%s/%d", lm.id, lm.loadedAt.UnixNano())
@@ -378,6 +382,7 @@ func (e *Engine) useStore(s *Session, o GenerateOptions) bool {
 func (s *Session) attachStore(on bool) error {
 	if !on {
 		if s.storeOn {
+			s.st.UnshareKV()
 			s.st.SetKVStore(nil)
 			if err := s.st.SetCacheKey(""); err != nil {
 				return err
@@ -386,10 +391,20 @@ func (s *Session) attachStore(on bool) error {
 		}
 		return nil
 	}
-	s.st.SetKVStore(s.lm.ttft.kv)
 	if err := s.st.SetCacheKey(s.lm.ttft.ns); err != nil {
 		return err
 	}
+	// Held once (model.SharedStore): the prefix a generate restores is the
+	// store's pages aliased, and what it seals becomes the store's -- no copy
+	// of a live history. A server with a prompt store on disk keeps the
+	// layered copying cache, which is what writes through to that disk.
+	if t := &s.lm.ttft; t.shared != nil && t.chatShares {
+		if err := s.st.ShareKV(t.shared); err == nil {
+			s.storeOn = true
+			return nil
+		}
+	}
+	s.st.SetKVStore(s.lm.ttft.kv)
 	s.storeOn = true
 	return nil
 }
