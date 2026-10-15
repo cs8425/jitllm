@@ -263,6 +263,8 @@ func gpuOptions() []tier.Option {
 		{"JITLLM_GPU_HYBRID", os.Getenv("JITLLM_GPU_HYBRID") == "0", func(c *tier.Config) { c.NoHybrid = true }},
 		// =0 gives a hybrid block no expert cache on the card (tier.WithHybridCache).
 		{"JITLLM_GPU_HYBRID_CACHE", os.Getenv("JITLLM_GPU_HYBRID_CACHE") == "0", func(c *tier.Config) { c.NoHybridCache = true }},
+		{"JITLLM_GPU_SPLIT_PREDICT", num("JITLLM_GPU_SPLIT_PREDICT") > 0,
+			func(c *tier.Config) { c.SplitPredict = num("JITLLM_GPU_SPLIT_PREDICT") }},
 		{"JITLLM_GPU_SPLIT_SWAPS", os.Getenv("JITLLM_GPU_SPLIT_SWAPS") != "",
 			func(c *tier.Config) { c.SplitSwaps = num("JITLLM_GPU_SPLIT_SWAPS") }},
 		{"JITLLM_GPU_SPLIT_ADMIT", num("JITLLM_GPU_SPLIT_ADMIT") > 0,

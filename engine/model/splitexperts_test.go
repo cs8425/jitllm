@@ -88,7 +88,11 @@ func TestSplitExpertsMatchTheHost(t *testing.T) {
 				// yield is auto with the budget cut under what the card holds
 				// halfway through: the caches go before any block does.
 				yield bool
-			}{{"tight", k + 1, false}, {"auto", 0, false}, {"yield", 0, true}, {"none", -1, false}} {
+				// predict sends each block's predicted experts ahead of its
+				// router (tier.Config.SplitPredict).
+				predict int
+			}{{"tight", k + 1, false, 0}, {"auto", 0, false, 0}, {"yield", 0, true, 0}, {"predict", 0, false, k},
+				{"none", -1, false, 0}} {
 				t.Run(arm.name, func(t *testing.T) {
 					if arm.yield && !md.split {
 						t.Skip("a float bank keeps no cache to give back")
@@ -103,6 +107,7 @@ func TestSplitExpertsMatchTheHost(t *testing.T) {
 							tier.WithConfig(func(c *tier.Config) {
 								c.StreamExperts, c.HybridExperts, c.StreamCacheSlots = true, true, arm.slots
 								c.SplitAdmit = k
+								c.SplitPredict = arm.predict
 							}))
 						if err != nil || g == nil {
 							noDevice(t, "gpu:0", err)
@@ -172,6 +177,8 @@ func TestSplitExpertsMatchTheHost(t *testing.T) {
 						if st.SplitRuns != 0 || st.HybridRuns == 0 {
 							t.Fatalf("no cache: %d split steps, %d hybrid steps", st.SplitRuns, st.HybridRuns)
 						}
+					} else if arm.predict > 0 && st.SplitPredicted == 0 {
+						t.Fatalf("the predict arm sent no expert ahead")
 					} else if st.SplitRuns == 0 || st.SplitHits == 0 || st.SplitAdmits == 0 {
 						t.Fatalf("%d split steps, %d experts on the card, %d admitted: the cache ran nothing",
 							st.SplitRuns, st.SplitHits, st.SplitAdmits)

@@ -514,6 +514,10 @@ type Config struct {
 	// alternating, warm: 8 read 22.2 and 22.7 tok/s, 2 read 17.1 and 20.2,
 	// none 20.3 and 20.4.
 	SplitSwaps int
+	// SplitPredict is how many experts a hybrid block's cache takes in ahead
+	// of its router, predicted by its router over the block before's row; 0
+	// (the default) predicts nothing.
+	SplitPredict int
 	// NoAutoStream leaves a mixture block that no device can hold resident
 	// on the host, as before GPU.AutoStream, instead of streaming it.
 	NoAutoStream bool
@@ -943,7 +947,9 @@ type Stats struct {
 	// SplitQueued counts admitted sheets sent on the copy queue beside the
 	// launches (backend.Uploader) rather than in their order.
 	SplitQueued int
-	TSplitHost  time.Duration
+	// SplitPredicted counts the experts sent ahead on a prediction.
+	SplitPredicted int
+	TSplitHost     time.Duration
 	// TLateWrite is the wall of writing the host's expert sum back after
 	// the card's queued work (the hits, the shared expert), and TAdmit of
 	// taking experts into the caches.
@@ -1370,6 +1376,7 @@ func (s *Stats) add(o Stats) {
 	s.SplitHits += o.SplitHits
 	s.SplitAdmits += o.SplitAdmits
 	s.SplitQueued += o.SplitQueued
+	s.SplitPredicted += o.SplitPredicted
 	s.TSplitHost += o.TSplitHost
 	s.TLateWrite += o.TLateWrite
 	s.TAdmit += o.TAdmit

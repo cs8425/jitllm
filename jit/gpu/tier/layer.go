@@ -1149,6 +1149,81 @@ func (g *devTier) finishAdmits(s backend.Session) error {
 	return err
 }
 
+// publishAdmits waits for the copy queue and takes every sheet sent so far
+// into use, before a block's split reads the cache map.
+func (g *devTier) publishAdmits(s backend.Session) error {
+	t0 := time.Now()
+	var err error
+	if up, ok := s.(backend.Uploader); ok {
+		err = up.UploadWait()
+	}
+	for _, j := range g.admPub {
+		if err != nil {
+			j.st.forget()
+			continue
+		}
+		j.st.publish(g.admItems[j.lo:j.hi])
+	}
+	g.admPub = g.admPub[:0]
+	g.TAdmit += time.Since(t0)
+	return err
+}
+
+// predictAdmit queues the predicted experts of this block (st.pred, from the
+// block before's row through this block's router) that the cache does not
+// hold, at most max, each into the coldest slot whose expert is selected no
+// more often than the prediction -- a prediction only moves sheets, and the
+// real router still decides. They are sent where the host waits before this
+// block's router (flushAdmits) and taken into use after it (publishAdmits).
+func (st *streamBank) predictAdmit(g *devTier, l *layer, nExpert, max int) {
+	if st.heat == nil || st.owner == nil {
+		return
+	}
+	st.items = st.items[:0]
+	for _, e := range st.pred {
+		if len(st.items) >= max {
+			break
+		}
+		if int(e) >= len(st.slotOf) || st.slotOf[e] != -1 {
+			continue
+		}
+		v := -1
+		for sl, o := range st.owner {
+			if o >= 0 && int(o) < len(st.slotOf) && st.slotOf[o] == slotInFlight {
+				continue
+			}
+			if o < 0 {
+				v = sl
+				break
+			}
+			if v < 0 || st.heat[o] < st.heat[st.owner[v]] {
+				v = sl
+			}
+		}
+		if v < 0 {
+			break
+		}
+		if o := st.owner[v]; o >= 0 {
+			if st.heat[o] > st.heat[e] {
+				continue
+			}
+			st.slotOf[o] = -1
+		}
+		st.owner[v], st.slotOf[e] = int32(e), slotInFlight
+		st.items = append(st.items, streamItem{e: e, slot: v})
+	}
+	if len(st.items) == 0 {
+		return
+	}
+	g.SplitPredicted += len(st.items)
+	lo := len(g.admItems)
+	g.admItems = append(g.admItems, st.items...)
+	g.adm = append(g.adm, admJob{st: st, l: l, nExpert: nExpert, lo: lo, hi: len(g.admItems)})
+}
+
+// splitPredict is Config.SplitPredict.
+func (g *devTier) splitPredict() int { return max(g.SplitPredict, 0) }
+
 // publish takes landed sheets into use: an expert whose slot is still its own
 // (no forget or later eviction moved it) is a hit from the next token.
 func (st *streamBank) publish(items []streamItem) {
@@ -2469,6 +2544,8 @@ type blockScratch struct {
 	// routing weights with the misses zeroed, the card's sum of the hits and
 	// the host's of the misses.
 	rwHit, esplit, hsum backend.Buf
+	// rselPred is the next block's predicted selection (Config.SplitPredict).
+	rselPred backend.Buf
 	// The V3 family's grouped selection: gscore writes one score per expert
 	// group into rgs, gmask writes the masked selection plane into rbm, and
 	// rank then counts over rbm instead of over the logits. Both are nil on
@@ -4550,6 +4627,7 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 		al(&bs.rw, (k+1)*4) // slot k is ExpertRoute's bin
 		al(&bs.rwProbe, (k+1)*4)
 		al(&bs.rwHit, (k+1)*4)
+		al(&bs.rselPred, (k+1)*4)
 		al(&bs.esplit, max(p.ExpWidth(), p.NEmbd)*4)
 		al(&bs.hsum, max(p.ExpWidth(), p.NEmbd)*4)
 		if p.DenseMoE {
@@ -8919,6 +8997,12 @@ func (g *devTier) layersSession(s backend.Session) {
 					// cross-layer probe can run the NEXT block's router over this block's
 					// row through exactly the launches that block will run itself.
 					route := func(l *layer, weights bool) bool {
+						// A prediction writes its selection apart (rselPred), so the
+						// block's own can be read after it.
+						selDst := bs.rsel
+						if !weights && g.splitPredict() > 0 {
+							selDst = bs.rselPred
+						}
 						lc.la(l.mvRouter, kernels.RouterThreads(bs.nExpert), l.router, rin, bs.rlogits)
 						logits := bs.rlogits
 						if l.routerB != nil {
@@ -8962,14 +9046,14 @@ func (g *devTier) layersSession(s backend.Session) {
 							}
 							if err == nil {
 								err = lc.launch(bs.route, 1, bs.routeWidth,
-									logits, bs.rsel, bs.rtop, rwDst)
+									logits, selDst, bs.rtop, rwDst)
 							}
 						case bs.gscore != nil:
-							lc.la(bs.rank, bs.nExpert, logits, bs.rsel, bs.rtop, plane)
+							lc.la(bs.rank, bs.nExpert, logits, selDst, bs.rtop, plane)
 						case selB != nil:
-							lc.la(bs.rank, bs.nExpert, logits, bs.rsel, bs.rtop, selB)
+							lc.la(bs.rank, bs.nExpert, logits, selDst, bs.rtop, selB)
 						default:
-							lc.la(bs.rank, bs.nExpert, logits, bs.rsel, bs.rtop)
+							lc.la(bs.rank, bs.nExpert, logits, selDst, bs.rtop)
 						}
 						if err == nil && !fusedRoute && weights {
 							// One thread: k is 2 to 8 and this is three short loops.
@@ -8986,6 +9070,17 @@ func (g *devTier) layersSession(s backend.Session) {
 						return false
 					}
 					route(l, true)
+					// The next hybrid block's router over this block's row, queued
+					// before the wait so its selection comes home with this one's:
+					// a prediction, which only moves sheets (predictAdmit).
+					var predNx *layer
+					if g.splitPredict() > 0 && l.stream != nil && l.stream.hybrid && li+1 < hi {
+						if nx := g.layers[li+1]; nx != nil && nx.stream != nil && nx.stream.hybrid &&
+							nx.stream.cached() && nx.router != nil {
+							route(nx, false)
+							predNx = nx
+						}
+					}
 					// The suspension, for a streamed bank: the selection comes home, k
 					// sheets of gate/up/down are uploaded at their compact offsets, and the
 					// submission resumes indexing 0..k-1, because the bank it reads is the
@@ -9020,6 +9115,19 @@ func (g *devTier) layersSession(s backend.Session) {
 						}
 						if err == nil && !g.StreamFixedSel {
 							err = s.Read(bs.rsel, u32b(l.stream.sel))
+						}
+						// Sheets sent while the card ran up to this router
+						// (flushAdmits) have landed or are about to: in use from
+						// this block on, a predicted one for this very block.
+						if err == nil && len(g.admPub) > 0 {
+							err = g.publishAdmits(s)
+						}
+						if err == nil && predNx != nil {
+							predNx.stream.pred = growU32(predNx.stream.pred, len(predNx.stream.sel))
+							if err = s.Read(bs.rselPred, u32b(predNx.stream.pred)); err == nil {
+								predNx.stream.havePred = true
+								predNx.stream.predictAdmit(g, predNx, p.NExpert, g.splitPredict())
+							}
 						}
 						if err == nil && !g.StreamFixedSel {
 							l.stream.score(g, li)
@@ -9070,7 +9178,11 @@ func (g *devTier) layersSession(s backend.Session) {
 								late, lateDst = true, eout
 							}
 						}
-						if err == nil && !hybrid && (g.StreamProbe || g.StreamPrefetch) && li+1 < hi {
+						// A hybrid block runs the probe too when asked (its recall
+						// is the measure a predicted upload is priced on), and
+						// never the host-page prefetch, which its warm pages need
+						// not.
+						if err == nil && (g.StreamProbe || !hybrid && g.StreamPrefetch) && li+1 < hi {
 							// The cross-layer probe: the next block's router over this
 							// block's normed row, ranked by that block's own launches.
 							// It clobbers rsel and rtop, which nothing below reads on a
@@ -9083,7 +9195,7 @@ func (g *devTier) layersSession(s backend.Session) {
 									nx.stream.pred = growU32(nx.stream.pred, len(nx.stream.sel))
 									err = s.Read(bs.rsel, u32b(nx.stream.pred))
 									nx.stream.havePred = err == nil
-									if err == nil && g.StreamPrefetch {
+									if err == nil && g.StreamPrefetch && !hybrid {
 										nx.stream.prefetch(g)
 									}
 								}
