@@ -36,9 +36,8 @@ func q4eWhyNot(p *nn.LayerPlan) string {
 	}
 	hd := q.HCMult * p.NEmbd
 	switch {
-	case q.HCMult < 1 || q.HCLowRank%32 != 0 || hd%32 != 0 || q.NGramWidth%32 != 0:
-		return fmt.Sprintf("hyper-connections of %d streams at rank %d and an n-gram width of %d: "+
-			"the activation quantizer works in 32-element blocks", q.HCMult, q.HCLowRank, q.NGramWidth)
+	case q.HCMult < 1 || q.HCLowRank < 1:
+		return fmt.Sprintf("hyper-connections of %d streams at rank %d", q.HCMult, q.HCLowRank)
 	case q.QSARatio != 0 && qsaWhyNot(p) != "":
 		return qsaWhyNot(p)
 	case p.Parallel || p.AltUp != 0 || p.DS4 != nil || p.K3 != nil:
@@ -180,8 +179,8 @@ func (g *devTier) initQ4E(bs *blockScratch) error {
 		place = kernels.Q4EPlaceHalf
 	}
 	comp(&x.normS, func() (*ir.Kernel, error) { return kernels.Q4EGroupNorm(d, h, R, eps, true) })
-	comp(&x.quantHD, func() (*ir.Kernel, error) { return kernels.Quantize(R*hd, actWin) })
-	comp(&x.quantLR, func() (*ir.Kernel, error) { return kernels.Quantize(R*rank, actWin) })
+	comp(&x.quantHD, func() (*ir.Kernel, error) { return quantizeRows(R, hd, actWin) })
+	comp(&x.quantLR, func() (*ir.Kernel, error) { return quantizeRows(R, rank, actWin) })
 	comp(&x.silu, func() (*ir.Kernel, error) {
 		return kernels.Q4EScaleSiLU(R*rank, h, q.Fault == nn.Q4EFaultUnscaledGate)
 	})
@@ -197,10 +196,10 @@ func (g *devTier) initQ4E(bs *blockScratch) error {
 	al(&x.mix, R*d)
 	al(&x.inj, R*h)
 	al(&x.w, R*h)
-	al(&x.aHD, R*hd)
-	al(&x.axHD, 3*R*(hd/32))
-	al(&x.aLR, R*rank)
-	al(&x.axLR, 3*R*(rank/32))
+	al(&x.aHD, R*pad32(hd))
+	al(&x.axHD, 3*R*(pad32(hd)/32))
+	al(&x.aLR, R*pad32(rank))
+	al(&x.axLR, 3*R*(pad32(rank)/32))
 	// The n-gram set is the model's: a scratch serves every block of its
 	// shape, the n-gram block among them.
 	if W := q.NGramWidth; W != 0 && p.Recurrent.TailLen != 0 {
@@ -210,7 +209,7 @@ func (g *devTier) initQ4E(bs *blockScratch) error {
 		// The history is the tail's last positions, after the predecessors
 		// the host keeps.
 		off := r.StateLen - hd*dil*(taps-1)
-		comp(&x.quantW, func() (*ir.Kernel, error) { return kernels.Quantize(R*W, actWin) })
+		comp(&x.quantW, func() (*ir.Kernel, error) { return quantizeRows(R, W, actWin) })
 		comp(&x.normR, func() (*ir.Kernel, error) { return kernels.Q4EGroupNorm(d, h, R, eps, false) })
 		comp(&x.streamDot, func() (*ir.Kernel, error) { return kernels.Q4EStreamDot(d, h, R) })
 		comp(&x.gatedVal, func() (*ir.Kernel, error) { return kernels.Q4EGatedValue(d, h, R) })
@@ -219,8 +218,8 @@ func (g *devTier) initQ4E(bs *blockScratch) error {
 		})
 		comp(&x.ngAdd, func() (*ir.Kernel, error) { return kernels.Q4ENGramAdd(d, h, R) })
 		al(&x.emb, R*W)
-		al(&x.aW, R*W)
-		al(&x.axW, 3*R*(W/32))
+		al(&x.aW, R*pad32(W))
+		al(&x.axW, 3*R*(pad32(W)/32))
 		al(&x.key, R*hd)
 		al(&x.val, R*d)
 		al(&x.kn, R*hd)
@@ -286,11 +285,11 @@ func (g *devTier) q4eMix(lc *launcher, bs *blockScratch, R int, src, norm backen
 	x := bs.q4e
 	hd := x.h * bs.p.NEmbd
 	ds4Rows(lc, x.normS, R*x.h, src, norm, x.xn)
-	lc.la(x.quantHD, kernels.QuantizeThreads(R*hd/32), x.xn, x.aHD, x.axHD)
+	lc.la(x.quantHD, kernels.QuantizeThreads(R*pad32(hd)/32), x.xn, x.aHD, x.axHD)
 	if bs.p.Q4E.Fault != nn.Q4EFaultNoGate {
 		mvrunAct(mvDown, down, x.lo, x.aHD, x.axHD, x.xn)
 		lc.la(x.silu, R*x.rank, x.lo, x.lo2)
-		lc.la(x.quantLR, kernels.QuantizeThreads(R*x.rank/32), x.lo2, x.aLR, x.axLR)
+		lc.la(x.quantLR, kernels.QuantizeThreads(R*pad32(x.rank)/32), x.lo2, x.aLR, x.axLR)
 		mvrunAct(mvUp, up, x.gate, x.aLR, x.axLR, x.lo2)
 	}
 	lc.la(x.gateMix, R*bs.p.NEmbd, x.xn, x.gate, x.mix)
@@ -353,7 +352,7 @@ func (g *devTier) q4eNGram(lc *launcher, bs *blockScratch, l *layer, R int,
 	x, b := bs.q4e, l.q4e
 	d := bs.p.NEmbd
 	hd := x.h * d
-	lc.la(x.quantW, kernels.QuantizeThreads(R*x.width/32), x.emb, x.aW, x.axW)
+	lc.la(x.quantW, kernels.QuantizeThreads(R*pad32(x.width)/32), x.emb, x.aW, x.axW)
 	mvrunAct(l.mvNGK, l.ngKey, x.key, x.aW, x.axW, x.emb)
 	mvrunAct(l.mvNGV, l.ngVal, x.val, x.aW, x.axW, x.emb)
 	ds4Rows(lc, x.normR, R*x.h, x.key, b.ngK, x.kn)

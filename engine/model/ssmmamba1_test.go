@@ -14,6 +14,7 @@ func init() {
 		principleFixtures = append(principleFixtures, fx.name+".gguf")
 	}
 	ssmFamilyViolations["synth-mamba1"] = func(bool) []c6Violation { return mamba1Violations }
+	ssmFamilyViolations["synth-mamba1-ragged"] = func(bool) []c6Violation { return mamba1Violations }
 	ssmFamilyViolations["synth-falconmamba"] = func(bool) []c6Violation {
 		return append(slices.Clone(mamba1Violations), mamba1NormViolations...)
 	}
@@ -36,6 +37,13 @@ var mamba1Fixtures = []struct {
 				len(l.ssmD) == 128 && len(l.ssmConvB) == 128 && l.ssmDtNorm == nil
 		}
 		return ok
+	}},
+	// A dt rank of 40, not a whole number of the activation quantizer's
+	// blocks (mamba-130m's is 48): every tier quantizes dt's bottleneck with
+	// a ragged tail.
+	{"synth-mamba1-ragged", func(m *Model) bool {
+		c := m.Cfg
+		return c.Arch == "mamba" && c.Mamba1() && c.dtRank == 40 && c.NLayer == 3
 	}},
 	{"synth-falconmamba", func(m *Model) bool {
 		c := m.Cfg
