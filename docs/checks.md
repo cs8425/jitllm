@@ -28,3 +28,19 @@ every `-run` alternative to a test in its packages, and every evidence path to
 a file; a new top-level directory, or a gate renamed under the map, fails it.
 Measurements (`dev/bench`, `scripts/vs-llamacpp.sh`) are not in the map: they
 are run serially by one session (RULE 2, RULE 3).
+
+## A PR is updated to current main before it merges
+
+CI's `rewind` job (`scripts/rewind`) fails a PR whose commits delete lines or
+files that another PR added after this one was written: the shape of a commit
+authored against an old main and committed on a newer parent, whose diff
+silently rewinds the work in between while the tests it removed stay green.
+Run it locally with `go run ./scripts/rewind -base origin/main -head HEAD`.
+An intended removal is stated in the PR description, one line per path:
+
+    Removes: <path> (reason)
+
+(a path ending in `/` covers the directory). The check judges the PR's own
+diff, so a branch is brought up to current main (rebase or merge, never a
+commit rebuilt from an older checkout) before it is merged, and the scratch
+merge loop does the same: update, re-run CI, then merge.
