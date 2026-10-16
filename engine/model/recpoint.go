@@ -52,8 +52,11 @@ func (s *State) recEvery() int {
 }
 
 // recPointKey is the key and store index a summary at position pos is kept
-// under: a page boundary's is the page's own key, any other the partial
-// page's named by its fill (pageKeyFill), as restoreKV reads them.
+// under: a page boundary's is the page's own key, one on a kvChunk boundary
+// the chunk's (chunkKey, kept for the sequence where a fill's key is hashed
+// afresh, so a restore probing every chunk hashes the prompt once), any other
+// the partial page's named by its fill (pageKeyFill), as restoreKV reads
+// them.
 func (s *State) recPointKey(pos int) (string, int) {
 	p := s.recurrentBoundary()
 	al := s.attnLayer()
@@ -62,6 +65,9 @@ func (s *State) recPointKey(pos int) (string, int) {
 	}
 	if pos%p == 0 {
 		return s.kv.pageKey(al, pos/p-1), pos/p - 1
+	}
+	if pos%kvChunk == 0 {
+		return s.kv.chunkKey(pos), pos / p
 	}
 	return s.kv.pageKeyFill(al, pos/p, pos%p), pos / p
 }

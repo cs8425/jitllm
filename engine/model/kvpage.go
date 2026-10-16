@@ -450,6 +450,10 @@ type kvCache struct {
 	mapped int64
 	// chunked is how far aliasChunks has named this sequence's shared pages.
 	chunked int
+	// ck is chunkKey's: the key of every whole kvChunk of seq so far, in
+	// order, computed in one pass over seq (fillChunkKeys) and cut back with
+	// it, as bh is for a page size.
+	ck []string
 	// hasher, hbuf and sum are digest's, kept; names is every key it has
 	// named, by digest (kvNames bounds it). probes is restore's probe list,
 	// and wr a page read's writer: kept, so a warm restore allocates nothing.
@@ -1114,6 +1118,20 @@ func (kc *kvCache) restore(limit int) (int, int, error) {
 	if kc.ns == "" {
 		return 0, 0, nil
 	}
+	// A hybrid resumes only at a restore point, and asking for one is a
+	// lookup where a page fault is a table write on the card: the highest
+	// point at or under limit bounds the pages faulted, and with none no page
+	// is.
+	if kc.recurrent && kc.recAt != nil {
+		if limit = kc.recFloor(limit); limit == 0 {
+			for li := kc.lo; li < len(kc.layers); li++ {
+				if pg := &kc.layers[li]; pg.p > 0 {
+					pg.dropResident()
+				}
+			}
+			return 0, 0, nil
+		}
+	}
 	best := -1
 	for li := kc.lo; li < len(kc.layers); li++ {
 		pg := &kc.layers[li]
@@ -1125,11 +1143,7 @@ func (kc *kvCache) restore(limit int) (int, int, error) {
 		// Drop residency first so the probe asks the store: fault() returns nil
 		// for a resident page, and a reused State's leftovers would count as
 		// hits.
-		for n := range pg.k {
-			pg.keepOnReset(n) // its memory to spare, for the faults below
-		}
-		pg.k, pg.v, pg.out, pg.lastSealed = pg.k[:0], pg.v[:0], pg.out[:0], 0
-		pg.gone, pg.genuine = 0, 0
+		pg.dropResident()
 		if !kc.covers(li) {
 			// A windowed layer is not walked from zero: it stores only what
 			// its window reached, and restoreWin faults that once the
@@ -1285,6 +1299,45 @@ func (kc *kvCache) restore(limit int) (int, int, error) {
 		}
 	}
 	return best + tail, tail, nil
+}
+
+// dropResident lets every resident page go, its memory to spare for the
+// faults a restore makes next (keepOnReset): a restore asks the store, and a
+// reused State's leftovers would otherwise count as hits.
+func (s *kvPages) dropResident() {
+	for n := range s.k {
+		s.keepOnReset(n)
+	}
+	s.k, s.v, s.out, s.lastSealed = s.k[:0], s.v[:0], s.out[:0], 0
+	s.gone, s.genuine = 0, 0
+}
+
+// recFloor is the highest restore point at or under limit (kvCache.recAt),
+// 0 when there is none: asked at limit, at every kvChunk below it and at the
+// mark, the points a hybrid keeps.
+//
+// A sharing session asks, past each chunk boundary, the prompt ends the
+// store saw kept there (SharedStore.noteEnd): a point at a prompt's end
+// inside a chunk -- the place the next chat turn parts from -- is otherwise
+// on no boundary a probe names.
+func (kc *kvCache) recFloor(limit int) int {
+	kc.probes = appendProbes(kc.probes, limit, kvChunk)
+	if m := kc.mark; m > 0 && m < limit && m%kvChunk != 0 {
+		kc.probes = insertProbe(kc.probes, m)
+	}
+	for _, f := range kc.probes {
+		if kc.share != nil && f%kvChunk == 0 {
+			for _, e := range kc.share.endsAfter(kc.chunkKey(f)) {
+				if g := f + int(e); e > 0 && g <= limit && g != f && kc.recAt(g) {
+					return g
+				}
+			}
+		}
+		if kc.recAt(f) {
+			return f
+		}
+	}
+	return 0
 }
 
 // covers reports whether layer li's stored pages decide how much of a prefix
@@ -1591,6 +1644,7 @@ func (s *State) restoreKey(key []int32, rows int, logits bool) (int, []float32, 
 	for p := range s.kv.bh {
 		s.kv.bh[p] = s.kv.bh[p][:0]
 	}
+	s.kv.ck = s.kv.ck[:0]
 	// Before the restore reserves the prefix on the card, so a shorter prompt
 	// than the last sequence's gives its room back first.
 	s.relocateFresh(rows)
@@ -1789,17 +1843,8 @@ func (s *State) restoreKV(max int) (int, error) {
 	// Both halves of a hybrid's history, or neither: without the summary for
 	// this boundary, the prefix is given up and the prompt prefilled in full.
 	if p := s.recurrentBoundary(); s.rconv != nil && p > 0 {
-		// A tail's summary is named by its fill, exactly as its pages are; a
-		// whole boundary's is named by the boundary it closes.
-		idx, key := n/p-1, ""
-		if al := s.attnLayer(); al >= 0 {
-			if tail > 0 {
-				idx = n / p
-				key = s.kv.pageKeyFill(al, idx, n-idx*p)
-			} else {
-				key = s.kv.pageKey(al, idx)
-			}
-		}
+		// Named as it was kept (recPointKey).
+		key, idx := s.recPointKey(n)
 		if idx < 0 || key == "" || !s.faultRecurrentAt(idx, key, true) {
 			s.kv.unmigratable++
 			return 0, nil
@@ -2017,13 +2062,19 @@ func (kc *kvCache) faultFill(li, n, fill int) error {
 		// (kvPages.cow).
 		s.extend(n)
 		kc.mapEnd = n*s.p + fill
-		if key := kc.pageKeyFill(li, n, fill); key != "" && kc.faultShared(li, n, key) == nil {
-			return nil
-		}
-		if fill%kvChunk == 0 {
+		// A fill on a chunk boundary is named by its chunk wherever its fill
+		// name was given (retireTail and aliasChunks name every chunk a
+		// page holds), and the chunk's key is kept (chunkKey) where the
+		// fill's is hashed afresh: asked that way alone, a probe that misses
+		// hashes nothing.
+		if fill%kvChunk == 0 && s.p%kvChunk == 0 {
 			if key := kc.chunkKey(n*s.p + fill); key != "" {
 				return kc.faultShared(li, n, key)
 			}
+			return ErrNoPage
+		}
+		if key := kc.pageKeyFill(li, n, fill); key != "" && kc.faultShared(li, n, key) == nil {
+			return nil
 		}
 		return ErrNoPage
 	}
@@ -2468,6 +2519,13 @@ func (kc *kvCache) pageKeyP(p, n int) string {
 // ids. The hasher and its scratch are the cache's, and a key named before
 // comes back from names, so naming a prompt seen before allocates nothing.
 func (kc *kvCache) digest(p, fill, end int) string {
+	x := kc.digestHead(p, fill)
+	kc.writeSeq(x, 0, end)
+	return kc.digestName(x)
+}
+
+// digestHead is digest's hasher, reset and fed what comes before the ids.
+func (kc *kvCache) digestHead(p, fill int) hash.Hash {
 	if kc.hasher == nil {
 		kc.hasher = sha256.New()
 	}
@@ -2483,7 +2541,12 @@ func (kc *kvCache) digest(p, fill, end int) string {
 	b = append(b, '|')
 	kc.hbuf = b
 	x.Write(b)
-	kc.writeSeq(x, end)
+	return x
+}
+
+// digestName is the key of what x has been fed so far; Sum leaves x as it
+// was, so a caller can go on feeding it.
+func (kc *kvCache) digestName(x hash.Hash) string {
 	var id [16]byte
 	copy(id[:], x.Sum(kc.sum[:0]))
 	if name, ok := kc.names[id]; ok {
@@ -2507,7 +2570,30 @@ func (kc *kvCache) chunkKey(end int) string {
 	if kc.ns == "" || end <= 0 || end > len(kc.seq) {
 		return ""
 	}
-	return kc.digest(-kvChunk, 0, end)
+	if end%kvChunk != 0 {
+		return kc.digest(-kvChunk, 0, end)
+	}
+	n := end/kvChunk - 1
+	if n >= len(kc.ck) {
+		kc.fillChunkKeys()
+	}
+	return kc.ck[n]
+}
+
+// fillChunkKeys names every whole kvChunk of seq not yet in ck, in one pass
+// over the ids: chunk keys are prefix hashes, so each is the running hash's
+// sum at its boundary, where hashing each from position 0 cost a sequence's
+// length per chunk, per layer that asked.
+func (kc *kvCache) fillChunkKeys() {
+	x := kc.digestHead(-kvChunk, 0)
+	at := 0
+	for e := kvChunk; e <= len(kc.seq); e += kvChunk {
+		kc.writeSeq(x, at, e)
+		at = e
+		if e/kvChunk > len(kc.ck) {
+			kc.ck = append(kc.ck, kc.digestName(x))
+		}
+	}
 }
 
 // int32bytes views the ids as bytes for hashing. The byte order is this machine's
@@ -2544,6 +2630,9 @@ func (kc *kvCache) note(pos int, ids ...int32) {
 				kc.bh[p] = kc.bh[p][:n]
 			}
 		}
+		if n := pos / kvChunk; n < len(kc.ck) {
+			kc.ck = kc.ck[:n]
+		}
 	}
 	kc.seq = append(kc.seq, ids...)
 }
@@ -2570,6 +2659,7 @@ func (kc *kvCache) reset() {
 	for p := range kc.bh {
 		kc.bh[p] = kc.bh[p][:0]
 	}
+	kc.ck = kc.ck[:0]
 	kc.chunked = 0
 }
 
@@ -2768,7 +2858,10 @@ func (s *State) sealRecurrentTail(pos int) {
 			return
 		}
 	}
-	s.sealRecOnDevice(pos)
+	if s.sealRecOnDevice(pos) && s.kv.share != nil && pos >= kvChunk && pos%kvChunk != 0 {
+		c := pos / kvChunk * kvChunk
+		s.kv.share.noteEnd(s.kv.chunkKey(c), pos-c)
+	}
 }
 
 // attnLayer is any layer with pages, so that pageKey has a page size to hash.
@@ -2882,8 +2975,8 @@ func (kc *kvCache) nameRow(k ImageKey, row int, at [4]int, pos int) int32 {
 // they are, and an image row as a tag no id run can produce followed by its
 // whole name -- the picture's digest, never a truncation of it -- its row and
 // its position.
-func (kc *kvCache) writeSeq(h io.Writer, e int) {
-	seq := kc.seq[:e]
+func (kc *kvCache) writeSeq(h io.Writer, a, e int) {
+	seq := kc.seq[a:e]
 	for len(seq) > 0 {
 		i := 0
 		for i < len(seq) && seq[i] >= 0 {

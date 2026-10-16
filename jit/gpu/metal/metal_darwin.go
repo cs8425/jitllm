@@ -978,6 +978,45 @@ func (c *Ctx) Copy(dst *Buf, dstOff int, src *Buf, srcOff, n int) error {
 	return nil
 }
 
+// CopyList is Copy for every op of ops, as one blit encoder in one command
+// buffer and one wait: a list of small copies (a restore point's snapshot of
+// every recurrent block) pays the commit and the wait once.
+func (c *Ctx) CopyList(ops []CopyOp) error {
+	for _, o := range ops {
+		if o.Dst.c != c || o.Src.c != c {
+			return fmt.Errorf("metal: a copy between buffers of another device")
+		}
+	}
+	if len(ops) == 0 {
+		return nil
+	}
+	if err := c.Wait(); err != nil {
+		return err
+	}
+	cb := send0(c.queue, selCmdBuf)
+	if cb == 0 {
+		return fmt.Errorf("metal: commandBuffer returned nil")
+	}
+	enc := send0(cb, sel("blitCommandEncoder"))
+	if enc == 0 {
+		return fmt.Errorf("metal: blitCommandEncoder returned nil")
+	}
+	for _, o := range ops {
+		if o.N == 0 {
+			continue
+		}
+		sendCopy(enc, sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"),
+			o.Src.id, uint64(o.SrcOff), o.Dst.id, uint64(o.DstOff), uint64(o.N))
+	}
+	send0(enc, selEndEncoding)
+	send0(cb, selCommit)
+	send0(cb, selWaitDone)
+	if e := send0(cb, selError); e != 0 {
+		return nserr(e, "blit command buffer")
+	}
+	return nil
+}
+
 // Limits is what this compiled pipeline can be dispatched with: its largest
 // threadgroup, which falls below the device's with register pressure, and its
 // SIMD width. Metal does not refuse a dispatch past either; the kernel

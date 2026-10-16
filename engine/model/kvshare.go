@@ -54,6 +54,51 @@ type SharedStore struct {
 	// order is the held pages oldest first, for Trim; a forgotten one is
 	// passed over there.
 	order []*sharedPage
+	// ends is where restore points past a chunk boundary were kept, by the
+	// boundary's chunk key: the fills past it, newest first, 0 an empty
+	// seat. A prompt that ended inside a chunk kept its point there, where
+	// no restore probing the chunks would ask (noteEnd, endsAfter).
+	ends map[string][kvEndSeats]uint8
+}
+
+// kvEndSeats is how many prompt ends one chunk boundary remembers, and
+// kvEndKeys how many boundaries: past it the index starts again, as the
+// key names do (kvNames).
+const (
+	kvEndSeats = 4
+	kvEndKeys  = 1 << 16
+)
+
+// noteEnd records that a restore point was kept fill positions past the
+// chunk boundary key names.
+func (s *SharedStore) noteEnd(key string, fill int) {
+	if key == "" || fill <= 0 || fill >= kvChunk {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ends == nil || len(s.ends) >= kvEndKeys {
+		s.ends = make(map[string][kvEndSeats]uint8, 64)
+	}
+	e := s.ends[key]
+	for i, f := range e {
+		if int(f) == fill {
+			copy(e[1:i+1], e[:i]) // to the front
+			e[0] = uint8(fill)
+			s.ends[key] = e
+			return
+		}
+	}
+	copy(e[1:], e[:kvEndSeats-1])
+	e[0] = uint8(fill)
+	s.ends[key] = e
+}
+
+// endsAfter is the fills noteEnd recorded past the boundary key names.
+func (s *SharedStore) endsAfter(key string) [kvEndSeats]uint8 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ends[key]
 }
 
 // sharedPage is one page's single copy: refs sessions alias it. key is the

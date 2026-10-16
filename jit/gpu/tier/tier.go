@@ -1818,6 +1818,12 @@ type devShared struct {
 	recNext      backend.Buf
 	recNextBytes uint64
 	recCopies    map[[2]int]backend.Kernel
+	// snapList is the copies snapRec queued for flushSnaps, and snapCount
+	// the points they keep: kept, so a snapshot allocates nothing.
+	snapList  []backend.CopyRange
+	snapCount int
+	// zeroList is recZeroLayers' copies, run as one list.
+	zeroList []backend.CopyRange
 	// recZeros is the zeros a seat's zeroing copies from (recZeroLayers),
 	// uploaded at the widest zeroing and kept while there are pools: a
 	// prompt that resets its sequence's state made and freed it each time.

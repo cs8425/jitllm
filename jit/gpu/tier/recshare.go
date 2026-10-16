@@ -66,18 +66,31 @@ func (g *devTier) snapRec(sid uint64, li int, key string) bool {
 	if g.recShared {
 		sh = 0
 	}
-	if err := g.dev.Copy(sn.c, 0, l.pool.c[rp.cur], st.base*g.recC*4, g.recC*4); err != nil {
-		g.LastErr = "SnapRec: " + err.Error()
-		return false
-	}
+	// Queued, and run with the rest of the point's blocks in one call
+	// (flushSnaps).
+	g.snapList = append(g.snapList, backend.CopyRange{Dst: sn.c, Src: l.pool.c[rp.cur], SrcOff: st.base * g.recC * 4, N: g.recC * 4})
 	if g.recS > 0 {
-		if err := g.dev.Copy(sn.s, 0, l.pool.s[sh], st.base*g.recS*4, g.recS*4); err != nil {
+		g.snapList = append(g.snapList, backend.CopyRange{Dst: sn.s, Src: l.pool.s[sh], SrcOff: st.base * g.recS * 4, N: g.recS * 4})
+	}
+	g.snapCount++
+	return true
+}
+
+// flushSnaps runs the copies snapRec queued, as one list (backend.CopyAll),
+// and counts the points they kept: the blocks queued before a refusal are
+// kept still. It reports ok, false too when the list fails.
+func (g *devTier) flushSnaps(ok bool) bool {
+	if len(g.snapList) > 0 {
+		if err := backend.CopyAll(g.dev, g.snapList); err != nil {
 			g.LastErr = "SnapRec: " + err.Error()
-			return false
+			ok = false
+		} else {
+			g.RecPointsKept += g.snapCount
 		}
 	}
-	g.RecPointsKept++
-	return true
+	clear(g.snapList)
+	g.snapList, g.snapCount = g.snapList[:0], 0
+	return ok
 }
 
 // recSnapSlot is a snapshot buffer for block li: a new one while the block
@@ -182,10 +195,10 @@ func (g *devTier) snapRecs(sid uint64, lis []int32, key string) bool {
 	defer g.mu.Unlock()
 	for _, li := range lis {
 		if !g.snapRec(sid, int(li), key) {
-			return false
+			return g.flushSnaps(false)
 		}
 	}
-	return true
+	return g.flushSnaps(true)
 }
 
 // SnapRec, HasRec and LoadRec are the zero session's (nn.RecShareDevice).
@@ -205,7 +218,7 @@ func (g *devTier) recShareCall(sid uint64, li int, key string, op int) bool {
 	defer g.mu.Unlock()
 	switch op {
 	case 0:
-		return g.snapRec(sid, li, key)
+		return g.flushSnaps(g.snapRec(sid, li, key))
 	case 1:
 		return g.hasRec(li, key)
 	}
