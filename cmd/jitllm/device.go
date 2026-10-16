@@ -37,7 +37,7 @@ import (
 // streamGroups is the container's own answer (jlm.streamGroupsFor), or 0 to let
 // the tier choose; the environment override in gpuOptions runs after this and
 // wins.
-func openDevices(spec string, vram, hostBudget uint64, streamGroups int) (nn.Device, func(), string, error) {
+func openDevices(spec string, vram, hostBudget uint64, streamGroups, stepRows int) (nn.Device, func(), string, error) {
 	if hostBudget == 0 {
 		hostBudget = sched.MemBudget()
 	}
@@ -61,6 +61,9 @@ func openDevices(spec string, vram, hostBudget uint64, streamGroups int) (nn.Dev
 	}
 	if streamGroups > 0 {
 		base = append(base, tier.WithConfig(func(c *tier.Config) { c.StreamGroupsStart = streamGroups }))
+	}
+	if stepRows > 0 {
+		base = append(base, tier.WithConfig(func(c *tier.Config) { c.StepRows = stepRows }))
 	}
 	g, err := tier.OpenWith(append(base, gpuOptions()...)...)
 	if err != nil {

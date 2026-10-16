@@ -79,7 +79,9 @@ func decisionPrompts(t *testing.T, d *Decider) []decisionPrompt {
 			for v := range d.variants(q) {
 				p := decisionPrompt{qt: q.Type, v: v}
 				var err error
-				if d.kind == jlm.DecisionLaya {
+				if d.kind == jlm.DecisionKev {
+					p.ids, p.markers, err = d.kevPrompt(state, q, v)
+				} else if d.kind == jlm.DecisionLaya {
 					p.ids, p.markers, err = d.layaSequence(state, q)
 				} else if d.kind == jlm.DecisionD1Omni {
 					p.ids, p.markers, err = d.d1OmniSequence(state, q, d.d1OmniMaxLen())
@@ -134,6 +136,8 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 				err = d.clefForward(p.clef, d.variantScores(0, len(p.clef.opts)))
 			case d.kind == jlm.DecisionD1Omni:
 				_, err = d.d1OmniForward(p.ids, p.qt, p.markers, p.v)
+			case d.kind == jlm.DecisionKev:
+				_, err = d.kevRows(p.ids, p.markers, p.v)
 			case m.IsEncoder():
 				_, err = d.layaForward(p.ids, p.qt, p.markers, p.v)
 			default:
@@ -182,7 +186,7 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 	}
 	// On a device DecideBatch runs each request alone (batchAlone); the
 	// batch session it keeps for the host is held here all the same.
-	if placed > 0 {
+	if placed > 0 && d.kind != jlm.DecisionKev { // Kev has no batch session: each request runs alone
 		d.violation = "device-batch"
 		defer func() { d.violation = "" }()
 	}
@@ -202,8 +206,10 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 			t.Fatal(err)
 		}
 	})
-	// A non-causal model's prompts run one at a time (runJobs).
-	if !m.IsEncoder() && d.kind != jlm.DecisionClef && !d.nonCausal() {
+	// A non-causal model's prompts run one at a time (runJobs), and Kev
+	// runs each request alone (its head reads rows a batch session does
+	// not give back).
+	if !m.IsEncoder() && d.kind != jlm.DecisionClef && !d.nonCausal() && d.kind != jlm.DecisionKev {
 		st := d.BatchStats()
 		if st.Steps == st0.Steps || st.MaxSeqs < 2 {
 			t.Fatalf("the batch ran %d steps, at most %d prompts in one: it was not batched", st.Steps-st0.Steps, st.MaxSeqs)

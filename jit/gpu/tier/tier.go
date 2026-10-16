@@ -675,6 +675,11 @@ type Stats struct {
 	// reserved none. A ReservedPrompt narrower than Config.PromptRows is the
 	// reservation halved to fit.
 	ReservedPrompt, ReservedStep int
+	// RowsSteps counts the ragged steps (LayersRows) the device ran and
+	// RowsPadded the rows of padding they ran beside their own: a step whose
+	// width was refused runs in the next wider scratch built, a 3-row
+	// verification in the 512-row prompt scratch.
+	RowsSteps, RowsPadded int
 	// TowerRows is the rows the device's tower blocks are built for
 	// (visrows.go): a picture's, rounded up, never the tower's largest grid
 	// unless a picture asked for it. 0 with no tower block placed.
@@ -1249,6 +1254,8 @@ func (s *Stats) add(o Stats) {
 	s.ReservedPrompt = max(s.ReservedPrompt, o.ReservedPrompt)
 	s.TowerRows = max(s.TowerRows, o.TowerRows)
 	s.ReservedStep = max(s.ReservedStep, o.ReservedStep)
+	s.RowsSteps += o.RowsSteps
+	s.RowsPadded += o.RowsPadded
 	s.ScratchRefused += o.ScratchRefused
 	s.PromptSplits += o.PromptSplits
 	s.RecBytes += o.RecBytes
@@ -1877,9 +1884,13 @@ type devShared struct {
 	// how many requests it has answered.
 	dh        dhState
 	ClefHeads int64
-	convN     int
-	ragSeg    map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
-	argmaxK   backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
+	// kh is Kev's pointer head on this device (kevhead.go) on dh's kernels,
+	// and KevHeads how many questions it has answered.
+	kh       khState
+	KevHeads int64
+	convN    int
+	ragSeg   map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
+	argmaxK  backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
 	// samplePenK and sampleKs are the device sampler's kernels: the penalty
 	// over the head's rows and, per k, the two top-k passes (sample.go).
 	samplePenK backend.Kernel
@@ -2588,6 +2599,7 @@ func (g *devTier) Close() {
 	// Every session's queue, before the device that owns them, once nothing
 	// runs on one.
 	g.quiesce()
+	g.khClose() // before dhClose: its programs launch dh's kernels
 	g.dhClose()
 	for _, ds := range g.sess {
 		ds.closeQueue()

@@ -159,6 +159,10 @@ func (g *devTier) layersRows(lo, hi int, rs *ragStep, x, cs, csSWA []float32, he
 		ok = w > 0 && g.prepRagged(g.bbs[w], head, n)
 	}
 	bs := g.bbs[w]
+	if ok {
+		g.RowsSteps++
+		g.RowsPadded += w - n
+	}
 	if ok && linear {
 		ok = g.prepRagLinear(bs, n) && g.prepRecRows(sid, lo, hi, rs)
 	}

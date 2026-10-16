@@ -176,23 +176,45 @@ func (g *devTier) forgetExact(w int) {
 // keepExact builds the exact prompt width w if it is not built and marks it
 // the most recently used, giving back the least recently used exact widths
 // when the lane holds maxExactWidths or when the budget refuses w beside
-// them. Prompts whose lengths straddle a grain (a stream of 31- to 34-token
+// them. It returns the width the chunk runs in (w, or a kept wider width for
+// a w given back before), 0 for none. Prompts whose lengths straddle a grain (a stream of 31- to 34-token
 // requests runs at 32 and 64 rows) then build each width once, not once per
 // crossing. Callers hold g.mu, outside any submission.
-func (g *devTier) keepExact(w int) bool {
+func (g *devTier) keepExact(w int) int {
 	reserved := w == g.promptW || w == g.stepW
 	if g.bbs[w] == nil {
 		drop := func() {
 			// After every submission that may read it.
 			g.quiesce()
+			if g.exactDropped == nil {
+				g.exactDropped = map[int]bool{}
+			}
+			g.exactDropped[g.exactWs[0]] = true
 			g.dropBatch(g.exactWs[0])
+		}
+		// A width given back before runs in the narrowest kept wider one:
+		// prompts of more lengths than the lane keeps otherwise cycled every
+		// scratch, building and dropping one a prompt, and a warm prompt
+		// allocated.
+		if g.exactDropped[w] {
+			c := 0
+			for _, x := range g.exactWs {
+				if x > w && (c == 0 || x < c) {
+					c = x
+				}
+			}
+			if c != 0 {
+				g.forgetExact(c)
+				g.exactWs = append(g.exactWs, c)
+				return c
+			}
 		}
 		for len(g.exactWs) >= maxExactWidths {
 			drop()
 		}
 		for !g.prepBatch(w) {
 			if len(g.exactWs) == 0 {
-				return false
+				return 0
 			}
 			drop()
 		}
@@ -201,7 +223,7 @@ func (g *devTier) keepExact(w int) bool {
 		g.forgetExact(w)
 		g.exactWs = append(g.exactWs, w)
 	}
-	return true
+	return w
 }
 
 // dropAllScratch frees every scratch and the staging: what a device holding
