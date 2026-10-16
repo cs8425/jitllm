@@ -161,7 +161,8 @@ func (h *DialogHost) build(ctx widget.Context, r DialogReq) *dialog.Widget {
 
 	// A Paragraph, because primitives.Text measures as if it wrapped and
 	// paints one line.
-	body := NewParagraph(r.Message).MaxLines(dialogBodyLines)
+	// Selectable, so an error can be copied out of the dialog.
+	body := NewParagraph(r.Message).MaxLines(dialogBodyLines).Selectable()
 	if tp := ctx.ThemeProvider(); tp != nil {
 		body = body.Color(tp.OnSurface())
 	}
