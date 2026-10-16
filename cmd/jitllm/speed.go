@@ -82,7 +82,7 @@ func speedCmd(args []string) error {
 		return err
 	}
 	tOpen := time.Since(t00)
-	d, closeDev, name, err := openDevices(*dev, *vram, 0, m.StreamGroups())
+	d, closeDev, name, err := openDevices(*dev, *vram, 0, m.StreamGroups(), 0)
 	if err != nil {
 		return err
 	}

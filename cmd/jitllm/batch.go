@@ -55,7 +55,7 @@ func batchCmd(args []string) error {
 	}
 	defer m.Close()
 	ids := m.Vocab.Encode(strings.Join(fs.Args()[1:], " "), true)
-	d, closeDev, name, err := openDevices(*dev, 0, 0, m.StreamGroups())
+	d, closeDev, name, err := openDevices(*dev, 0, 0, m.StreamGroups(), 0)
 	if err != nil {
 		return err
 	}
