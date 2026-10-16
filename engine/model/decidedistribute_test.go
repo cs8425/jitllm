@@ -31,6 +31,7 @@ func moveTier(t *testing.T) (*tier.GPU, string, string) {
 		noDevice(t, a+","+b, err)
 	}
 	t.Cleanup(func() { g.Close() })
+	distinctCards(t, g)
 	return g, a, b
 }
 

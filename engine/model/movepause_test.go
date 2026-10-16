@@ -59,6 +59,7 @@ func TestMovePause(t *testing.T) {
 			noDevice(t, a+","+b, err)
 		}
 		defer g.Close()
+		distinctCards(t, g)
 		m, err := Open(path, WithPlacement(Placement{Rest: &Place{On: a}, Head: &Place{On: a}}), WithDirectMoves(direct))
 		if err != nil {
 			t.Fatal(err)
