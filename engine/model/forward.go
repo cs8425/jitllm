@@ -630,7 +630,7 @@ type State struct {
 	// rowsHeads counts a hyper-connected model's verifications whose head
 	// ran on the device (rowsHead).
 	rowsHeads int
-	rowsTok      []int32
+	rowsTok   []int32
 	// rowsPos is a stream model's speculation step's positions and slots
 	// (stepRowsStreams).
 	rowsPos []int
