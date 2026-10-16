@@ -88,6 +88,12 @@ var decisionCases = []struct {
 	// here, 0.42 against 0.57 at llama.cpp's f16 cache), where the f32 arm
 	// reads 0.078 off and the f16 arm 0.015.
 	{"vllm-d3", "vllm-d3/vllm-d3-edge-Q8_0.gguf", "vllm-d3-edge-Q8_0", jlm.DecisionVllmD3, false, 0.08},
+	// jaredpalmer's Kev 4B (ggml-org's BF16): the pointer head over the
+	// normed hidden state, the question's last row against each option's
+	// <|box_end|> row. BF16 (worst 0.0026 on either cache): at Q4_K_M both
+	// engines' projections sit 5.6% from the BF16 ones and 2% from each
+	// other, a band as wide as some of the readout's own violations.
+	{"kev", "kev/Kev-4B-BF16.gguf", "Kev-4B-BF16", jlm.DecisionKev, false, 0.01},
 }
 
 // decisionRequests are the request bodies in testdata/decision: an object
@@ -210,6 +216,9 @@ func TestDecisionReadoutIsLoadBearing(t *testing.T) {
 		{"lev-unsorted", "lev/lev-Q8_0.gguf", "lev-Q8_0", "support", jlm.DecisionLev, "unsorted", []string{"intent", "urgent", "frustration", "refund", "team"}},
 		{"lev-uncalibrated", "lev/lev-Q8_0.gguf", "lev-Q8_0", "support", jlm.DecisionLev, "uncalibrated", []string{"intent", "urgent"}},
 		{"vllm-d3-causal", "vllm-d3/vllm-d3-edge-Q8_0.gguf", "vllm-d3-edge-Q8_0", "support", jlm.DecisionVllmD3, "causal", []string{"intent", "team"}},
+		{"kev-same-half", "kev/Kev-4B-BF16.gguf", "Kev-4B-BF16", "support", jlm.DecisionKev, "same-half", []string{"intent", "team"}},
+		{"kev-key-before-end", "kev/Kev-4B-BF16.gguf", "Kev-4B-BF16", "support", jlm.DecisionKev, "key-before-end", []string{"intent", "team"}},
+		{"kev-uncalibrated", "kev/Kev-4B-BF16.gguf", "Kev-4B-BF16", "support", jlm.DecisionKev, "uncalibrated", []string{"intent", "team"}},
 		{"openjev-false-first", "openjev/tinyopenjev-for-testing-Q8_0.gguf", "tinyopenjev-for-testing-Q8_0", "ambiguous", jlm.DecisionOpenJev, "false-first", []string{"compensate", "churn", "damage"}},
 		{"openjev-uncalibrated", "openjev/tinyopenjev-for-testing-Q8_0.gguf", "tinyopenjev-for-testing-Q8_0", "ambiguous", jlm.DecisionOpenJev, "uncalibrated", []string{"compensate", "churn", "damage"}},
 	} {
@@ -320,7 +329,7 @@ func checkDecisions(t *testing.T, qs []DecisionQuestion, ans []DecisionAnswer, g
 // label moves them -- the answers are what the pick read.
 func TestDecisionPicksOnTheHost(t *testing.T) {
 	for _, c := range decisionCases {
-		if c.kind == jlm.DecisionLaya || c.kind == jlm.DecisionClef || c.kind == jlm.DecisionD1Omni {
+		if c.kind == jlm.DecisionLaya || c.kind == jlm.DecisionClef || c.kind == jlm.DecisionD1Omni || c.kind == jlm.DecisionKev {
 			continue // an encoder's scorer and Clef's span head read no label logits
 		}
 		t.Run(c.name, func(t *testing.T) {
