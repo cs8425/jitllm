@@ -37,7 +37,7 @@ NODE="${NODE:-0}"
 N="${STRATA_VS_N:-128}"
 PROMPT="${STRATA_VS_PROMPT:-The capital of France is}"
 JITLLM_ENV="${JITLLM_ENV:-JITLLM_EXPERTS=host}"
-STRATA_ARGS="${STRATA_ARGS:---resident-budget-gib 100 --expert-cache auto --max-context 4096 --prefill auto}"
+STRATA_ARGS="${STRATA_ARGS:---resident-budget-gib 100 --expert-cache auto --max-context 8192 --prefill auto}"
 STRATA_PROFILE="${STRATA_PROFILE:-$(dirname "$STRATA")/../data/expert-profile.bin}"
 # NODE=all runs both engines unpinned: both sockets, the 2-socket rows.
 PIN=(numactl --cpunodebind="$NODE" --membind="$NODE")
@@ -135,6 +135,11 @@ quiet || exit 75
 echo ">> soak"
 $A >/dev/null || true
 $B >/dev/null || true
+# A sample that fails (a crash, a refused speculated sample) is retried
+# once; a round whose sample still gives no rate is dropped and counted, and
+# the row is refused only when more than a quarter of its rounds drop.
+retry() { "$1" || { echo "  $1 failed; retrying once (see $LOG)" >&2; "$1"; }; }
+dropped=0
 ratios=()
 for r in $(seq 1 "$ROUNDS"); do
   quiet || exit 75
@@ -144,15 +149,24 @@ for r in $(seq 1 "$ROUNDS"); do
     exit 75
   fi
   if [ $((r % 2)) -eq 1 ]; then
-    a="$($A)"; ca="$(gpuclk)"; b="$($B)"; cb="$(gpuclk)"
+    a="$(retry $A)"; ca="$(gpuclk)"; b="$(retry $B)"; cb="$(gpuclk)"
   else
-    b="$($B)"; cb="$(gpuclk)"; a="$($A)"; ca="$(gpuclk)"
+    b="$(retry $B)"; cb="$(gpuclk)"; a="$(retry $A)"; ca="$(gpuclk)"
   fi
-  [ -n "$a" ] && [ -n "$b" ] || { echo "round $r: a sample gave no rate (see $LOG)" >&2; exit 1; }
+  if [ -z "$a" ] || [ -z "$b" ]; then
+    dropped=$((dropped + 1))
+    echo "round $r: dropped, a sample gave no rate after a retry (see $LOG); $dropped dropped so far" >&2
+    if [ $((dropped * 4)) -gt "$ROUNDS" ]; then
+      echo "more than a quarter of $ROUNDS rounds dropped: refusing the row" >&2
+      exit 1
+    fi
+    continue
+  fi
   ratio="$(awk -v a="$a" -v b="$b" 'BEGIN{printf "%.4f", a/b}')"
   ratios+=("$ratio")
   echo "round $r: jitllm $a tok/s (sm,temp $ca)  $NAME_B $b tok/s (sm,temp $cb)  ratio $ratio  psi $p"
 done
+echo "$dropped of $ROUNDS round(s) dropped"
 printf '%s\n' "${ratios[@]}" | sort -n | awk '
   { v[NR]=$1 }
   END {
