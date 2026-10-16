@@ -675,6 +675,11 @@ type Stats struct {
 	// reserved none. A ReservedPrompt narrower than Config.PromptRows is the
 	// reservation halved to fit.
 	ReservedPrompt, ReservedStep int
+	// RowsSteps counts the ragged steps (LayersRows) the device ran and
+	// RowsPadded the rows of padding they ran beside their own: a step whose
+	// width was refused runs in the next wider scratch built, a 3-row
+	// verification in the 512-row prompt scratch.
+	RowsSteps, RowsPadded int
 	// TowerRows is the rows the device's tower blocks are built for
 	// (visrows.go): a picture's, rounded up, never the tower's largest grid
 	// unless a picture asked for it. 0 with no tower block placed.
@@ -1249,6 +1254,8 @@ func (s *Stats) add(o Stats) {
 	s.ReservedPrompt = max(s.ReservedPrompt, o.ReservedPrompt)
 	s.TowerRows = max(s.TowerRows, o.TowerRows)
 	s.ReservedStep = max(s.ReservedStep, o.ReservedStep)
+	s.RowsSteps += o.RowsSteps
+	s.RowsPadded += o.RowsPadded
 	s.ScratchRefused += o.ScratchRefused
 	s.PromptSplits += o.PromptSplits
 	s.RecBytes += o.RecBytes

@@ -79,7 +79,7 @@ func embedCmd(args []string) error {
 		return err
 	}
 	defer e.Close()
-	g, closeDev, devName, err := openDevices(*dev, 0, 0, m.StreamGroups())
+	g, closeDev, devName, err := openDevices(*dev, 0, 0, m.StreamGroups(), 0)
 	if err != nil {
 		return err
 	}

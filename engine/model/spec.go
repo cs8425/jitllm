@@ -1138,3 +1138,15 @@ func topProb(logits []float32, d *specDist) float32 {
 	nn.Softmax32JIT(d.pall, len(logits))
 	return d.pall[Greedy(d.pall)]
 }
+
+// SpecRows is the most rows one verification pass carries when the count of
+// drafts is the adaptive search's (a lookup draft and the deepest model
+// draft, and the row they follow). A device reserves a ragged step's scratch
+// of this many rows at placement (tier.Config.StepRows): a card the blocks
+// filled refuses a narrow scratch built later, and a verify of three rows
+// then runs every kernel that does not cut to its rows over the reserved
+// prompt width. A fixed WithSpecDraft deeper than this runs in the next
+// wider scratch that is built.
+func SpecRows() int {
+	return specLookupDraft + specMaxDraft + 1
+}

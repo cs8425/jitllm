@@ -13,7 +13,7 @@ import (
 
 func TestOpenDevicesCPUOpensNothing(t *testing.T) {
 	for _, spec := range []string{"cpu", " cpu ", "CPU"} {
-		d, closeDev, name, err := openDevices(spec, 0, 8<<30, 0)
+		d, closeDev, name, err := openDevices(spec, 0, 8<<30, 0, 0)
 		if err != nil {
 			t.Fatalf("-devices %q: %v", spec, err)
 		}
@@ -36,7 +36,7 @@ func TestOpenDevicesRefusalsNameBothSides(t *testing.T) {
 		// contradiction to catch is two device answers, not cpu beside one.
 		{"gpu,cuda:0", "gpu", "alone"},
 	} {
-		_, _, _, err := openDevices(tc.spec, 0, 8<<30, 0)
+		_, _, _, err := openDevices(tc.spec, 0, 8<<30, 0, 0)
 		if err == nil {
 			t.Errorf("-devices %q was accepted", tc.spec)
 			continue
@@ -68,7 +68,7 @@ func TestOpenDevicesNamesTwoDevicesAndPoolsThem(t *testing.T) {
 	}
 	t.Setenv("JITLLM_GPU_TUNE", "0")
 	spec := "cpu,cuda:0=200M,vulkan:" + itoa(sel) + "=200M"
-	d, closeDev, name, err := openDevices(spec, 0, 8<<30, 0)
+	d, closeDev, name, err := openDevices(spec, 0, 8<<30, 0, 0)
 	if err != nil {
 		t.Fatalf("-devices %q: %v", spec, err)
 	}
