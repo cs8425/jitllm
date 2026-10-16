@@ -6370,3 +6370,201 @@ wait per tile; the decode block's edges are almost all whole, so the counters
 remove little waiting and add atomics. What would change this is fusion that
 keeps an intermediate on chip and removes tasks, not finer ordering of the
 same tasks. Off by default (RULE 6: a clear regression).
+
+## Gate and up in one launch: exact, and a loss past the 1B
+
+`Config.GateUpFuse` (`tier.WithGateUpFuse`, `JITLLM_GPU_GATEUP=1`) runs a
+dense gated FFN's gate and up as one `kernels.MatVecSegments` launch over
+their shared operand, and has down form act(gate)*up from the two rows and
+quantize it in its prologue (`kernels.ActIn.Gated`) with the residual add:
+three launches where there were four (gate, up writing act(gate)*up, down
+quantizing it). Each row keeps its own reduction, and the element and its
+rounding are QuantizeAct's on both paths, so the logits are the same bits:
+`TestGateUpFuseMatchesThreeLaunches` (Llama-3.2-1B on the V100, every block
+placed with and without the graph and a half seam; both arms read one tuner
+cache so their splits agree), violation `TestGateUpFuseSeesASwap` (gate and up
+handed to down the wrong way round: 384768 of 513024 logits differ). It needs
+gate and up at one in-group split, which the tuner picks on a card and the
+fitted table does not (`Stats.GateUpWhy` names the refusal).
+
+V100, CUDA, tuner on (`JITLLM_GPU_TUNE=1`), in-process `verify -ab`, n=24
+rounds of 64 tokens, two passes:
+
+| model | A/A | fused vs four launches |
+|---|---|---|
+| Llama-3.2-1B Q4_K_M | 0.9977 / 1.0016 | 1.0064 / 1.0052 |
+| Llama-3.2-3B Q4_K_M | 1.0004 / 1.0018 | 0.9481 / 0.9545 |
+| Llama-3.1-8B Q4_K_M | 0.9986 / 1.0002 | 0.9124 / 0.9133 |
+
+(IQR/median 0.3-1.4%.) The launch it removes is worth half a percent on the
+1B; the cost it adds is down's prologue, which every one of down's workgroups
+pays over the whole FFN width (8192 on the 3B, 14336 on the 8B) -- the same
+reason the tuner keeps down's own operand prologue off on this card. Off by
+default; a per-shape choice is the joint tuner's to make. A form with no
+prologue in down needs one workgroup to own gate row i and up row i and
+write act(gate)*up itself (two weight streams a thread), which MatVecSegments
+cannot express.
+
+Note for every earlier `verify -ab` row in this file: verify pins the split
+tuner off unless `JITLLM_GPU_TUNE` says otherwise, so those rows are at the
+fitted table's splits, not the shipping tuned ones (the persistent and
+dependency-counter rows included).
+
+## Prefill on the V100: where a prompt's time goes
+
+`jitllm speed` with per-kernel timing (each kernel padded by ~3.9 us of
+event), V100, CUDA. Llama-3.2-1B Q4_K_M at 2048 tokens (102.3 ms of kernels):
+the f16 tensor-core GEMMs (GemmVolta) 70.5 ms, flash prefill 17.2 ms,
+rmsnormf16tw 3.5, actmulf16t 4.0, ropeqkvpaged 2.6, add 1.4, actf16t 1.3,
+split-K reduce 1.1. Llama-3.1-8B at 2048 (516 ms): GEMMs 412 ms, flash
+prefill 53.6, rmsnormf16tw 15.0, actmulf16t 13.0, rope 9.6, actf16t 5.5,
+add 5.0, reduce 2.2. Rates, three runs: 1B pp512 18270 / 16981 / 18292 tok/s,
+pp2048 18230 / 17008 / 18253; 8B pp512 3584 / 3569 / 3029, pp2048 3616 /
+3636 / 3608.
+
+The 8B's 14336x4096 GEMM at 512 tokens is ~770 us for 60 GFLOP, ~78 TFLOPS
+against the card's 125 tensor-core peak (62%); the 4096x4096 ~68 TFLOPS.
+GemmVolta already stages double-buffered (a trip's dequant runs under the
+previous trip's MMAs). At 64 tokens the background tuner's trials
+(WithLazyTune) land among the first prompts' kernels and the first
+prompt's rate is a fraction of the third (8B pp64 535 / 778 / 1850 tok/s).
+
+## Cold TTFT: the background tuner held the lock for a whole trial
+
+A fresh process (empty tune cache) prefilling 64-token prompts dipped to a
+third of its rate on the fourth and fifth prompt. Timestamped trials named the
+cause: the lazy split tuner's trial on the output head (Q6_K 128256x4096) held
+g.mu for ten rounds, 21 ms, and a prompt arriving behind it waited. Each round
+now waits for tuneQuiet and takes the lock alone
+(`TestBackgroundTrialYieldsBetweenRounds`).
+
+V100 (CUDA, GPU 1), `speed -p 64 -n 4 -r 8`, a fresh cache each run, base and
+new interleaved, three pairs. Slowest of the eight prompts, tok/s:
+
+    model                  base               new
+    Llama-3.1-8B Q4_K_M    818 / 526 / 802    1414 / 1472 / 1480
+    Llama-3.2-1B Q4_K_M    1176 / 1892 / 1911 4494 / 4342 / 4516
+
+The base's later prompts read ~1900 on the 8B against the new ~1620: that is
+the clock, not the engine. The V100 idles at 1312 MHz and boosts to 1530 under
+load; the base's dense trials kept it boosted, and a warm cache with no trials
+reads ~1700 on the base binary too (an nvidia-smi trace beside the run showed
+both clocks). A row on this card is not comparable across arms unless its
+clock is reported.
+
+## Gate and up in one launch, each workgroup summing both rows (Gate2)
+
+#167's fusion lost past the 1B (0.95 on 3B, 0.91 on 8B) because every
+workgroup of down redid act(gate)*up and its quantize over the full FFN width.
+Gate2 (`kernels.MatVecShape.Gate2`) moves the fusion the other way: up's
+gated matvec carries the gate's weight as a second stream, sums both rows in
+one pass over the shared operand, reduces the gate's partials in the order the
+gate's own launch reduces them, and writes act(gate)*up. Down keeps its own
+operand, so nothing is recomputed: one launch goes per block.
+
+It is bit-identical on PTX, whose lowering fixes every rounding
+(`backend.TestMatVecGate2IsTheTwoLaunches`, Q8_0/Q4_K/Q6_K at split 1 and the
+in-group splits; `model.TestGateUp2MatchesTwoLaunches` on Llama-3.2-1B with
+every block placed with and without the graph and at a half seam; the swap
+violation `TestGateUp2SeesASwap` moves 384768 of 513024 logits). On SPIR-V it
+is not: Fma lowers to an OpFMul and OpFAdd without NoContraction, and the
+NVIDIA Vulkan driver contracted the two kernels' sums differently (378 of
+1024 Q4_K rows differed in low bits). MSL compiles with fast math. So the tier
+builds it on PTX only (`kernels.Gate2Exact`); elsewhere the backend gate holds
+it to NMSE 1e-10.
+
+V100 (sm_70, CUDA, GPU 1), `verify -ab gateup2`, n=24 interleaved, -n 64,
+`JITLLM_GPU_TUNE=1`, two passes, A/A first in each:
+
+    model                  A/A      Gate2 vs two launches (pass 1 / pass 2)
+    Llama-3.2-1B Q4_K_M    0.9998   1.0222 (IQR 0.8%) / 1.0250 (IQR 0.7%)
+    Llama-3.2-3B Q4_K_M    1.0004   1.0279 (IQR 1.1%) / 1.0202 (IQR 0.9%)
+    Llama-3.1-8B Q4_K_M    1.0011   1.0097 (IQR 0.4%) / 1.0076 (IQR 0.2%)
+
+It is the default (`Config.GateUp2`; `JITLLM_GPU_GATEUP2=0` is the other
+arm). `TestDecodeDoesNotAllocate` holds at zero engine allocations on CUDA
+with it on. No per-shape tuner yet: it won on every shape measured.
+
+## A prompt chunk's block-end add folded into the next block's norm
+
+On the binary16 GEMM path the FFN norm already took the attention's residual
+add into its launch (`RMSNormF16TRows` with add); the add after down ran
+alone, and the next block's attention norm read its result back. That add is
+now held for the next norm (`foldAddNorm`): x = x2 + ffn and h = RMSNorm(x)
+in one launch, the same bits, since the norm reads the sum it stores. A held
+add whose next block's norm is not the plain one runs alone (`foldTakes`), as
+does the last block's. Gates: `TestAddNormFoldMatchesTheAdd` (Llama-3.2-1B,
+prompt and decoded logits bit-identical, every block placed with and without
+the graph and a half seam; 14 of 15 adds folded) and its violation
+`TestAddNormFoldSeesABrokenAdd` (every logit moves).
+
+V100 (CUDA, GPU 1), `verify -ab addnorm`, four 512-token prompts a round,
+n=20 interleaved, `JITLLM_GPU_TUNE=1`, A/A first, two passes; the SM clock
+is the modal reading of a 250 ms nvidia-smi trace over each arm:
+
+    model               A/A              folded vs alone    IQR    SM clock
+    Llama-3.2-1B        0.9999 / 1.0000  1.0078 / 1.0072    0.3%   1530 MHz
+    Llama-3.1-8B        0.9983 / 1.0015  1.0013 / 1.0011    0.8%/1.4%  1440-1530 MHz
+
+The 1B gains 0.7-0.8%; the 8B's GEMMs hide it inside the noise (and pull the
+card off its boost clock, which the 1B holds). On by default;
+`JITLLM_GPU_NO_ADDNORM=1` is the other arm.
+
+## The FFN's recipes, timed per card
+
+The first composer slice (`docs/design/composer.md`): the dense gated FFN's
+forms -- two launches, Gate2, Gate2 with the norm's prologue (gate2in), and
+gate+up with down forming the product (gu) -- are recipes of one site,
+timed per shape key norm through down by the one trial (`timeRecipes`),
+which the operand-prologue tuner now runs on too; `tuneFFN` replaces
+`tuneGateUp2`. gate2in is the recipe found by composition: behind a
+residual the attention output's launch already added, the FFN's
+RMSNormQuantRows goes and Gate2 builds its operand itself, one launch where
+there were two. Bit-identical on PTX (`backend.TestGate2InIsTheTwoLaunches`,
+96 cases; `model.TestFFNRecipesMatchTwoLaunches` every block placed with and
+without the graph and at a half seam; violation `TestGate2InSeesASwap`,
+384768 of 513024 logits move). `TestDecodeDoesNotAllocate` holds at zero on
+CUDA.
+
+V100 (sm_70, CUDA, GPU 1), `verify -ab ffn` (gate2in forced against Gate2
+forced), n=24 interleaved, -n 64, `JITLLM_GPU_TUNE=1`, A/A first; SM clock
+the modal reading of a 500 ms trace over each arm, 1530 MHz throughout.
+Ratios >1 mean gate2in is faster:
+
+    model                  A/A               gate2in vs Gate2   IQR
+    Llama-3.2-1B Q4_K_M    0.9989 / 1.0012   1.0121 / 1.0074    2.0% / 4.1%
+
+(An earlier binary of the same kernels read A/A 0.9941 / 0.9987 and
+1.0136 / 1.0102.) The tuner kept gate2in on both of the 1B's FFN keys. The
+3B and 8B were not measured: the card's disks had no room for their
+version-30 containers. The win is the launch and the h/a round trip it
+removes, about 1% of a 1B token, smaller as the FFN's weight traffic grows.
+
+## q, k and v as one prompt GEMM grid
+
+The 8B prompt profile put k and v (1024x4096) at split 2 with a reduce each:
+their two GEMMs and 68 reduces were about 7.4 ms of a 132 ms 512-token
+prompt. `kernels.GemmVoltaSegments` runs q, k and v as one grid over one
+binary16 operand, MatVecSegments' construction for the GEMM: each segment runs
+GemmVolta's own body for its shape, unsplit, in its own run of workgroups,
+with the staging buffers declared once at the largest size. A projection that
+reads another operand layout (Q6_K's v beside Q4_K's q) runs alone. It is
+bit-identical to each segment's own launch (`TestGemmVoltaSegmentsIsTheLaunches`,
+the sm_70 tile on a V100 and the m16n8 tiles on an RTX 3050 Ti) and to three
+GEMMs held to one k each (`TestQKVGemmMatchesThreeGemms`, with its swap
+violation); against the shipping three it sits inside the step gate's band.
+
+It loses, so it is opt-in (`Config.QKVGemm`, `JITLLM_GPU_QKVGEMM=1`). The
+sm_70 m4n4 Q4_K tile already sits at the 255-register cap, and the segment
+guard spills a word (8 bytes; admitted to measure it, `qkvSpillMax`). V100
+(CUDA, GPU 1), `verify -ab qkvgemm`, four 512-token prompts a round, n=20,
+`JITLLM_GPU_TUNE=1`, A/A first, two passes, SM clock the modal nvidia-smi
+reading:
+
+    model           A/A              grid vs three       IQR        SM clock
+    Llama-3.2-1B    1.0004 / 0.9995  0.9923 / 0.9938    0.2-0.5%   1530 MHz
+    Llama-3.1-8B    1.0034 / 1.0025  1.0024 / 0.9890    1.5-1.8%   1447-1530 MHz
+
+The split-k it removes was buying its own parallelism: the unsplit k and v
+blocks finish late in q's grid. What would change it: a register-lighter tile
+for the segments, or segments that keep k's split.

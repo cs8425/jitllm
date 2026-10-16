@@ -173,6 +173,21 @@ it covers most of the family with no new architecture.
 - **Mode B** (`mode_b_head.pt`, a candidate-path head for large option sets) is
   not converted by llama.cpp; lev's server routes choice sets over the tokenizer
   limit to it. Not in scope until mode A is done.
+
+### OpenJev (openjev/openjev; GGUF ggml-org/OpenJev-GGUF)
+
+- **Backbone**: qwen35 with a qwen3vl tower.
+- **Readout**: label-token logits (`decision.type = openjev`). One letter per
+  option, A..Z then a..z, each required to be one token, so at most 52
+  options; the template writes the letters itself. One prompt per question;
+  a noul is shown true first. Temperatures per question type from the file,
+  TypeSafe's confidence.
+- **jitllm**: `jlm.DecisionOpenJev`, held to llama-server on llama.cpp's own
+  test model (ggml-org/tinyopenjev-for-testing-gguf, a random 33M qwen35) in
+  every decision gate, pictures included: the test model's tower is 144 wide,
+  so its matrices are packed at 160 with zero columns and every product
+  quantizes its 144-wide rows with a zero tail (nn's ragged quantizer on the
+  host, kernels.QuantizePadded on a device through nn.LayerPlan.KPad).
 - **Prompt**: Qwen chat format, system prompt "You are a System One decision
   model...", `# Evidence`, `# Criterion`, `# Options` / `# Scale`, an empty
   `<think>` block, JSON keys sorted.
@@ -408,10 +423,16 @@ twice or half its rows, which the gates' two requests do at every question:
 it now shrinks only after `visShrinkCalls` calls in a row need half of it
 (`tier.TestATowerIsBuiltForItsPicture`).
 
-Batching is per readout: a decoder's prompts are rows of one batch session; an
-encoder's sequences run one encoder pass each, inside the same batch call,
-because its blocks attend over every row of a call and the device's
-non-causal set has one window list, not a sequence partition beside the local
-windows. Packing several Laya sequences into one pass is open. Clef answers a request in one pass of its own, in a batch too: its head reads
-every row of the prompt, and a batch session gives back each row's last.
+Batching is per readout: a decoder's prompts are rows of one batch session;
+an encoder's sequences are packed into passes of up to 1024 rows
+(`Decider.layaPacked`). Each sequence's rows count their rotary positions from
+its start and attend inside it: on the host through each query's sequence
+bounds, on a device through the sequence runs (`nn.SeqRunsDevice`), staged as
+a second per-row window list beside the local windows, which every unwindowed
+non-causal block masks with (the local blocks' windows are cut to their
+sequence by the caller). Its type row and its markers are its own, and the
+head's last block reads each marker's own sequence. The violation is the
+sequences attending across one another. Clef answers a request in one pass of
+its own, in a batch too: its head reads every row of the prompt, and a batch
+session gives back each row's last.
 

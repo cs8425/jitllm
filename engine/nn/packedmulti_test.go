@@ -2,6 +2,7 @@ package nn
 
 import (
 	"math/rand"
+	"slices"
 	"testing"
 
 	"github.com/jitllm/jitllm/format/quant"
@@ -298,4 +299,67 @@ func requireRan(t *testing.T, ran int) {
 	}
 	t.Skip("no FUSED packed kernel for any format on this architecture, so the " +
 		"batched mixture dispatch does not exist here -- nothing to compare")
+}
+
+// TestMatVecPackedGatherActIsTheActivationThenTheGather: the gated
+// activation taken inside the gather's quantize region is ActMul32JIT over
+// each activation and then MatVecPackedGather, bit for bit, on every packed
+// format and every gated activation; the slack past each activation is left
+// as it was. A wrong up stride fails it.
+func TestMatVecPackedGatherActIsTheActivationThenTheGather(t *testing.T) {
+	const m, rows, k = 4, 256, 512
+	stride := k + ElemLanes
+	ran := 0
+	for _, gt := range quant.PackedTypes {
+		if !cpu.PackedFusedSupported(gt) || k%int(gt.BlockElems()) != 0 {
+			continue
+		}
+		j := NewJIT(k, rows, []quant.Type{gt}, WithTune(TuneOff), WithMixtureBatch(1), WithGEMMExact(true))
+		if j == nil {
+			t.Fatalf("%s: no JIT", gt)
+		}
+		ps := make([]*Packed, m)
+		for i := range ps {
+			ps[i] = packSheet(t, gt, rows, k, i+1)
+		}
+		for _, act := range []ActKind{ActSiLU, ActGELU} {
+			if gatedIndex(act) < 0 {
+				continue
+			}
+			rng := rand.New(rand.NewSource(int64(act) + 7))
+			x := make([]float32, (m-1)*stride+k)
+			up := make([]float32, len(x))
+			for i := range x {
+				x[i], up[i] = float32(rng.NormFloat64()), float32(rng.NormFloat64())
+			}
+			x2 := append([]float32(nil), x...)
+			for i := 0; i < m; i++ {
+				ActMul32JIT(x2[i*stride:i*stride+k], up[i*stride:i*stride+k], act)
+			}
+			want, got := make([][]float32, m), make([][]float32, m)
+			for i := range want {
+				want[i], got[i] = poison(rows), poison(rows)
+			}
+			if !j.MatVecPackedGather(want, gt, ps, x2, stride, rows, k) {
+				t.Fatalf("%s: MatVecPackedGather declined", gt)
+			}
+			if !j.MatVecPackedGatherAct(got, gt, ps, x, up, act, stride, rows, k) {
+				t.Fatalf("%s %v: MatVecPackedGatherAct declined", gt, act)
+			}
+			for i := range got {
+				for r := range got[i] {
+					if got[i][r] != want[i][r] {
+						t.Fatalf("%s %v: matrix %d row %d: fused %v, apart %v", gt, act, i, r, got[i][r], want[i][r])
+					}
+				}
+			}
+			if !slices.Equal(x, x2) {
+				t.Fatalf("%s %v: the activations in place differ from the activation kernel's", gt, act)
+			}
+			ran++
+		}
+		j.Close()
+	}
+	requireRan(t, ran)
+	t.Logf("%d (format, activation) fused gathers bit-identical", ran)
 }

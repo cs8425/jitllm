@@ -42,6 +42,10 @@ type cudaDev struct {
 	// is capturing, and that session runs on the owner goroutine.
 	cap   *cuda.Stream
 	noCap bool // stream creation failed; do not keep asking
+	// up is the copy queue (backend.Uploader), a non-blocking stream created
+	// on first use; noUp records that it could not be.
+	up   *cuda.Stream
+	noUp bool
 	// tev is a ring of (before, after) event pairs around the last three
 	// replays, and ti counts replays timed; see timeReplay.
 	tev [3][2]*cuda.Event
@@ -165,7 +169,7 @@ func (c *cudaDev) peerTo(f *cudaDev) bool {
 }
 
 // openCUDA is what backend.Open uses: the first card.
-func openCUDA(o Opts) (Device, error) { return OpenCUDAWith(0, o) }
+func openCUDA(o Opts) (Device, error) { return OpenCUDAWith(-1, o) }
 
 // CUDACount is how many CUDA devices the driver sees, without opening one.
 // Opening costs a context, a locked OS thread and an owner goroutine, so a
@@ -179,7 +183,19 @@ func CUDACount() (int, error) { return cuda.Count() }
 func OpenCUDA(ord int) (Device, error) { return OpenCUDAWith(ord, Opts{}) }
 
 // OpenCUDAWith is OpenCUDA with this device's open choices.
+//
+// An enumerating open of an ordinal below zero is the default pick: device 0, or the first device an
+// installed Restriction allows.
 func OpenCUDAWith(ord int, opts Opts) (Device, error) {
+	if ord >= 0 || opts.Enumerating {
+		var err error
+		if ord, err = admit("ptx", ord, opts.Enumerating); err != nil {
+			return nil, err
+		}
+	}
+	if ord < 0 && opts.Enumerating {
+		ord = 0
+	}
 	reqs := make(chan func(), 1)
 	type opened struct {
 		d   *cuda.Device
@@ -290,7 +306,13 @@ type cudaSession struct {
 	// EndRecord.
 	marks    *[]kernMark
 	recMarks []kernMark
+	// trial says this session's launches are a tuner's trial (MarkTrial):
+	// the timing instrument names them under TrialPrefix.
+	trial bool
 }
+
+// MarkTrial implements TrialMarker.
+func (s *cudaSession) MarkTrial() { s.trial = true }
 
 func (s *cudaSession) Write(b Buf, p []byte) error { return s.WriteAt(b, 0, p) }
 
@@ -367,16 +389,20 @@ func (s *cudaSession) Launch(k Kernel, groups, width int, bufs ...Buf) error {
 		return err
 	}
 	ck.noteRan()
+	name := ck.name
+	if s.trial && (t0 != nil || s.marks != nil) {
+		name = TrialPrefix + name
+	}
 	if t0 != nil {
 		if e, err := cuda.NewEvent(); err == nil && e.RecordOn(st) == nil {
-			directMarks.add(kernPair{t0, e, ck.name})
+			directMarks.add(kernPair{t0, e, name})
 		}
 	}
 	if s.marks != nil {
 		// Inside a timed capture: an event NODE after the launch, so a replay
 		// stamps each kernel's end with no host in the loop.
 		if e, err := cuda.NewEvent(); err == nil && e.RecordNode(s.stream) == nil {
-			*s.marks = append(*s.marks, kernMark{e, ck.name})
+			*s.marks = append(*s.marks, kernMark{e, name})
 		}
 	}
 	return nil
@@ -883,6 +909,7 @@ func (c *cudaDev) Close() {
 	c.reqs <- func() {
 		// The streams go before the context that owns them.
 		c.cap.Destroy()
+		c.up.Destroy()
 		c.qmu.Lock()
 		for q := range c.queues {
 			q.st.Destroy()
@@ -1264,6 +1291,10 @@ type cudaQueue struct {
 // times over.
 const stageMin = 1 << 20
 
+// stageWrites is how many writes of the largest size seen the arena holds
+// before it drains.
+const stageWrites = 8
+
 // room returns n bytes of the staging arena, draining the stream first when
 // they are not free and growing the arena when n is more than all of it.
 func (q *cudaQueue) room(n int) ([]byte, error) {
@@ -1278,7 +1309,11 @@ func (q *cudaQueue) room(n int) ([]byte, error) {
 			cuda.FreeHost(q.stage)
 			q.stage = nil
 		}
-		b, err := cuda.HostAlloc(max(n, stageMin))
+		// Room for stageWrites writes of this size: an arena grown to exactly
+		// n is full after one, and every write after it -- the next sheet, or a
+		// decode token's few words -- drained the stream first. A hybrid
+		// expert cache sending 2.9 MB sheets waited on the card at each.
+		b, err := cuda.HostAlloc(max(n*stageWrites, stageMin))
 		if err != nil {
 			return nil, err
 		}
@@ -1455,4 +1490,33 @@ func (c *cudaDev) hasQueues() bool {
 	c.qmu.Lock()
 	defer c.qmu.Unlock()
 	return len(c.queues) > 0
+}
+
+// Upload copies p into b at off on the device's copy queue (backend.Uploader).
+// A session runs on a thread with the context current, as the copy needs.
+func (s *cudaSession) Upload(b Buf, off int, p []byte) error {
+	if len(p) == 0 {
+		return nil
+	}
+	c := s.c
+	if c.up == nil {
+		if c.noUp {
+			return s.WriteAt(b, off, p)
+		}
+		st, err := c.d.NewQueue()
+		if err != nil {
+			c.noUp = true
+			return s.WriteAt(b, off, p)
+		}
+		c.up = st
+	}
+	return b.(*cudaBuf).b.WriteAtOn(c.up, off, unsafe.Pointer(&p[0]), len(p))
+}
+
+// UploadWait waits for the copy queue (backend.Uploader).
+func (s *cudaSession) UploadWait() error {
+	if s.c.up == nil {
+		return nil
+	}
+	return s.c.up.Sync()
 }

@@ -204,6 +204,18 @@ type Queue interface{ Close() }
 // which its transfers read at the link's rate. Pin and Unpin may be called
 // inside a Session. CUDA implements it; on Vulkan and Metal the mapped
 // buffers are already the transfer path and nothing is gained.
+// Uploader is an optional Session that copies host memory to a buffer on a
+// copy queue of the device's own, beside the session's launches: an upload
+// the next launches do not read needs no place in their order. p must stay
+// untouched until UploadWait returns (page-locked memory makes the copy
+// asynchronous; pageable memory is staged by the driver before Upload
+// returns).
+type Uploader interface {
+	Upload(b Buf, off int, p []byte) error
+	// UploadWait returns once every Upload issued before it has landed.
+	UploadWait() error
+}
+
 type HostPinner interface {
 	PinHost(n int) ([]byte, error)
 	UnpinHost(p []byte)
@@ -228,6 +240,26 @@ type PeerCopier interface {
 // Session is a batch of device calls that runs under one ownership hop. The
 // methods mirror Buf and Kernel but skip the hop, so they are only valid inside
 // the closure Device.Session was given.
+// TrialPrefix leads the name of a kernel-timing entry a tuner's trial
+// launched (MarkTrial), so a profile reads the work apart from the trials
+// that ran beside it.
+const TrialPrefix = "trial:"
+
+// TrialMarker is a Session whose launches can be marked as a tuner's trial
+// for the kernel-timing instrument.
+type TrialMarker interface {
+	MarkTrial()
+}
+
+// MarkTrial marks every launch s makes from here as a tuner's trial in the
+// kernel-timing instrument (TrialPrefix); a backend with no instrument
+// ignores it.
+func MarkTrial(s Session) {
+	if t, ok := s.(TrialMarker); ok {
+		t.MarkTrial()
+	}
+}
+
 type Session interface {
 	Write(b Buf, p []byte) error
 	// WriteAt is Buf.WriteAt without the per-call ownership hop; see Session.
@@ -378,6 +410,12 @@ type Opts struct {
 	Metal metal.Opts
 	// HIP is where ROCm is looked for. Zero searches the default places.
 	HIP HIPConfig
+	// Enumerating marks an open that is part of finding devices (a default
+	// pick, a loop over a backend's ordinals) rather than a caller naming one.
+	// It changes nothing about the open; an installed Restriction treats a
+	// refused enumerating open as the restriction narrowing the search, and a
+	// refused named open as a violation.
+	Enumerating bool
 }
 
 // OpenWith is Open with the devices' open choices.
@@ -385,7 +423,7 @@ func OpenWith(o Opts) []Device {
 	var out []Device
 	for _, f := range []func(Opts) (Device, error){openCUDA, openHIP, openVulkan, openMetal} {
 		t0 := time.Now()
-		d, err := f(o)
+		d, err := f(enumerating(o))
 		if verbose {
 			name, api := "-", "-"
 			if d != nil {

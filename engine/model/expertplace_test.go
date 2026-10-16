@@ -223,32 +223,48 @@ func TestHybridPrefillMatchesTheHost(t *testing.T) {
 	}
 	want := prefill(host, nil)
 	host.Close()
-	m, err := Open(jlmOf(t, path), noTune, WithKVF16(false), WithExperts("host"), WithStreamTrial(false))
-	if err != nil {
-		t.Fatal(err)
+	// A streamed block's chunk runs its experts on the host too: its bank
+	// holds a token's selection, not a chunk's (emitGroupedMoE).
+	for _, where := range []string{"host", "card"} {
+		t.Run(where, func(t *testing.T) {
+			m, err := Open(jlmOf(t, path), noTune, WithKVF16(false), WithExperts(where), WithStreamTrial(false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			// Streamed, so the card arm's bank is a token's sheets even where
+			// the whole bank would fit.
+			g, err := tier.OpenWith(tier.WithDevices("gpu:0"), tier.WithDeviceTune(tier.TuneOff),
+				tier.WithConfig(func(c *tier.Config) { c.StreamExperts = true }))
+			if err != nil || g == nil {
+				noDevice(t, "gpu:0", err)
+			}
+			defer g.Close()
+			got := prefill(m, g)
+			if where == "card" && g.Stats().StreamBlocks == 0 {
+				t.Fatal("the card arm placed no streamed block")
+			}
+			st := g.Stats()
+			// Kimi-K3 leads with a dense block, so a streamed block's chunk is
+			// declined before anything has advanced and runs elsewhere; the
+			// chunk that reaches a streamed bank after a linear block has run
+			// is Qwen3.8-Flash-Next's (placement.md, "The split").
+			if where == "host" && st.HybridRows < len(prompt) {
+				t.Fatalf("%d rows ran their experts on the host in a batched chunk, want the prompt's %d",
+					st.HybridRows, len(prompt))
+			}
+			var num, den float64
+			for i := range want {
+				d := float64(got[i] - want[i])
+				num += d * d
+				den += float64(want[i]) * float64(want[i])
+			}
+			if nmse := num / den; nmse > 1e-5 || argmaxOf(got) != argmaxOf(want) {
+				t.Fatalf("%s prefill NMSE %.2e, argmax %d against the host's %d", where, nmse, argmaxOf(got), argmaxOf(want))
+			}
+			t.Logf("%d host rows, %d hybrid block-steps", st.HybridRows, st.HybridRuns)
+		})
 	}
-	defer m.Close()
-	g, err := tier.OpenWith(tier.WithDevices("gpu:0"), tier.WithDeviceTune(tier.TuneOff))
-	if err != nil || g == nil {
-		noDevice(t, "gpu:0", err)
-	}
-	defer g.Close()
-	got := prefill(m, g)
-	st := g.Stats()
-	if st.HybridRows < len(prompt) {
-		t.Fatalf("%d rows ran their experts on the host in a batched chunk, want the prompt's %d",
-			st.HybridRows, len(prompt))
-	}
-	var num, den float64
-	for i := range want {
-		d := float64(got[i] - want[i])
-		num += d * d
-		den += float64(want[i]) * float64(want[i])
-	}
-	if nmse := num / den; nmse > 1e-5 || argmaxOf(got) != argmaxOf(want) {
-		t.Fatalf("hybrid prefill NMSE %.2e, argmax %d against the host's %d", nmse, argmaxOf(got), argmaxOf(want))
-	}
-	t.Logf("%d hybrid rows, %d hybrid block-steps", st.HybridRows, st.HybridRuns)
 }
 
 // TestTopOneRouterRunsHybrid: Llama 4's top-1 sigmoid router, whose weight

@@ -739,12 +739,41 @@ func (g *devTier) cacheBlock(l *layer, n, k int) bool {
 	}
 	for m, dst := range [3]**resident{&l.gate, &l.up, &l.down} {
 		if got[m] != nil {
+			l.stream.plain[m] = *dst
 			*dst = got[m]
 		}
 	}
 	l.stream.initCache(n, l.stream.nExpert)
 	g.StreamCacheSize = max(g.StreamCacheSize, n)
 	return true
+}
+
+// dropCaches gives back expert caches sized after placement (cacheBlock),
+// one block at a time from the last, until n more bytes fit: a cache holds
+// copies of host pages and is the first thing to go when history or a block
+// needs the card. A block without its cache runs on the plain bank it was
+// placed on. It reports whether n fits. Callers hold g.mu, outside a
+// submission.
+func (g *devTier) dropCaches(n uint64) bool {
+	for li := len(g.layers) - 1; li >= 0 && !g.room(n); li-- {
+		l := g.layers[li]
+		if l == nil || l.stream == nil || !l.stream.cached() || l.stream.plain[2] == nil {
+			continue
+		}
+		g.quiesce()
+		for m, dst := range [3]**resident{&l.gate, &l.up, &l.down} {
+			if l.stream.plain[m] == nil {
+				continue
+			}
+			g.refund((*dst).bytes())
+			g.freeResident(*dst)
+			*dst, l.stream.plain[m] = l.stream.plain[m], nil
+		}
+		l.stream.uncache()
+		g.dropGraph()
+		g.CachesDropped++
+	}
+	return g.room(n)
 }
 
 // sizeAutoCaches is GPU.sizeAutoCaches on one device. Callers hold g.mu.
@@ -755,7 +784,7 @@ func (g *devTier) sizeAutoCaches() {
 	for _, l := range g.layers {
 		// A block whose experts carry biases keeps its plain bank: see
 		// cacheSlotsFor.
-		if l == nil || l.stream == nil || l.stream.cached() || l.stream.hybrid || l.down == nil ||
+		if l == nil || l.stream == nil || l.stream.cached() || l.stream.hybrid && g.NoHybridCache || l.down == nil ||
 			l.expGateB != nil || l.expUpB != nil || l.expDownB != nil {
 			continue
 		}
@@ -1425,9 +1454,12 @@ func (g *GPU) migrateKV(sid uint64, li int, k, v []float32, pos int, toDevice bo
 // (nn.SeqKVDevice); a mixed tier answers false and migrates in the flat layout.
 func (g *GPU) PerSequenceKV() bool {
 	g.mu.Lock()
-	ds := make([]*devTier, 0, len(g.devs))
+	// On the stack for any machine's count of devices.
+	var arr [16]*devTier
+	ds := arr[:0]
+	// g.own is by block: each device once.
 	for _, d := range g.own {
-		if d != nil {
+		if d != nil && !slices.Contains(ds, d) {
 			ds = append(ds, d)
 		}
 	}
@@ -1708,4 +1740,38 @@ func (g *GPU) RopeRows(width int) ([]float32, error) {
 		return nil, err
 	}
 	return unsafe.Slice((*float32)(unsafe.Pointer(&raw[0])), width*bs.p.RopeW()), nil
+}
+
+// CacheCoverage is, for every block with an expert cache, the share of its
+// counted selections that its hottest slots' worth of experts carry, at the
+// cache's size and at twice it: how much each block's routing a cache of
+// that size can hold, and what a bigger one would add. A measurement for
+// sizing caches by block; nil without caches. Not on a token's path.
+func (g *GPU) CacheCoverage() (at, twice []float64) {
+	for _, d := range g.devs {
+		d.mu.Lock()
+		for _, l := range d.layers {
+			if l == nil || l.stream == nil || !l.stream.cached() || len(l.stream.heat) == 0 {
+				continue
+			}
+			h := append([]uint32(nil), l.stream.heat...)
+			slices.SortFunc(h, func(a, b uint32) int { return int(b) - int(a) })
+			var tot, c1, c2 float64
+			n := len(l.stream.owner)
+			for i, v := range h {
+				tot += float64(v)
+				if i < n {
+					c1 += float64(v)
+				}
+				if i < 2*n {
+					c2 += float64(v)
+				}
+			}
+			if tot > 0 {
+				at, twice = append(at, c1/tot), append(twice, c2/tot)
+			}
+		}
+		d.mu.Unlock()
+	}
+	return at, twice
 }

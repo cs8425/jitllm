@@ -1,10 +1,9 @@
 package model
 
 import (
-	"os"
-	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
 
@@ -57,10 +56,7 @@ func (eg *evictGate) stagedPassRun(t *testing.T, dev string, pass int) ([][]floa
 // TestStagedPassGateDiscriminates.
 func TestStagedDecodePassesPastItsWidth(t *testing.T) {
 	eg := newEvictGate(t)
-	devs := []string{"cuda:0", "vulkan:0"}
-	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
-		devs = strings.Split(v, ",")
-	}
+	devs := testdevices.Specs("cuda:0", "vulkan:0")
 	for _, dev := range devs {
 		t.Run(dev, func(t *testing.T) {
 			wide, ws := eg.stagedPassRun(t, dev, 0)

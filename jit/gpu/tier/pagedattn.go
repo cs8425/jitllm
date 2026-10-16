@@ -74,6 +74,23 @@ type pagedScratch struct {
 	pf *pagedPrefill
 	// prefill says the current call is a prefill chunk that pf serves.
 	prefill bool
+	// The ragged call's run table (raggedprefill.go): ragRows slots, 0 when
+	// the decode plan takes every row; ragMap and ragOrder its host staging,
+	// pMap its device copy, and pRowDec/pRowDecW the decode descriptors
+	// with the table's rows emptied (descDec/descDecW staged).
+	ragRows int
+	// ragAlone says the table holds every row of the call (ragTable), so the
+	// decode plan does not run.
+	ragAlone bool
+	// ragStaged says the table runs the staged form (raggedprefill.go), and
+	// ragSt is its full and windowed descriptor sets' bases and variants.
+	ragStaged                              bool
+	ragSt                                  [2]ragStaged
+	ragMap                                 []uint32
+	ragOrder                               []int
+	pMap, pRowDec, pRowDecW                backend.Buf
+	pMapBytes, pRowDecBytes, pRowDecWBytes int
+	descDec, descDecW                      []uint32
 	// st is the current call's pass over evicted history (pagedstream.go), nil
 	// when every page it reads is resident.
 	st *pagedStream
@@ -373,6 +390,7 @@ func freePaged(pg *pagedScratch) {
 			b.Free()
 		}
 	}
+	pg.ragFree()
 	for _, b := range []backend.Buf{pg.part, pg.sc, pg.wt, pg.pRow, pg.pRowW, pg.kpeRot, pg.rotOff} {
 		if b != nil {
 			b.Free()

@@ -37,13 +37,16 @@ const Ext = ".jlm"
 var Magic = [8]byte{'J', 'I', 'T', 'L', 'L', 'M', 0, 0}
 
 // Version is the container revision, stored as a u32 at offset 8. Bump it for
-// any layout change: there is no backward compatibility, because a container
-// is rebuilt from its source in seconds. The version covers where bytes live as
+// any layout change, and add the migration from the version before it
+// (migrate.go): the reader opens only this version, and an older container
+// is upgraded by the chain of migrations (jitllm upgrade), since its source
+// may be gone -- the container is self-sufficient. The version covers where bytes live as
 // well as what they mean: a structure read with the wrong placement rules finds
 // an empty span, not an error (v8/v9 moved tensors into the dense region).
 //
 // Revisions, newest first, each of which a previous reader would misread:
 //
+//	v30  the audio tower's depthwise bias folded into RoleABNShift
 //	v29  a row table (RowTable) after the page arrays, read a row at a time,
 //	     and TypeIQ4NL
 //	v28  multi-token-prediction blocks kept after the trunk (Config.NMTP) and
@@ -67,7 +70,7 @@ var Magic = [8]byte{'J', 'I', 'T', 'L', 'L', 'M', 0, 0}
 //	     block, index) identity, a typed config and pre-tokenizer stages
 //	v5   Q6_K's payload is a 4-bit plus a 2-bit plane
 //	v3   no tensor is in GGUF layout
-const Version = 29
+const Version = 30
 
 // HeaderBytes is the fixed header. Everything after it is located by offset.
 // It is 192 because every offset in this header is u64; squeezing offsets
@@ -245,16 +248,20 @@ func (h *Header) encode(b []byte) {
 // (RULE 9), so every offset and length is checked against the file size
 // before anything slices with it: a malformed container is an error, never a
 // panic.
-func decodeHeader(b []byte, size uint64) (*Header, error) {
+func decodeHeader(b []byte, size uint64, want uint32) (*Header, error) {
 	if len(b) < HeaderBytes {
 		return nil, fmt.Errorf("jlm: %d bytes is shorter than the %d-byte header", len(b), HeaderBytes)
 	}
 	if [8]byte(b[0:8]) != Magic {
 		return nil, fmt.Errorf("jlm: not a jlm container (magic %q)", b[0:8])
 	}
-	if v := binary.LittleEndian.Uint32(b[8:]); v != Version {
+	if v := binary.LittleEndian.Uint32(b[8:]); v != want {
+		if want == Version && Upgradable(v) {
+			return nil, fmt.Errorf("jlm: container is version %d and this build reads %d; "+
+				"upgrade it in place: jitllm upgrade <file.jlm>", v, Version)
+		}
 		return nil, fmt.Errorf("jlm: container is version %d and this build reads %d; "+
-			"re-run `jitllm convert` (there is no backward compatibility, on purpose)", v, Version)
+			"re-run `jitllm convert` (no migration reaches it)", v, want)
 	}
 	le := binary.LittleEndian
 	h := &Header{

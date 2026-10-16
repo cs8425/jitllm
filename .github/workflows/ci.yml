@@ -20,8 +20,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # scripts/vet's allowlist is written against go1.27's vet (go1.26's does not
-  # report the finding it allows, and the script fails when it is absent).
+  # scripts/vet is plain go vet, every analyzer on and no allowlist.
   GO_VERSION: "1.27.x"
   # Five modules: the engine, server/, common/, ui/ and tui/.
   GO_SUMS: |
@@ -88,6 +87,33 @@ jobs:
           cache-from: type=gha
       - name: convert, serve and complete
         run: .github/scripts/docker-smoke.sh jitllm:ci "$RUNNER_TEMP/models"
+
+  # A PR whose commits were written against an old main and committed on a
+  # newer one deletes what the PRs merged in between added, and their tests go
+  # with their code. scripts/rewind blames the PR's deleted lines and fails on
+  # a hunk another PR added after this one was written, unless the PR
+  # description says `Removes: <path> (reason)`.
+  rewind:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.GO_SUMS }}
+      - name: no change of another PR is rewound
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags origin main
+          # The checker comes from main, so a branch that predates it (or
+          # edits it) is still judged by main's copy.
+          git worktree add "$RUNNER_TEMP/rewind-main" origin/main
+          go run -C "$RUNNER_TEMP/rewind-main" ./scripts/rewind -C "$GITHUB_WORKSPACE" -base origin/main -head "$HEAD_SHA" -event "$GITHUB_EVENT_PATH"
 
   # Formatting, module hygiene, and the checked-in protobuf code.
   check:

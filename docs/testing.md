@@ -91,8 +91,7 @@ PATH from the image's MinGW or Strawberry Perl. Windows-only test code uses
 build constraints or portable calls: the cross-process GPU test lock is
 `internal/testlock` (flock on Unix, LockFileEx on Windows), and
 `GOOS=windows ./scripts/vet` type-checks every test file for Windows from a
-Linux box; `scripts/vet` allows three more `unsafe.Pointer` findings there,
-the OS addresses of VirtualAlloc and MapViewOfFile (the script argues them).
+Linux box, with no allowlist: a vet finding fails the job.
 
 ## Getting the models
 
@@ -180,8 +179,6 @@ sweep by name and are never resolved.
 | `JITLLM_STEP_MIXTURE` | `model.TestStepAcrossSessionsMixture*` | comma-separated names or paths | Qwen3-MoE-4x0.6B and olmoe; a card that cannot place every block skips |
 | `JITLLM_ALLOC_MODELS` | `model.TestDecodeDoesNotAllocate` | comma-separated names or paths, each run beside the default | Llama-3.2-1B, olmoe and Qwen3.5-0.8B only |
 | `JITLLM_SLOW` | several `model` sweeps | `1` admits models over 2 GiB | small models only |
-| `JITLLM_STEP_DEVICES` | every `model` gate that sweeps backends (the step, scheduler, MLA, C6, vision, gpt-oss, Llama 4 and hybrid device gates, and the decode allocation gate) | comma-separated device specs, e.g. `cuda:0` | `cuda:0,vulkan:0,metal`; the allocation gate takes each backend's default device |
-| `JITLLM_MOVE_DEVICES` | `model.TestBlocksMoveBetweenDevices`, `model.TestMovePause`, `server.TestBlocksMoveBetweenDevicesThroughThePlacementService`, `server.TestAMoveRunsPastThePool`, `server.TestAMoveLandsBetweenTwoTokensOfAReply`, `tui.TestDemoRelocatesAStreamingReplyOnARealService`, `model.TestDecisionMovesBetweenCards`, `model.TestDecisionDistributes` | the two devices of one tier the blocks move between, e.g. `cuda:0,cuda:1` | `cuda:0,vulkan:1`: one card under two backends |
 | `JITLLM_MOVE_REPLY_MODEL` | `server.TestAMoveLandsBetweenTwoTokensOfAReply` | a `.jlm` whose reply outlasts its move's preparation | `Llama-3.2-1B-Instruct-Q4_K_M.jlm` |
 | `JITLLM_MOVE_PAUSE_MODEL` | `model.TestMovePause`, a measurement: the pause of a move between two devices, direct against through the host | a model name; opts in | the test skips |
 | `JITLLM_POSTNORM_MODELS` | `model.TestPostNormDeviceErrorIsAmplification` | comma-separated GGUF names in the directory, any model whose last block has a post-FFN norm | OLMo 2 1B and EXAONE 4.0 1.2B |
@@ -192,10 +189,66 @@ measurement, not a model choice.
 
 ## Choosing WHICH device
 
-A gate that wants exactly one device names it with a selector: `gpu:0`,
-`cuda:0`, `vulkan:1`. A bare `gpu`, `cuda` or `vulkan` is every device of that
-backend (`tier.ParseDevices`), so on a box with eight cards it opens eight, and
-on a laptop with a discrete card and an iGPU `gpu` and `vulkan` open both.
+`JITLLM_TEST_DEVICES` is the one device selection for every test binary in the
+repository that opens a device: a comma-separated list of `cuda:N`, `vulkan:N`,
+`hip:N` and `metal` (a bare backend name is refused, since "every Vulkan
+device" is what a selection exists to say no to).
+
+    JITLLM_TEST_DEVICES=cuda:2,vulkan:2 ./scripts/cap 8G -- go test ./engine/model -run TestSchedulerOnDevice
+
+Unset, every test opens what it always opened. Set, no test opens any other
+device. Ordinals are the backend's own: a CUDA ordinal is the driver's (under
+`CUDA_VISIBLE_DEVICES=2` the card is `cuda:0`; without it, `cuda:2`), a Vulkan
+index is the loader's. Vulkan ignores `CUDA_VISIBLE_DEVICES`, which is why
+the selection exists: on an eight-card box a gate runs on the card it locked
+(`flock ~/gpu<N>.lock`), and the selection is what keeps its Vulkan opens there.
+
+How it holds (`internal/testdevices`, `backend.Restrict`):
+
+- Every test binary that opens a device installs the selection
+  (`testdevices.Install`, in a `TestMain`; `TestEveryPackageThatOpensADeviceInstallsTheSelection`
+  fails for a package that does not). The backend then asks it before every
+  device open, so a device outside it is not opened at all.
+- A search for devices (`backend.Open`, a bare `gpu`, `auto`, `all`, `cuda`,
+  `vulkan`, a loop over ordinals marked `Opts.Enumerating`) is narrowed to the
+  selection and the default pick of a backend is its first selected device.
+- A test that NAMES a device outside the selection (`vulkan:0` against
+  `cuda:2`) is refused and recorded, and the binary's `TestMain` fails
+  (`testdevices.Fail`). `TestARefusalIsAViolationOnlyWhenTheTestNamedTheDevice`
+  is the violation run, and `TestOnlyTheSelectedDevicesOpen` asks every ordinal
+  the host has to open and demands that only the selected ones did.
+- A gate that needs more devices than are selected (blocks moved between two
+  cards, four-device splits) skips naming the selection; one whose devices are
+  part of what it asserts skips unless they are selected
+  (`testdevices.Require`). `cuda:2,vulkan:2` is the pair for the move gates.
+
+One thing a selection cannot do: with a Vulkan device selected, the loader's
+enumeration makes the NVIDIA driver attach a graphics context to card 0 for
+as long as the process lives, whichever card is selected (measured with
+`nvidia-smi`: an enumeration-only process shows a `G` entry on GPU 0). A
+selection with no Vulkan device enumerates nothing and touches no other card;
+a selection with one (`vulkan:N`) pays that context on card 0. CUDA opens are
+exact.
+
+A test takes its device list from the helpers, never from a literal:
+`Specs(defaults...)` for a sweep, `One(def)` for one device, `Spec(def)` for a
+list a tier places blocks over, `Take(t, n, def)` for n distinct devices,
+`Like(t, spec)` for one backend's selected device, `Ordinal(t, backend, def)`,
+`Has(t, backend, ord)` for a loop over ordinals and `Within(candidates)`.
+
+The GPU test lock (`internal/testlock`) follows the selection: unset, one file
+for the whole box; set, one file per selected device, taken in sorted order, so
+gates on different cards do not wait for each other and two on one card do.
+`cuda:2` and `vulkan:2` are two names for one card and two lock files; two runs
+that share a card under different names are not serialised, so give them the
+same list.
+
+The per-test variables this replaces are gone: `JITLLM_STEP_DEVICES`,
+`JITLLM_MOVE_DEVICES`, `JITLLM_MIX_DEVICES`, `JITLLM_SPEC_DEVICES`,
+`JITLLM_FOUR_DEVICES`, `JITLLM_PAGED_VK`, `JITLLM_HYBRID_DEVICES`,
+`JITLLM_MOE_DEVICES`, `JITLLM_REF_DEVICES`, `JITLLM_SPLIT_DEVICE` and
+`JITLLM_AB_DEVICE`. No script read them, so there is no alias. A stale one is
+ignored, not an error.
 
 `jit/gpu/backend`'s tests open their devices through `backend.Open`, which
 takes a discrete card before an integrated one -- so on a laptop with both, the
@@ -206,8 +259,6 @@ which reads no environment) maps these onto the `backend.Opts` `Open` uses:
 |---|---|---|
 | `JITLLM_VK_DEVICE` | the Vulkan device every `backend.Open` takes, by index or name substring (`1` is the Iris Xe beside the RTX here) | the default rule's pick |
 | `JITLLM_ROCM` | the ROCm library directory the HIP backend loads from (`backend`, `lowertest`, `hip` and `server` tests; `jitllm` and `jitllmd` too); with no AMD card, comgr alone runs the offline code object gate (docs/design/amd-hip.md) | the default search: the loader, `/opt/rocm/lib`, `/opt/rocm-*/lib` |
-| `JITLLM_FOUR_DEVICES` | the four devices `model.TestSchedulerOnSplitPlacements*`'s four-device arms split the model over, as specs (`cuda:0,cuda:1,vulkan:2,vulkan:3`) | every CUDA device, then each Vulkan GPU that is not one of them (by UUID); fewer than four skips naming them |
-| `JITLLM_PAGED_VK` | the Vulkan devices the paged-attention gates (`TestPaged*`) sweep, by index; `none` for no Vulkan | every Vulkan GPU, a software rasteriser (llvmpipe) left out |
 | `JITLLM_VK_MAXGROUPS` | workgroups per Vulkan dispatch, below the device's own `maxComputeWorkGroupCount`; `7` sends nearly every launch in the suite through a split dispatch | the device's own |
 | `JITLLM_VK_VALIDATION` | the prefix the Khronos validation layer is installed under, for `backend.TestSplitLaunchesAreValidVulkanUsage`; `apt-get download vulkan-validationlayers && dpkg-deb -x` the `.deb` into DIR and pass `DIR/usr` | `/usr`, else the test skips |
 
@@ -215,10 +266,9 @@ which reads no environment) maps these onto the `backend.Opts` `Open` uses:
 
 The `model` device gates take the same limit, as `tier.WithVulkanMaxGroups`:
 `JITLLM_VK_MAXGROUPS` reaches every tier the step gates
-(`TestStepAcrossSessions*`, whose devices `JITLLM_STEP_DEVICES` names) and the
+(`TestStepAcrossSessions*`) and the
 default-device gates open (`TestSchedulerOnDevice*`, `TestSlidingWindowRunsOnTheDevice`
-and every other caller of `swaTier`), and `JITLLM_TEST_DEVICES` names the
-default-device gates' device, as a `tier.WithDevices` spec:
+and every other caller of `swaTier`). `JITLLM_TEST_DEVICES` names their device:
 
     JITLLM_TEST_DEVICES=vulkan:1 JITLLM_VK_MAXGROUPS=7 ./scripts/cap 8G -- go test ./engine/model -run 'TestSchedulerOnDevice' -count=1
 

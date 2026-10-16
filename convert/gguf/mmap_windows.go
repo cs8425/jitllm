@@ -47,7 +47,7 @@ func mmapFile(path string, _ bool) ([]byte, func() error, error) {
 		syscall.CloseHandle(h)
 		return nil, nil, fmt.Errorf("gguf: MapViewOfFile %s (%d bytes): %w", path, n, err)
 	}
-	b := unsafe.Slice((*byte)(unsafe.Pointer(addr)), int(n))
+	b := unsafe.Slice((*byte)(unsafe.Add(nil, addr)), int(n))
 	return b, func() error {
 		err := syscall.UnmapViewOfFile(addr)
 		if cerr := syscall.CloseHandle(h); err == nil {

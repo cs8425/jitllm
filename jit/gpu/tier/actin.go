@@ -23,6 +23,7 @@ func (g *devTier) fuseActIn(l *layer) {
 	for _, m := range []*mv{&l.mvq, &l.mvk, &l.mvv, &l.mvo, &l.mvg, &l.mvu, &l.mvd} {
 		m.resIn, m.gatedIn, m.kernIn, m.resActIn = nil, nil, nil, nil
 	}
+	l.mvu.gate2In = nil
 	if g.bs == nil {
 		return
 	}
@@ -46,6 +47,14 @@ func (g *devTier) fuseActIn(l *layer) {
 		pf = 0
 	}
 	norm.Prefetch, quant.Prefetch = pf, pf
+	// The FFN site's gate2in recipe (recipe.go): Gate2 with the FFN norm's
+	// prologue, the norm, gate and up in one launch. Built wherever Gate2 is,
+	// whatever the verdict, so a forced recipe and the trial both find it.
+	if mu := l.mvu; mu.gate2 != nil && l.nFFN != nil && !ungatedFFN(p) {
+		s := kernels.MatVecShape{Center: g.center, T: mu.q, K: mu.k, Rows: mu.rows, Split: mu.split,
+			GroupSplit: mu.group, Rowt: 1, Gate2: true, GateAct: p.Act, In: norm}
+		l.mvu.gate2In = g.inKernel(s)
+	}
 	// A site runs the prologue where the caller forced it (ActInSites) or
 	// where tuneActIn measured it faster than the two launches on this card;
 	// actInTrial builds every candidate for that measurement.

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jitllm/jitllm/engine/nn"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -26,6 +27,7 @@ var lookupModels = []string{
 	"Llama-3.2-1B-Instruct-Q4_K_M.gguf",
 	"synth-qwen35-hybrid-mtp.gguf",
 	"synth-mamba2.gguf",
+	"synth-qwen4exp.gguf",
 }
 
 // copyPrompt asks for a paragraph again: what prompt lookup exists for.
@@ -226,10 +228,7 @@ func TestSpecLookupGateDiscriminates(t *testing.T) {
 // TestSpecGreedyOnDevice judges a flip: inside the band it is a tie.
 func TestSpecLookupOnDevice(t *testing.T) {
 	n := specTokens()
-	specs := []string{"cuda:0", "vulkan:0", "metal"}
-	if v := os.Getenv("JITLLM_SPEC_DEVICES"); v != "" {
-		specs = strings.Split(v, ",")
-	}
+	specs := testdevices.Specs("cuda:0", "vulkan:0", "metal")
 	for _, name := range lookupModels {
 		t.Run(strings.TrimSuffix(name, ".gguf"), func(t *testing.T) {
 			m := openLookupModel(t, name, noTune, WithKVF16(false))
@@ -245,6 +244,7 @@ func TestSpecLookupOnDevice(t *testing.T) {
 					defer g.Close()
 					ran++
 					var accepted int64
+					heads := 0
 					for _, text := range lookupPrompts[:2] {
 						prompt := m.Vocab.Encode(text, true)
 						n := lookupTokens(m, prompt, n)
@@ -262,6 +262,7 @@ func TestSpecLookupOnDevice(t *testing.T) {
 						// rollback both keeps and rejects rows.
 						got, ss := lookupGreedy(t, m, prompt, n, g, specFaultNone, oracleFor(name, want))
 						accepted += ss.Accepted
+						heads += ss.DeviceHeads
 						if i := firstDiff(got, want); i >= 0 {
 							gap, pert := devFlip(t, m, g, prompt, want[:i], want[i], got[i])
 							if gap > pert {
@@ -277,6 +278,11 @@ func TestSpecLookupOnDevice(t *testing.T) {
 					}
 					if accepted == 0 {
 						t.Fatalf("nothing accepted on %s: the speculation never ran", spec)
+					}
+					// A hyper-connected model's verifications project on the
+					// device after the host's collapse (rowsHead).
+					if m.Cfg.streamHead() && heads == 0 {
+						t.Fatalf("no verification's head ran on %s: the host projected every one", spec)
 					}
 				})
 			}

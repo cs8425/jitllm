@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -36,6 +37,9 @@ func TestVulkanMaxBufferIsTheStorageRange(t *testing.T) {
 	}
 	checked := 0
 	for _, in := range infos {
+		if !testdevices.Has(t, "vulkan", in.Index) {
+			continue
+		}
 		d, err := OpenVulkan(strconv.Itoa(in.Index))
 		if err != nil {
 			t.Logf("vulkan:%d would not open: %v", in.Index, err)
@@ -63,6 +67,7 @@ func TestVulkanMaxBufferIsTheStorageRange(t *testing.T) {
 // read (not the zero of a failed selector), at least the 256 MiB every Apple
 // GPU allows, and no more than the working set the driver recommends.
 func TestMetalMaxBufferIsRead(t *testing.T) {
+	testdevices.Require(t, "metal")
 	d, err := OpenMetalWith(Opts{})
 	if err != nil || d == nil {
 		t.Skipf("no Metal device: %v -- this gate proved nothing", err)

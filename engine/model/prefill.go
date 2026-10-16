@@ -41,6 +41,35 @@ func (s *State) Prefill(tokens []int32) ([]float32, error) {
 	return s.prefillInto(0, tokens)
 }
 
+// prefillBidir is Prefill over a prompt whose rows all attend to each other
+// (a non-causal decoder's, vllm-d3's): PrefillMixed's one bidirectional run,
+// through the token path, so a warm prompt allocates nothing (the mixed
+// path's per-row sources do).
+func (s *State) prefillBidir(tokens []int32) ([]float32, error) {
+	defer s.m.enterPager()()
+	if s.batched {
+		return nil, errBatch{}
+	}
+	if err := s.retireErr; err != nil {
+		s.retireErr = nil
+		return nil, err
+	}
+	n := len(tokens)
+	if n > nn.MaxDevicePrefillChunk {
+		return nil, fmt.Errorf("model: a bidirectional prompt of %d rows is longer than one %d-row chunk",
+			n, nn.MaxDevicePrefillChunk)
+	}
+	p := s.seqPos(0)
+	s.bidir = append(s.bidir[:0], nn.KeyRun{Lo: p, Hi: p + n})
+	defer func() {
+		if kd, ok := s.ld.(nn.KeyRunDevice); ok {
+			kd.SetKeyRuns(nil, nil)
+		}
+		s.bidir = s.bidir[:0]
+	}()
+	return s.prefillInto(0, tokens)
+}
+
 // PrefillSeq runs a prompt into ROW slot of a batch session, leaving the other
 // rows untouched.
 //
@@ -212,6 +241,23 @@ func (s *State) PrefillSeqMixed(slot int, spans ...Span) ([]float32, error) {
 func (s *State) bidirRuns(slot int, spans []Span) error {
 	c := s.c
 	p := s.seqPos(slot)
+	if s.bidirAll {
+		// The whole prompt is one run (a non-causal decoder's, its pictures'
+		// rows among the text's).
+		n := 0
+		for _, sp := range spans {
+			n += sp.n(c.NEmbd)
+		}
+		if s.batched {
+			return fmt.Errorf("model: PrefillMixed: a bidirectional span in a batch slot is not implemented")
+		}
+		if n > nn.MaxDevicePrefillChunk {
+			return fmt.Errorf("model: PrefillMixed: a bidirectional prompt of %d rows is longer "+
+				"than one %d-row chunk", n, nn.MaxDevicePrefillChunk)
+		}
+		s.bidir = append(s.bidir, nn.KeyRun{Lo: p, Hi: p + n})
+		return nil
+	}
 	for _, sp := range spans {
 		n := sp.n(c.NEmbd)
 		if sp.Bidir && n > 0 {
@@ -385,14 +431,15 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 	// One token is decode; the batched path would allocate megabytes to beat
 	// it by nothing. Single-sequence only, because Forward writes row 0; a
 	// batch slot takes the chunked path at any length.
-	if !s.batched && total == 1 && s.emb == nil && len(s.deep) == 0 {
+	if !s.batched && (total == 1 || total <= s.forwardRowsFor() && src == nil) && s.emb == nil && len(s.deep) == 0 {
 		var lg []float32
 		var err error
-		s.tok = -1
-		if rowIDs != nil {
-			s.tok = rowIDs[0]
-		}
+		s.forwardPrompts++
 		for i := range total {
+			s.tok = -1
+			if rowIDs != nil {
+				s.tok = rowIDs[i]
+			}
 			if lg, err = s.forward(func() error {
 				if err := s.fillRow(src, ids, i, s.x); err != nil {
 					return err
@@ -401,7 +448,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 				if c.PLEDim != 0 {
 					tok := int32(0) // a row with no id takes token 0's; see ple.go
 					if rowIDs != nil {
-						tok = max(rowIDs[0], 0)
+						tok = max(rowIDs[i], 0)
 					}
 					return s.pleInputs(s.ple, tok, s.x)
 				}
@@ -443,9 +490,11 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 	// The prefill pool, where the JIT has one (nn.Config.PrefillCores). A
 	// mixture stays on the decode pool: its expert GEMMs are a few routed
 	// tokens each and a wider pool measured slower (engine/nn/prefillcores.go).
+	// Chunk by chunk it is placed beside any session decoding (serving.go).
+	var place *prefillPlace
 	if c.NExpert == 0 {
-		s.jit.BeginPrefill()
-		defer s.jit.EndPrefill()
+		place = &prefillPlace{s: s}
+		defer place.end()
 	}
 	// headDone says the last chunk's submission ran the output projection on
 	// its last row (the folded head), so s.logits are filled and the tail call
@@ -467,6 +516,9 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 			return nil, ErrPrefillInterrupted
 		}
 		ps.before(s.seqPos(slot))
+		if place != nil {
+			place.at()
+		}
 		// Asked per chunk, not once: while the tuner is cycling, successive
 		// chunks deliberately use different widths.
 		width := s.jit.PrefillChunk()
@@ -502,7 +554,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 		if len(s.bidir) > 0 && !s.bidirCutFault {
 			n = min(s.bidirChunk(s.seqPos(slot), n), total-base)
 		}
-		chunkBidir := s.bidirIn(s.seqPos(slot), n)
+		chunkBidir := bidir || s.bidirIn(s.seqPos(slot), n)
 		lastBase = base
 		p0 := s.seqPos(slot)
 		s.relocateFor(p0 + n)
@@ -584,7 +636,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 				if err := fill(); err != nil {
 					return err
 				}
-				s.q4eExpand(s.bx[:n*c.ResidW()], n)
+				s.q4eExpandAt(s.bx[:n*c.ResidW()], n, base)
 				return nil
 			}
 		}
@@ -709,7 +761,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 					}
 				}
 				s.layerInputs(s.bple[:n*c.pleWidth()])
-				if s.bidirTell(p0, n) && s.ld.Layers(li, hi, p0, n, s.bx[:n*c.ResidW()], s.bcs[:n*c.RopeW()],
+				if s.callTell(p0, n) && s.ld.Layers(li, hi, p0, n, s.bx[:n*c.ResidW()], s.bcs[:n*c.RopeW()],
 					s.bswaTable(n, c.NRotSWA), fh) {
 					headDone = fh != nil
 					s.addDeep(hi-1, base, n)
@@ -852,7 +904,7 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 			s.emb.collect(s, base, n)
 		}
 		if s.rowTap != nil {
-			s.rowTap(p0, s.bx[:n*c.NEmbd])
+			s.rowTap(p0, s.bx[:n*c.ResidW()])
 		}
 		s.advance(slot, n)
 		// The last chunk's last row is the only one the caller can use, so it
@@ -883,7 +935,10 @@ func (s *State) prefillSrc(slot int, src []func(dst []float32) error, ids []int3
 			}
 			copy(s.x, s.bx[(n-1)*c.NEmbd:n*c.NEmbd])
 		}
-		if c.Q4E() && base+n == len(src) {
+		if c.Q4E() && base+n == total {
+			if s.rows != nil {
+				s.rows.resBase = base
+			}
 			if err := s.q4eCollapse(s.bx[:n*c.ResidW()], n); err != nil {
 				return nil, err
 			}
@@ -1232,6 +1287,9 @@ func (s *State) hostRows(li, slot, base, p0, n, chunkRows int, bidir bool) error
 		s.growQ4E(chunkRows)
 		x := s.bx[:n*c.ResidW()]
 		if c.NGramAt(li) {
+			if s.rows != nil {
+				s.rows.ngBase = base
+			}
 			if err := s.ngramApply(li, l, x, n, nil, func(int) (*State, int) { return s, slot },
 				func(i int) int32 { return s.q4.rid[i] }); err != nil {
 				return err
@@ -1636,7 +1694,7 @@ func (s *State) pickOnHost() bool {
 	if q, ok := kernels.QuantOf(w.typ); ok {
 		sl = max(kernels.DSlots(q), 1)
 	}
-	var tmp [8]float32
+	tmp := s.pickTmp[:]
 	if sl > len(tmp) {
 		return false
 	}
@@ -1645,13 +1703,27 @@ func (s *State) pickOnHost() bool {
 		if id < 0 || lo+sl > w.rows {
 			return false
 		}
-		v := *w.packed
+		v := &s.pickView
+		*v = *w.packed
 		v.Stride, v.Row = max(v.Stride, w.rows), v.Row+lo
-		if !s.jit.MatVecPacked(tmp[:sl], w.typ, &v, s.h, sl, w.k) {
+		if !s.jit.MatVecPacked(tmp[:sl], w.typ, v, s.h, sl, w.k) {
 			return false
 		}
 		s.HostPickVals[j] = tmp[int(id)-lo]
 	}
 	s.HostPicked = true
 	return true
+}
+
+// forwardRowsFor is the longest prompt run through the decode path: the
+// caller's WithPrefillForwardRows, else hostRowsByRow once a device has run
+// this model's experts on the host, else one.
+func (s *State) forwardRowsFor() int {
+	switch {
+	case s.m.opt.forwardRowsSet:
+		return s.m.opt.forwardRows
+	case s.m.hostExperts.Load():
+		return hostRowsByRow
+	}
+	return 1
 }

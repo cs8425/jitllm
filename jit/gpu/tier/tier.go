@@ -34,6 +34,9 @@ type resident struct {
 	k         int
 	t         kernels.Quant
 	ok        bool // false = declined, do not retry
+	// why is the decline's reason, given again to whoever asks for the
+	// declined tensor later, so a second offer names it too.
+	why string
 	// shared says one buffer serves several blocks: a streamed mixture's
 	// compact expert bank, live only between a block's suspension and its own
 	// FFN. The per-block free walk must skip it and must not refund it; see
@@ -105,6 +108,8 @@ type kernKey struct {
 	// one more parameter and a different output, so its own entry.
 	gated bool
 	act   kernels.ActKind
+	// gate2 is a Gate2 matvec: the gate's weight as a second stream.
+	gate2 bool
 }
 
 // chooseSplit picks how many threads share a row: the fallback table when the
@@ -169,6 +174,25 @@ type Config struct {
 	// their prologue (kernels.ActIn): the A/B arm and bisection switch for
 	// the operand prologue alone. NoFuse turns it off too.
 	NoActFuse bool
+	// NoAddNormFold keeps a prompt chunk's block-end residual add a launch
+	// of its own instead of folding it into the next block's attention norm
+	// (the binary16 GEMM path's add-and-norm kernel): the A/B arm.
+	NoAddNormFold bool
+	// GateUp2 runs a dense gated FFN's gate and up as one Gate2 matvec
+	// (kernels.MatVecShape.Gate2): each workgroup sums its rows of both
+	// matrices over the one operand and writes act(gate)*up: the bits the
+	// gate's launch and up's gated launch write on PTX (kernels.Gate2Exact),
+	// the reduction-order band elsewhere. On by default, taken per shape where
+	// this device's tuner finds it faster (tuneFFN).
+	GateUp2 bool
+	// QKVGemm runs a prompt chunk's q, k and v as one GemmVoltaSegments grid
+	// instead of three binary16 GEMMs (each free to split k and reduce). Off
+	// by default: on a V100 it read 0.992-0.994 of the three on Llama-3.2-1B
+	// (gpu-kernels.md, "q, k and v as one prompt GEMM grid").
+	QKVGemm bool
+	// GateUp2Force runs Gate2 wherever the shape has it, whatever this
+	// device's tuner chose (gateUp2Pick): the A/B arm and the gates.
+	GateUp2Force bool
 	// ActInPrefetch is how many weight words each thread of an operand-prologue
 	// matvec prefetches before its prologue (kernels.ActIn.Prefetch): 0 is the
 	// default (8), -1 none.
@@ -282,6 +306,10 @@ type Config struct {
 	// kernels.FlashPrefillTile on Metal -- the other arm of those kernels'
 	// gates and measurements.
 	NoFlashPrefill bool
+	// NoRagPrefill keeps a ragged step's prompt chunks on the decode plan, a
+	// row at a time, instead of the run-table flash prefill
+	// (raggedprefill.go) -- the other arm of its gates and measurements.
+	NoRagPrefill bool
 	// SpillingTiles lets the batched GEMM run a tile whose kernel spills
 	// registers to local memory. By default a tile the device's compiler
 	// reports spilling (backend.KernelResources.SpillBytes) is passed over
@@ -467,6 +495,29 @@ type Config struct {
 	// instead of running its experts on the host, which is that block's
 	// default (GPU.AutoStream).
 	NoHybrid bool
+	// NoSplitRows runs every expert of a hybrid block's step of several rows
+	// on the host, as before the split covered them: the control arm of
+	// streamBank.splitRows, which runs the rows' cached experts on the card.
+	NoSplitRows bool
+	// NoHybridCache gives a hybrid block no expert cache on the card. With
+	// one (the default, sized from the room left after placement), the
+	// experts the cache holds run on the card while the host runs the rest
+	// of the selection beside them, and the cache keeps the block's most
+	// selected experts (streamBank.split).
+	NoHybridCache bool
+	// SplitAdmit is how many experts a hybrid block's cache takes in a
+	// token at most; 0 is 2.
+	SplitAdmit int
+	// SplitSwaps is how many occupied cache slots change hands in a token,
+	// over every block; 0 is 8, negative none. A sheet sent is a host copy
+	// and a transfer on the token's path. On Qwen3.8-Flash-Next over a V100,
+	// alternating, warm: 8 read 22.2 and 22.7 tok/s, 2 read 17.1 and 20.2,
+	// none 20.3 and 20.4.
+	SplitSwaps int
+	// SplitPredict is how many experts a hybrid block's cache takes in ahead
+	// of its router, predicted by its router over the block before's row; 0
+	// (the default) predicts nothing.
+	SplitPredict int
 	// NoAutoStream leaves a mixture block that no device can hold resident
 	// on the host, as before GPU.AutoStream, instead of streaming it.
 	NoAutoStream bool
@@ -496,6 +547,16 @@ type Config struct {
 	// PersistGrid caps a persistent kernel's grid below the co-residency
 	// limit; zero takes the limit, or the widest launch's groups when fewer.
 	PersistGrid int
+	// GateUpFuse runs a dense gated FFN's gate and up as one launch over
+	// their shared operand (kernels.MatVecSegments) and has down form
+	// act(gate)*up and quantize it in its prologue: three launches where there
+	// were four, every row reduced as before. Off by default.
+	GateUpFuse bool
+	// FFNForm forces the recipe every dense gated FFN runs (recipe.go):
+	// FFNTuned, the zero value, takes the per-shape verdict tuneFFN timed on
+	// this card, or Gate2 where nothing was timed. A forced recipe a block
+	// cannot express runs the next one down the chain (gate2in, gate2, two).
+	FFNForm FFNForm
 	// NoGraph issues the token's launches one driver call at a time instead of
 	// replaying a captured graph: the other arm of that comparison, a field so
 	// both arms can be live in one process.
@@ -618,6 +679,11 @@ type Stats struct {
 	// reserved none. A ReservedPrompt narrower than Config.PromptRows is the
 	// reservation halved to fit.
 	ReservedPrompt, ReservedStep int
+	// RowsSteps counts the ragged steps (LayersRows) the device ran and
+	// RowsPadded the rows of padding they ran beside their own: a step whose
+	// width was refused runs in the next wider scratch built, a 3-row
+	// verification in the 512-row prompt scratch.
+	RowsSteps, RowsPadded int
 	// TowerRows is the rows the device's tower blocks are built for
 	// (visrows.go): a picture's, rounded up, never the tower's largest grid
 	// unless a picture asked for it. 0 with no tower block placed.
@@ -698,7 +764,21 @@ type Stats struct {
 	// launches that carried decode's fusions over every token: q/k/v in one
 	// launch, the residual added by the projection, and act(gate)*up written
 	// by the up projection.
+	// GateUpFused counts dense gated FFNs whose gate and up ran as one
+	// launch and whose down formed act(gate)*up (Config.GateUpFuse).
+	GateUpFused int
+	// GateUpWhy is why the last block's gate and up could not be fused.
+	GateUpWhy                              string
 	RagQKVFused, RagResFused, RagGateFused int
+	// GateUp2Runs counts gated FFNs whose gate and up ran as one Gate2
+	// launch (Config.GateUp2).
+	GateUp2Runs int
+	// Gate2InRuns counts gated FFNs whose norm, gate and up ran as one
+	// launch (the gate2in recipe).
+	Gate2InRuns int
+	// FFNTimed and FFNKept count the FFN shape keys tuneFFN decided on this
+	// card and those whose verdict is not the device's default recipe.
+	FFNTimed, FFNKept int
 	// PersistLaunches counts persistent kernels launched (Config.Persist),
 	// PersistParts the per-op launches they ran, PersistPhases their
 	// grid-barrier-separated phases, PersistCompiles the compositions built
@@ -742,6 +822,12 @@ type Stats struct {
 	// that quantized for the int8 matvec (QuantizeAct). Each is a conversion
 	// launch, and a pass over the float row, that did not run.
 	NormF16, ActF16Fused, QuantActs int
+	// AddNormFolded counts block-end residual adds a prompt chunk folded
+	// into the next block's attention norm (Config.NoAddNormFold).
+	AddNormFolded int
+	// QKVGemm counts prompt chunks' q/k/v projections run as one
+	// GemmVoltaSegments grid (Config.QKVGemm).
+	QKVGemmRuns int
 	// KVPrewarmPages counts pages a pool grew ahead of its history
 	// (PrewarmKV): the growth a State's first prompt no longer pays.
 	KVPrewarmPages int
@@ -846,6 +932,28 @@ type Stats struct {
 	// HybridRows counts rows of batched chunks whose experts ran on the host.
 	HybridRows int
 	THybrid    time.Duration
+	// SplitRuns counts hybrid block-steps that ran part of their selection
+	// on the card from its expert cache (streamBank.split), SplitHits the
+	// experts run there, SplitAdmits the experts the caches took in, and
+	// TSplitHost the host's share of those steps' wall.
+	// CachesDropped counts expert caches given back for room (dropCaches),
+	// and CacheBytes is what the caches sized after placement hold now.
+	CachesDropped                     int
+	CacheBytes                        uint64
+	SplitRuns, SplitHits, SplitAdmits int
+	// SplitRowSteps counts the block-steps of several rows whose experts were
+	// split between the cache and the host (streamBank.splitRows).
+	SplitRowSteps int
+	// SplitQueued counts admitted sheets sent on the copy queue beside the
+	// launches (backend.Uploader) rather than in their order.
+	SplitQueued int
+	// SplitPredicted counts the experts sent ahead on a prediction.
+	SplitPredicted int
+	TSplitHost     time.Duration
+	// TLateWrite is the wall of writing the host's expert sum back after
+	// the card's queued work (the hits, the shared expert), and TAdmit of
+	// taking experts into the caches.
+	TLateWrite, TAdmit time.Duration
 	// StreamCacheSize is the largest expert cache a block was given, in
 	// sheets: the check that an auto-sized cache is the size intended.
 	StreamCacheSize int
@@ -965,6 +1073,9 @@ type Stats struct {
 	// RecZeroSource counts the bytes of zeros those copies read, uploaded
 	// once a zeroing.
 	RecZeroSource uint64
+	// RecZeroHost counts seat zeroings written from the host because the
+	// kept zeros could not be had on the device (recZeroLayers).
+	RecZeroHost int
 	// PagedStagedLaunches counts decode attentions that ran the staged
 	// kernels rather than FlashDecodeKV (kernels.ChooseDecodePlan).
 	PagedStagedLaunches int
@@ -980,6 +1091,13 @@ type Stats struct {
 	// kernels.FlashPrefill80, scores, softmax and accumulate in one kernel
 	// on m16n8k16 (sm_80 on).
 	FlashPrefill80 int
+	// RagPrefills counts run-table prefill launches inside ragged steps
+	// (raggedprefill.go): the selection check that a step's prompt chunks
+	// attended as a prefill rather than through the decode plan.
+	RagPrefills int
+	// RagForms counts batched scratches built with a flash prefill that has a
+	// run-table form: where it is 0, ragged steps keep the decode plan.
+	RagForms int
 	// PagedPrefillPasses counts the passes those launches ran over a history
 	// longer than one launch attends -- the selection check for the fold.
 	PagedPrefillPasses int
@@ -1145,6 +1263,8 @@ func (s *Stats) add(o Stats) {
 	s.ReservedPrompt = max(s.ReservedPrompt, o.ReservedPrompt)
 	s.TowerRows = max(s.TowerRows, o.TowerRows)
 	s.ReservedStep = max(s.ReservedStep, o.ReservedStep)
+	s.RowsSteps += o.RowsSteps
+	s.RowsPadded += o.RowsPadded
 	s.ScratchRefused += o.ScratchRefused
 	s.PromptSplits += o.PromptSplits
 	s.RecBytes += o.RecBytes
@@ -1155,6 +1275,10 @@ func (s *Stats) add(o Stats) {
 	s.VoltaMV += o.VoltaMV
 	s.SpillRefused += o.SpillRefused
 	s.RagGroupMV += o.RagGroupMV
+	s.GateUpFused += o.GateUpFused
+	if o.GateUpWhy != "" {
+		s.GateUpWhy = o.GateUpWhy
+	}
 	s.RagQKVFused += o.RagQKVFused
 	s.RagResFused += o.RagResFused
 	s.PersistLaunches += o.PersistLaunches
@@ -1168,6 +1292,10 @@ func (s *Stats) add(o Stats) {
 		s.PersistWhy = o.PersistWhy
 	}
 	s.RagGateFused += o.RagGateFused
+	s.GateUp2Runs += o.GateUp2Runs
+	s.Gate2InRuns += o.Gate2InRuns
+	s.FFNTimed += o.FFNTimed
+	s.FFNKept += o.FFNKept
 	s.RagHeadOne += o.RagHeadOne
 	s.SampleReads += o.SampleReads
 	s.PickReads += o.PickReads
@@ -1193,6 +1321,8 @@ func (s *Stats) add(o Stats) {
 	s.GemmDeep += o.GemmDeep
 	s.GemmInt8 += o.GemmInt8
 	s.NormF16 += o.NormF16
+	s.AddNormFolded += o.AddNormFolded
+	s.QKVGemmRuns += o.QKVGemmRuns
 	s.ActF16Fused += o.ActF16Fused
 	s.QuantActs += o.QuantActs
 	s.KVPrewarmPages += o.KVPrewarmPages
@@ -1239,6 +1369,17 @@ func (s *Stats) add(o Stats) {
 	s.HybridRuns += o.HybridRuns
 	s.HybridRows += o.HybridRows
 	s.THybrid += o.THybrid
+	s.SplitRuns += o.SplitRuns
+	s.SplitRowSteps += o.SplitRowSteps
+	s.CachesDropped += o.CachesDropped
+	s.CacheBytes += o.CacheBytes
+	s.SplitHits += o.SplitHits
+	s.SplitAdmits += o.SplitAdmits
+	s.SplitQueued += o.SplitQueued
+	s.SplitPredicted += o.SplitPredicted
+	s.TSplitHost += o.TSplitHost
+	s.TLateWrite += o.TLateWrite
+	s.TAdmit += o.TAdmit
 	s.StreamCacheSize = max(s.StreamCacheSize, o.StreamCacheSize)
 	s.StreamGroupsTuned = max(s.StreamGroupsTuned, o.StreamGroupsTuned)
 	s.StreamPinHalfTuned = max(s.StreamPinHalfTuned, o.StreamPinHalfTuned)
@@ -1281,9 +1422,12 @@ func (s *Stats) add(o Stats) {
 	s.RecZeroBytes += o.RecZeroBytes
 	s.RecZeroCopies += o.RecZeroCopies
 	s.RecZeroSource += o.RecZeroSource
+	s.RecZeroHost += o.RecZeroHost
 	s.PagedPrefill70 += o.PagedPrefill70
 	s.PagedAccMMA += o.PagedAccMMA
 	s.FlashPrefill80 += o.FlashPrefill80
+	s.RagPrefills += o.RagPrefills
+	s.RagForms += o.RagForms
 	s.PagedPrefillPasses += o.PagedPrefillPasses
 	s.EmbedLaunches += o.EmbedLaunches
 	s.HeadFolds += o.HeadFolds
@@ -1524,12 +1668,23 @@ type devShared struct {
 	// direct sheet or on a device with no page-locked memory; pieces is
 	// put's list of direct sheets, kept so a token allocates none. See
 	// sendPieces.
-	pin     [2][]byte
-	noPin   bool
-	pieces  []sheetPiece
-	packWG  sync.WaitGroup
-	copyWG  sync.WaitGroup
-	packEnd int
+	pin    [2][]byte
+	noPin  bool
+	pieces []sheetPiece
+	// swapsLeft is this token's Config.SplitSwaps still to spend, and swapLi
+	// the block that last admitted (streamBank.admit).
+	swapsLeft, swapLi int
+	// adm is admissions queued for flushAdmits (their items in admItems),
+	// admPub those sent on the copy queue and not yet taken into use, upRing
+	// the page-locked ring they go through and ringUsed its fill.
+	adm      []admJob
+	admPub   []admJob
+	admItems []streamItem
+	upRing   []byte
+	ringUsed int
+	packWG   sync.WaitGroup
+	copyWG   sync.WaitGroup
+	packEnd  int
 	*Config
 	mu sync.Mutex
 	// tot is the device's counters (Stats). A view names them through its
@@ -1660,6 +1815,10 @@ type devShared struct {
 	// device's and not a session's: their calls are one at a time
 	// (GPU.convMu).
 	convTo launchTo
+	// convCall is the convolutional submission's arguments, and convFn its
+	// method value, made once (conv.go).
+	convCall convCallArgs
+	convFn   func(backend.Session)
 	// roomGen moves every time this device may have gained room: a refund, or
 	// a budget raised. A caller that gave blocks up reads it to know when
 	// asking for them back could succeed. See GPU.RoomGen.
@@ -1723,11 +1882,17 @@ type devShared struct {
 	// actInWin is tuneActIn's verdict per operand-prologue site key: true where
 	// the prologue measured faster than the two launches on this card.
 	// actInTrial makes fuseActIn build every candidate for that measurement.
-	actInWin   map[string]bool
+	actInWin map[string]bool
+	// gu2Win is tuneFFN's verdict per up-projection shape: Gate2 or
+	// the two launches.
+	gu2Win map[splitKey]bool
+	// ffnWin is tuneFFN's verdict per FFN shape key (recipe.go).
+	ffnWin     map[string]FFNForm
 	actInTrial bool
 	ragKerns   map[moeKernKey]backend.Kernel // a batched mixture's grouped matvecs (moegroup.go)
 	moeVolta   map[moeVoltaKey]moeVoltaMV    // their tensor-core twins; see voltaGroupedMV
 	ragK       map[ragKey]backend.Kernel     // a ragged step's matvecs; see ragMV
+	qkvK       map[string]*qkvSeg            // a prompt chunk's q/k/v grids; see qkvGemm
 	kshared    map[string]backend.Kernel     // scratch kernels by content; see compileShared
 	pcache     *persistCache                 // composed persistent kernels; see persist.go
 	// convK, conv and convN are the convolutional blocks' kernels, their
@@ -1738,9 +1903,13 @@ type devShared struct {
 	// how many requests it has answered.
 	dh        dhState
 	ClefHeads int64
-	convN     int
-	ragSeg    map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
-	argmaxK   backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
+	// kh is Kev's pointer head on this device (kevhead.go) on dh's kernels,
+	// and KevHeads how many questions it has answered.
+	kh       khState
+	KevHeads int64
+	convN    int
+	ragSeg   map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
+	argmaxK  backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
 	// samplePenK and sampleKs are the device sampler's kernels: the penalty
 	// over the head's rows and, per k, the two top-k passes (sample.go).
 	samplePenK backend.Kernel
@@ -1924,7 +2093,9 @@ type GPU struct {
 	// its submissions, in the scratch every convolutional block there shares
 	// (conv.go), so two sessions' calls go one after the other.
 	convTmp [2][]float32
-	convMu  sync.Mutex
+	// convRuns is ConvLayers' runs, reused under convMu.
+	convRuns []run
+	convMu   sync.Mutex
 	// rowsErr is why the last LayersRows failed, naming the device: the
 	// devices' LastErr summed by Stats is whichever wrote last, not the one
 	// that refused.
@@ -2029,6 +2200,10 @@ func New(slots []Slot, options ...Option) (*GPU, error) {
 	// (PersistByDefaultForTest), so the regression gates run through it.
 	cfg.Persist = persistDefault
 	cfg.PersistDeps = persistDepsDefault
+	// Gate2 is allowed by default; tuneFFN takes it per shape where it
+	// measures faster. On a V100 it read 1.008-1.028 of the two launches on
+	// Llama 1B, 3B and 8B.
+	cfg.GateUp2 = true
 	for _, f := range o.cfg {
 		f(cfg)
 	}
@@ -2167,6 +2342,15 @@ func (d *devTier) stats() Stats {
 		s.KVPoolBytes = d.kvp.charged()
 	}
 	s.BudgetUsed = d.used
+	for _, l := range d.layers {
+		if l != nil && l.stream != nil && l.stream.cached() && l.stream.plain[2] != nil {
+			for _, r := range [3]*resident{l.gate, l.up, l.down} {
+				if r != nil {
+					s.CacheBytes += r.bytes()
+				}
+			}
+		}
+	}
 	s.ScratchBytes, s.ReservedPrompt, s.ReservedStep = d.scratch, d.promptW, d.stepW
 	s.TowerRows = d.visCap
 	s.Allocated, s.RoundingBytes = uint64(d.allocated()), d.rounding
@@ -2302,6 +2486,12 @@ func freeScratch(bs *blockScratch) {
 		}
 	}
 	bs.vwins = nil
+	for _, b := range bs.vsegs { // the packed sequences' buffers, likewise
+		if b != nil {
+			b.Free()
+		}
+	}
+	bs.vsegs = nil
 	freePaged(bs.pkv)
 	bs.mlab.free()
 	bs.ds4.free()
@@ -2428,6 +2618,7 @@ func (g *devTier) Close() {
 	// Every session's queue, before the device that owns them, once nothing
 	// runs on one.
 	g.quiesce()
+	g.khClose() // before dhClose: its programs launch dh's kernels
 	g.dhClose()
 	for _, ds := range g.sess {
 		ds.closeQueue()
@@ -2438,6 +2629,10 @@ func (g *devTier) Close() {
 				hp.UnpinHost(b)
 				g.pin[i] = nil
 			}
+		}
+		if g.upRing != nil {
+			hp.UnpinHost(g.upRing)
+			g.upRing = nil
 		}
 	}
 	// nil entries are compile failures, cached so they are not retried; Close
@@ -2504,6 +2699,11 @@ func (g *devTier) Close() {
 	for _, k := range g.convK {
 		if k != nil {
 			closeKern(k)
+		}
+	}
+	for _, s := range g.qkvK {
+		if s != nil {
+			closeKern(s.kern)
 		}
 	}
 	for _, k := range g.unks {
@@ -2789,10 +2989,18 @@ func (g *devTier) resident(block, slot int, q kernels.Quant, w []byte, nrows, k 
 		// resident. Sharing one entry would launch a kernel against a
 		// differently strided payload (a silent out-of-bounds read), and
 		// refusing on a mismatch would stop a bank from ever being placed.
+		if !r.ok && r.why != "" {
+			g.LastErr = r.why
+		}
 		return r
 	}
 	r := &resident{nrows: nrows, k: k, t: q}
 	g.res[key] = r
+	defer func() {
+		if !r.ok {
+			r.why = g.LastErr
+		}
+	}()
 
 	// Price it before packing it: declining after a pack costs a full read and
 	// fresh host memory to learn the answer is no. PackedWords is the same
@@ -3131,7 +3339,7 @@ func (g *devTier) kernel(q kernels.Quant, k, rows, split, rowt int, bias bool) b
 // launch, which wins on small matvecs and loses on big-k ones, so it is chosen
 // per shape by tuneSplit rather than switched on.
 func (g *devTier) kernelMode(q kernels.Quant, k, rows, split, rowt int, bias, groupSplit bool) backend.Kernel {
-	kk := kernKey{q, k, rows, split, bias, rowt, groupSplit, false, 0}
+	kk := kernKey{q, k, rows, split, bias, rowt, groupSplit, false, 0, false}
 	if c, ok := g.kerns[kk]; ok {
 		return c
 	}
@@ -3189,6 +3397,33 @@ func (g *devTier) gatedKernel(q kernels.Quant, k, rows, split int, groupSplit bo
 	}
 	ker, err := kernels.MatVec(kernels.MatVecShape{Center: g.center, T: q, K: k, Rows: rows, Split: split,
 		GroupSplit: groupSplit, Gate: true, GateAct: act})
+	if err != nil {
+		g.kerns[kk], g.LastErr = nil, err.Error()
+		return nil
+	}
+	c, err := g.dev.Compile(ker)
+	if err != nil {
+		g.kerns[kk], g.LastErr = nil, err.Error()
+		g.Failed++
+		return nil
+	}
+	g.kerns[kk] = c
+	return c
+}
+
+// gate2Kernel is the FFN up projection summing the gate's row beside its own
+// and writing act(gate)*up (kernels.MatVecShape.Gate2), or nil where the
+// backend cannot make it exact or the split writes partials.
+func (g *devTier) gate2Kernel(q kernels.Quant, k, rows, split int, groupSplit bool, act kernels.ActKind) backend.Kernel {
+	if split > 1 && !groupSplit || kernels.IsFloat(q) {
+		return nil
+	}
+	kk := kernKey{t: q, k: k, rows: rows, split: split, rowt: 1, group: groupSplit, gate2: true, act: act}
+	if c, ok := g.kerns[kk]; ok {
+		return c
+	}
+	ker, err := kernels.MatVec(kernels.MatVecShape{Center: g.center, T: q, K: k, Rows: rows, Split: split,
+		GroupSplit: groupSplit, Gate2: true, GateAct: act})
 	if err != nil {
 		g.kerns[kk], g.LastErr = nil, err.Error()
 		return nil

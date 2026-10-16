@@ -154,6 +154,7 @@
     {"prefix": "dev/bench/", "evidence": "docs/perf/current.md", "checks": ["vet"], "manual": "perf floors: measured serially by the main session under RULE 1 and RULE 2, never by a parallel agent"},
     {"prefix": "dev/", "evidence": "docs/engineering-history/scheduling-and-measurement.md", "checks": ["dev-tools", "vet"]},
     {"prefix": "scripts/checks/", "evidence": "docs/checks.md", "checks": ["checks-map"]},
+    {"prefix": "scripts/rewind/", "evidence": "docs/checks.md", "checks": ["scripts"]},
     {"prefix": "scripts/genmodels/", "evidence": "docs/models.md", "checks": ["srcgate"]},
     {"prefix": "scripts/", "evidence": "docs/engineering-history/scheduling-and-measurement.md", "checks": ["scripts"], "manual": "a shell or Python harness has no Go test: run it once on the host it targets"},
     {"prefix": "testdata/", "evidence": "docs/testing.md", "checks": ["model-correctness", "server"]},

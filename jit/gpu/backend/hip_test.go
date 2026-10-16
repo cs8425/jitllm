@@ -6,6 +6,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/hip"
 	"github.com/jitllm/jitllm/jit/gpu/ir"
 )
@@ -17,7 +18,7 @@ func hipOrSkip(t *testing.T) Device {
 	if HIPCount(openDefaults.HIP) == 0 {
 		t.Skipf("NO AMD DEVICE: %s -- the HIP device gate did not run", HIPMissing(openDefaults.HIP))
 	}
-	d, err := OpenHIPWith(0, openDefaults)
+	d, err := OpenHIPWith(testdevices.Ordinal(t, "hip", 0), openDefaults)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +140,7 @@ func TestHIPDeviceRunsTheIR(t *testing.T) {
 // path is an error naming the cause, and the default set holds no HIP
 // device; neither falls back to another backend for the request.
 func TestExplicitHIPWithoutROCmIsAnError(t *testing.T) {
+	testdevices.SkipSelected(t, "it names hip:0 on a box that has none")
 	o := Opts{HIP: hip.Config{Path: t.TempDir()}}
 	_, err := OpenHIPWith(0, o)
 	if err == nil || !strings.Contains(err.Error(), "hip:0 requested but ROCm was not found (searched "+o.HIP.Path) {
@@ -161,6 +163,7 @@ func TestExplicitHIPWithoutROCmIsAnError(t *testing.T) {
 // TestHIPOrdinalPastTheCountIsAnError: an ordinal ROCm does not have names the
 // count. It needs a ROCm that loads; on one with no card the count is 0.
 func TestHIPOrdinalPastTheCountIsAnError(t *testing.T) {
+	testdevices.SkipSelected(t, "it opens an ordinal past the box's last card, which no selection holds")
 	if !hip.Loaded(openDefaults.HIP) {
 		t.Skipf("NO ROCM: %s -- the ordinal refusal did not run", HIPMissing(openDefaults.HIP))
 	}

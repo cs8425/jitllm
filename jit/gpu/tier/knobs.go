@@ -327,6 +327,14 @@ func WithPersist(on bool, grid int) Option {
 	return WithConfig(func(c *Config) { c.Persist, c.PersistDeps, c.PersistGrid = on, false, grid })
 }
 
+// WithGateUp2 sets Config.GateUp2: a dense gated FFN's gate and up as one
+// Gate2 matvec writing act(gate)*up. On by default.
+func WithGateUp2(on bool) Option { return WithConfig(func(c *Config) { c.GateUp2 = on }) }
+
+// WithGateUp2Force sets Config.GateUp2Force: Gate2 wherever the shape has it,
+// whatever the tuner chose.
+func WithGateUp2Force(on bool) Option { return WithConfig(func(c *Config) { c.GateUp2Force = on }) }
+
 // WithPersistDeps is WithPersist with the persistent kernels' tasks ordered
 // by dependency counters rather than grid barriers (Config.PersistDeps,
 // docs/design/dep-block.md). Off by default.
@@ -334,11 +342,34 @@ func WithPersistDeps(on bool, grid int) Option {
 	return WithConfig(func(c *Config) { c.Persist, c.PersistDeps, c.PersistGrid = on, on, grid })
 }
 
+// WithFFNForm sets Config.FFNForm: the recipe every dense gated FFN runs,
+// FFNTuned (the default) leaving it to the per-card trial.
+func WithFFNForm(f FFNForm) Option { return WithConfig(func(c *Config) { c.FFNForm = f }) }
+
+// WithGateUpFuse sets Config.GateUpFuse: a dense gated FFN's gate and up in
+// one launch, down forming act(gate)*up in its prologue.
+func WithGateUpFuse(on bool) Option {
+	return WithConfig(func(c *Config) { c.GateUpFuse = on })
+}
+
 // WithAutoStream sets whether a mixture block no device can hold resident is
 // streamed onto one (GPU.AutoStream) rather than left on the host. On by
 // default.
 func WithAutoStream(on bool) Option {
 	return WithConfig(func(c *Config) { c.NoAutoStream = !on })
+}
+
+// WithHybridCache sets whether a hybrid block gets an expert cache on the
+// card: its hottest experts run there, beside the host running the rest of
+// each token's selection. On by default.
+func WithHybridCache(on bool) Option {
+	return WithConfig(func(c *Config) { c.NoHybridCache = !on })
+}
+
+// WithSplitAdmit caps how many experts a hybrid block's cache takes in a
+// token (Config.SplitAdmit).
+func WithSplitAdmit(n int) Option {
+	return WithConfig(func(c *Config) { c.SplitAdmit = n })
 }
 
 // WithHybridExperts sets where a streamed block's routed experts run by

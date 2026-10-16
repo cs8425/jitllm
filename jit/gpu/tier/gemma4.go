@@ -36,6 +36,9 @@ const (
 	// carries the indexer's key as one more head, which every K/V writer and
 	// the paged pool's geometry bake, where the dense lead's row does not.
 	geoMSA
+	// geoNCHead is, beside geoNonCausal, a decision head's own non-causal
+	// set (nn.LayerPlan.HeadSet): it resizes with the encoder's (visrows.go).
+	geoNCHead
 )
 
 // geoOf is the set block plan p runs in. A non-causal segment (a vision
@@ -45,6 +48,9 @@ const (
 // kinds over one residual, a segment takes a set of its own.
 func geoOf(p *nn.LayerPlan) geoKey {
 	if p.NonCausal {
+		if p.HeadSet {
+			return geoNonCausal | geoNCHead
+		}
 		return geoNonCausal
 	}
 	var k geoKey
@@ -173,8 +179,6 @@ func gemma4WhyNot(p *nn.LayerPlan) string {
 		return "a weightless v norm with no q/k norm to share a kernel with"
 	case p.VFromK && p.ClampKQV != 0:
 		return "v projected by k's weights under a q/k/v clamp"
-	case p.PLEDim%32 != 0:
-		return "a per-layer embedding width that is not a multiple of 32, the activation quantizer's block"
 	case (p.PLEDim != 0 || p.KVShared || p.FFNWide) && !p.GeomSplit && p.AltUp == 0:
 		// The per-layer embedding's add goes back through the split model's
 		// copy kernel, and the scratch sets are the split model's. Gemma 3n's
@@ -242,5 +246,5 @@ func (g *devTier) emitDenseMLP(lc *launcher, bs *blockScratch, l *layer, R int, 
 	lc.la(bs.normPart, R*bs.parts, x2, bs.part)
 	lc.la(bs.normApply, R*p.NEmbd, x2, l.nRouter, bs.part, bs.hr)
 	lc.la(bs.normApply, R*p.NEmbd, x2, l.nFFN2, bs.part, bs.h)
-	lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+	lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
 }

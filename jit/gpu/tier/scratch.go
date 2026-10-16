@@ -176,23 +176,45 @@ func (g *devTier) forgetExact(w int) {
 // keepExact builds the exact prompt width w if it is not built and marks it
 // the most recently used, giving back the least recently used exact widths
 // when the lane holds maxExactWidths or when the budget refuses w beside
-// them. Prompts whose lengths straddle a grain (a stream of 31- to 34-token
+// them. It returns the width the chunk runs in (w, or a kept wider width for
+// a w given back before), 0 for none. Prompts whose lengths straddle a grain (a stream of 31- to 34-token
 // requests runs at 32 and 64 rows) then build each width once, not once per
 // crossing. Callers hold g.mu, outside any submission.
-func (g *devTier) keepExact(w int) bool {
+func (g *devTier) keepExact(w int) int {
 	reserved := w == g.promptW || w == g.stepW
 	if g.bbs[w] == nil {
 		drop := func() {
 			// After every submission that may read it.
 			g.quiesce()
+			if g.exactDropped == nil {
+				g.exactDropped = map[int]bool{}
+			}
+			g.exactDropped[g.exactWs[0]] = true
 			g.dropBatch(g.exactWs[0])
+		}
+		// A width given back before runs in the narrowest kept wider one:
+		// prompts of more lengths than the lane keeps otherwise cycled every
+		// scratch, building and dropping one a prompt, and a warm prompt
+		// allocated.
+		if g.exactDropped[w] {
+			c := 0
+			for _, x := range g.exactWs {
+				if x > w && (c == 0 || x < c) {
+					c = x
+				}
+			}
+			if c != 0 {
+				g.forgetExact(c)
+				g.exactWs = append(g.exactWs, c)
+				return c
+			}
 		}
 		for len(g.exactWs) >= maxExactWidths {
 			drop()
 		}
 		for !g.prepBatch(w) {
 			if len(g.exactWs) == 0 {
-				return false
+				return 0
 			}
 			drop()
 		}
@@ -201,7 +223,7 @@ func (g *devTier) keepExact(w int) bool {
 		g.forgetExact(w)
 		g.exactWs = append(g.exactWs, w)
 	}
-	return true
+	return w
 }
 
 // dropAllScratch frees every scratch and the staging: what a device holding
@@ -380,6 +402,10 @@ func freeRagOut(bs *blockScratch) {
 // pool grown into the rest, every width after was refused and a 64-row decode
 // step ran padded to the 512-row scratch, eight times its rows.
 func (g *devTier) batchFor(w int) int {
+	if w > 64 && (roomFaulted("narrow") || roomFaulted("narrow-lie")) {
+		g.LastErr = fmt.Sprintf("a %d-row batched scratch does not fit the budget (roomFault)", w)
+		return 0
+	}
 	if g.bbs[w] != nil && g.prepBatch(w) {
 		return w
 	}
@@ -496,14 +522,20 @@ func (g *devTier) markNoRoom(width int) {
 // the width and allocate its buffers only to drop them, and a step that runs
 // at the reserved width (batchFor) did that every step on a card the width
 // did not fit. Callers hold g.mu.
+//
+// A wider width than one refused is refused with it: a scratch grows with its
+// rows, and a bidirectional prompt asks for its own length every time (a
+// width a prompt), which rebuilt and dropped a scratch per prompt.
 func (g *devTier) noRoomFor(width int) bool {
-	at, ok := g.noRoom[noRoomKey{g.geoCur, width}]
-	if !ok {
-		return false
+	for k, at := range g.noRoom {
+		if k.geo != g.geoCur || k.width > width {
+			continue
+		}
+		if g.used < at.used || g.limit > at.limit || g.promisedBytes() < at.promised {
+			delete(g.noRoom, k)
+			continue
+		}
+		return true
 	}
-	if g.used < at.used || g.limit > at.limit || g.promisedBytes() < at.promised {
-		delete(g.noRoom, noRoomKey{g.geoCur, width})
-		return false
-	}
-	return true
+	return false
 }

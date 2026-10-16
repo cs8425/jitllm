@@ -14,9 +14,10 @@ import (
 // readout's prompts -- every question and every variant of every request --
 // run as rows of one batch session (Scheduler), a step reading the weights
 // once for every prompt in it, and each prompt's label logits are read where
-// its last row comes out. An encoder readout (Laya) runs its sequences one
-// encoder pass each: its blocks are non-causal over the call's rows, so
-// sequences packed into one call would attend to each other.
+// its last row comes out. An encoder readout (Laya) packs its sequences into
+// encoder passes of up to layaPackRows rows: each sequence's rows attend
+// inside it and count their positions from its start, on the host and on a
+// device (nn.SeqRunsDevice), and its type row and markers are its own.
 
 // DecisionRequest is one request's state and questions.
 type DecisionRequest struct {
@@ -29,6 +30,9 @@ type DecisionRequest struct {
 	// Videos are the request's videos (Clef's); a request with one runs on
 	// its own too.
 	Videos []VideoFrames
+	// Audio is the request's voice clip, 16 kHz mono samples (d1-omni's);
+	// a request with one runs on its own (DecideAudio).
+	Audio []float32
 }
 
 // decisionBatchRows is the most prompts one batch session runs at once.
@@ -102,15 +106,30 @@ func (d *Decider) job(i int) *batchJob {
 // (out[i].Err); an error running the batch fails it whole.
 func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) {
 	out := make([]DecisionResult, len(reqs))
-	n := 0
+	n, alone := 0, 0
 	for r := range reqs {
 		rq, res := &reqs[r], &out[r]
 		if res.Err = d.Prepare(rq.State, rq.Questions, len(rq.Images)); res.Err != nil {
 			continue
 		}
-		if len(rq.Images) > 0 || len(rq.Videos) > 0 {
+		// On a device a request runs alone too: a batch step there carries a
+		// prompt chunk as ragged rows, which attend through the decode plan a
+		// row at a time, step a recurrent block's state through each run in
+		// one sequential launch and stage a rotary table a row, where the
+		// request's own prefill runs the tiled prefill attention and the
+		// chunked recurrence. Measured on the M4 (Metal, every block placed),
+		// both requests as one batch took 19.8x (d1) and 19.1x (lev) the
+		// requests alone. A batch on the host is faster than alone (0.64x d1,
+		// 0.84x lev) and stays one.
+		if len(rq.Audio) > 0 {
+			res.Answers, res.Err = d.DecideAudio(rq.State, rq.Questions, rq.Audio)
+			res.InputTokens = d.InputTokens()
+			continue
+		}
+		if len(rq.Images) > 0 || len(rq.Videos) > 0 || d.batchAlone() {
 			res.Answers, res.Err = d.DecideMedia(rq.State, rq.Questions, rq.Images, rq.Videos)
 			res.InputTokens = d.InputTokens()
+			alone += res.InputTokens
 			continue
 		}
 		first := n
@@ -132,6 +151,8 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 				var err error
 				if d.kind == jlm.DecisionLaya {
 					j.ids, j.markers, err = d.layaSequence(rq.State, q)
+				} else if d.kind == jlm.DecisionD1Omni {
+					j.ids, j.markers, err = d.d1OmniSequence(rq.State, q, d.d1OmniMaxLen())
 				} else {
 					j.ids, j.groups, err = d.prompt(rq.State, q, v)
 				}
@@ -152,11 +173,13 @@ func (d *Decider) DecideBatch(reqs []DecisionRequest) ([]DecisionResult, error) 
 	if err := d.runJobs(jobs); err != nil {
 		return nil, err
 	}
+	// InputTokens counts the requests that ran alone too.
+	d.input += alone
 	// The answers, each from its question's variants, in the request's order.
 	at := 0
 	for r := range reqs {
 		res := &out[r]
-		// A request that failed alone, or that ran alone (its media), has
+		// A request that failed alone, or that ran alone (its media, or on a device), has
 		// its answer already and no job in the batch.
 		if res.Err != nil || res.Answers != nil {
 			continue
@@ -214,17 +237,28 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 		}
 		return nil
 	}
-	if d.kind == jlm.DecisionLaya {
+	if d.kind == jlm.DecisionLaya || d.kind == jlm.DecisionD1Omni {
+		return d.layaPacked(jobs)
+	}
+	if len(jobs) == 0 {
+		return nil
+	}
+	if (len(jobs) == 1 || d.nonCausal()) && d.violation != "batch-alone" {
+		// One prompt has no rows to share a step with: it runs as Decide
+		// runs it, on the Decider's own State, where the head reads back
+		// the label logits alone (forwardSpans) rather than a row's every
+		// logit, and no batch session is stepped. A non-causal model's
+		// prompts each run so too: a batch slot's rows attend causally
+		// (bidirRuns), which is not its graph.
+		d.input = 0
 		for _, j := range jobs {
-			s, err := d.layaForward(j.ids, j.qt, j.markers, 0)
+			s, err := d.forward(j.ids, j.groups, 0)
 			if err != nil {
 				return err
 			}
 			j.scores = append(j.scores[:0], s...)
+			d.input += len(j.ids)
 		}
-		return nil
-	}
-	if len(jobs) == 0 {
 		return nil
 	}
 	sc, err := d.batchSession(min(len(jobs), decisionBatchRows))
@@ -249,6 +283,71 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 	for _, j := range jobs {
 		if j.err != nil {
 			return j.err
+		}
+	}
+	return nil
+}
+
+// batchAlone reports whether DecideBatch runs each request alone: a decoder
+// readout whose blocks sit on a device. A gate turns it off to hold the
+// device's batch session to the requests alone, and "batch-alone", which
+// puts a batch of one into the batch session, turns it off with the rest.
+func (d *Decider) batchAlone() bool {
+	return d.kind != jlm.DecisionLaya && d.kind != jlm.DecisionClef && d.st != nil &&
+		(d.st.GPULayers() > 0 || d.nonCausal() || d.kind == jlm.DecisionKev) && d.violation != "device-batch" && d.violation != "batch-alone"
+}
+
+// layaPackRows is the most rows a packed encoder pass holds: a device's
+// non-causal set is built for 1024 rows at placement (tier visStart), so a
+// pass at or under it does not grow the set.
+const layaPackRows = 1024
+
+// layaPacked runs an encoder readout's jobs packed into passes of up to
+// layaPackRows rows, a sequence longer than that alone in its pass, and
+// leaves each job's scores.
+func (d *Decider) layaPacked(jobs []*batchJob) error {
+	e := d.emb
+	defer func() { e.seqs, e.seqTypes = e.seqs[:0], e.seqTypes[:0] }()
+	for len(jobs) > 0 {
+		n, k := 0, 0
+		for k < len(jobs) && (k == 0 || n+len(jobs[k].ids) <= layaPackRows) {
+			n += len(jobs[k].ids)
+			k++
+		}
+		pass := jobs[:k]
+		jobs = jobs[k:]
+		ids, marks := d.packIDs[:0], d.packMarks[:0]
+		e.seqs, e.seqTypes = e.seqs[:0], e.seqTypes[:0]
+		for _, j := range pass {
+			lo := len(ids)
+			for _, m := range j.markers {
+				marks = append(marks, lo+m)
+			}
+			ids = append(ids, j.ids...)
+			e.seqs = append(e.seqs, nn.KeyRun{Lo: lo, Hi: len(ids)})
+			e.seqTypes = append(e.seqTypes, j.qt)
+		}
+		d.packIDs, d.packMarks = ids, marks
+		if len(pass) == 1 {
+			e.seqs, e.seqTypes = e.seqs[:0], e.seqTypes[:0]
+		}
+		var err error
+		if d.kind == jlm.DecisionD1Omni {
+			err = e.lfm2Encode(ids, nil)
+		} else {
+			err = e.mbEncode(ids)
+		}
+		if err != nil {
+			return err
+		}
+		out := d.variantScores(0, len(marks))
+		if err := e.layaScores(out, len(ids), pass[0].qt, marks); err != nil {
+			return err
+		}
+		d.packs++
+		for _, j := range pass {
+			j.scores = append(j.scores[:0], out[:len(j.markers)]...)
+			out = out[len(j.markers):]
 		}
 	}
 	return nil

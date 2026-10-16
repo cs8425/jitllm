@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jitllm/jitllm/engine/nn"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -186,7 +187,7 @@ func TestABatchLeavesAnotherSessionAlone(t *testing.T) {
 	// Room for A and half of B's rows: B takes blocks home for itself, and A
 	// keeps every one.
 	t.Run("tight", func(t *testing.T) {
-		b := run(t, open(t, "cuda:0="+strconv.FormatUint(usedA+bFull/2, 10)))
+		b := run(t, open(t, testdevices.Like(t, "cuda:0")+"="+strconv.FormatUint(usedA+bFull/2, 10)))
 		if n := b.devCount(); n == 0 || n == m.Cfg.NLayer {
 			t.Fatalf("B placed %d of %d blocks: the budget did not make B split, so this "+
 				"compared nothing", n, m.Cfg.NLayer)

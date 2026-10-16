@@ -81,6 +81,9 @@ type devSess struct {
 	// the set is the device's, and another session's picture may have been
 	// staged in it since.
 	winRuns []nn.KeyRun
+	// seqRuns is the packed sequences SetSeqRuns gave this session, staged
+	// with the windows at each of its non-causal calls.
+	seqRuns []nn.KeyRun
 	// winPerRow says winRuns is one window a row (SetRowWindows: a symmetric
 	// sliding window, whose rows' windows overlap) rather than runs
 	// partitioning the rows.
@@ -162,6 +165,10 @@ type lane struct {
 	// exactWs are the prompt chunk widths built for a chunk's own width
 	// (layersFor), least recently used first (keepExact).
 	exactWs []int
+	// exactDropped is the exact widths given back for room (keepExact):
+	// one asked for again runs in a kept wider width rather than giving back
+	// another, so prompts of more lengths than the lane keeps settle.
+	exactDropped map[int]bool
 	// noRoom is the batched widths prepBatch built and then refused for the
 	// budget, by geometry set, with the budget as it stood (noRoomFor).
 	noRoom map[noRoomKey]budgetAt
@@ -558,7 +565,7 @@ func (g *devTier) cloneLane() (*lane, bool) {
 		sets[k] = s
 	}
 	for k, s := range sets {
-		if s.bs == nil || k == geoNonCausal {
+		if s.bs == nil || k&geoNonCausal != 0 {
 			continue
 		}
 		v.useGeom(k)

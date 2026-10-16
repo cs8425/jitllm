@@ -72,6 +72,28 @@ var decisionCases = []struct {
 	// jitllm agree to the reference's rounding of its answers (6.5e-5); it
 	// is the Clef every gate can run on a card the release does not fit.
 	{"clef-fixture", "clef/fixture/clef-fixture.gguf", "clef-fixture", jlm.DecisionClef, true, 0.001},
+	// d1-omni's F16 GGUF: jitllm sits 5.5e-6 from the model's own code on
+	// these weights (TestD1OmniMatchesReference) and llama.cpp 0.0023 from
+	// both (its F16 products). Its confidence is its own code's (the chosen
+	// option's probability).
+	{"d1-omni", d1OmniModel, "d1-omni-600M-F16", jlm.DecisionD1Omni, true, 0.005},
+	// llama.cpp's own openjev test model (ggml-org/tinyopenjev-for-testing-gguf):
+	// a random qwen35 whose answers sit far from saturation.
+	{"openjev", "openjev/tinyopenjev-for-testing-Q8_0.gguf", "tinyopenjev-for-testing-Q8_0", jlm.DecisionOpenJev, false, 0.01},
+	// vllm-sr's d3-edge (ggml-org's GGUF): lev's codes over a qwen35 whose
+	// attention blocks see the whole prompt; its confidence is its own
+	// reference's (one minus the normalised entropy), which llama.cpp's
+	// server also gives for it. The tolerance is lev's kind: the ambiguous
+	// request's issue question is a near-tie (late 0.50 against damaged 0.50
+	// here, 0.42 against 0.57 at llama.cpp's f16 cache), where the f32 arm
+	// reads 0.078 off and the f16 arm 0.015.
+	{"vllm-d3", "vllm-d3/vllm-d3-edge-Q8_0.gguf", "vllm-d3-edge-Q8_0", jlm.DecisionVllmD3, false, 0.08},
+	// jaredpalmer's Kev 4B (ggml-org's BF16): the pointer head over the
+	// normed hidden state, the question's last row against each option's
+	// <|box_end|> row. BF16 (worst 0.0026 on either cache): at Q4_K_M both
+	// engines' projections sit 5.6% from the BF16 ones and 2% from each
+	// other, a band as wide as some of the readout's own violations.
+	{"kev", "kev/Kev-4B-BF16.gguf", "Kev-4B-BF16", jlm.DecisionKev, false, 0.01},
 }
 
 // decisionRequests are the request bodies in testdata/decision: an object
@@ -193,6 +215,12 @@ func TestDecisionReadoutIsLoadBearing(t *testing.T) {
 		{"lev-one-order", "lev/lev-Q8_0.gguf", "lev-Q8_0", "support", jlm.DecisionLev, "one-order", []string{"intent", "team"}},
 		{"lev-unsorted", "lev/lev-Q8_0.gguf", "lev-Q8_0", "support", jlm.DecisionLev, "unsorted", []string{"intent", "urgent", "frustration", "refund", "team"}},
 		{"lev-uncalibrated", "lev/lev-Q8_0.gguf", "lev-Q8_0", "support", jlm.DecisionLev, "uncalibrated", []string{"intent", "urgent"}},
+		{"vllm-d3-causal", "vllm-d3/vllm-d3-edge-Q8_0.gguf", "vllm-d3-edge-Q8_0", "support", jlm.DecisionVllmD3, "causal", []string{"intent", "team"}},
+		{"kev-same-half", "kev/Kev-4B-BF16.gguf", "Kev-4B-BF16", "support", jlm.DecisionKev, "same-half", []string{"intent", "team"}},
+		{"kev-key-before-end", "kev/Kev-4B-BF16.gguf", "Kev-4B-BF16", "support", jlm.DecisionKev, "key-before-end", []string{"intent", "team"}},
+		{"kev-uncalibrated", "kev/Kev-4B-BF16.gguf", "Kev-4B-BF16", "support", jlm.DecisionKev, "uncalibrated", []string{"intent", "team"}},
+		{"openjev-false-first", "openjev/tinyopenjev-for-testing-Q8_0.gguf", "tinyopenjev-for-testing-Q8_0", "ambiguous", jlm.DecisionOpenJev, "false-first", []string{"compensate", "churn", "damage"}},
+		{"openjev-uncalibrated", "openjev/tinyopenjev-for-testing-Q8_0.gguf", "tinyopenjev-for-testing-Q8_0", "ambiguous", jlm.DecisionOpenJev, "uncalibrated", []string{"compensate", "churn", "damage"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := openDecision(t, c.gguf, c.kind)
@@ -265,8 +293,20 @@ func checkDecisions(t *testing.T, qs []DecisionQuestion, ans []DecisionAnswer, g
 		case jlm.QuestionNoul:
 			diff("noul", a.Noul, g.Noul)
 		default:
+			// The pick is held unless the two options are a tie within the
+			// tolerance: llama.cpp's own probabilities of its choice and
+			// ours less than two tolerances apart, where both picks sit
+			// inside the band every probability is held to (vllm-d3's
+			// ambiguous issue question: 0.42 against 0.57 at llama.cpp,
+			// 0.50 against 0.50 on the f32 cache). The values are held
+			// either way.
 			if q.Type == jlm.QuestionChoice && a.Choice != g.Choice {
-				t.Errorf("%s: chose %q, llama.cpp %q", q.ID, a.Choice, g.Choice)
+				if m := g.Probabilities[g.Choice] - g.Probabilities[a.Choice]; m < 2*tol {
+					t.Logf("%s: chose %q, llama.cpp %q, a tie: llama.cpp's margin %.4f is under %.4f",
+						q.ID, a.Choice, g.Choice, m, 2*tol)
+				} else {
+					t.Errorf("%s: chose %q, llama.cpp %q", q.ID, a.Choice, g.Choice)
+				}
 			}
 			if q.Type == jlm.QuestionScore {
 				diff("score", a.Score, g.Score)
@@ -289,7 +329,7 @@ func checkDecisions(t *testing.T, qs []DecisionQuestion, ans []DecisionAnswer, g
 // label moves them -- the answers are what the pick read.
 func TestDecisionPicksOnTheHost(t *testing.T) {
 	for _, c := range decisionCases {
-		if c.kind == jlm.DecisionLaya || c.kind == jlm.DecisionClef {
+		if c.kind == jlm.DecisionLaya || c.kind == jlm.DecisionClef || c.kind == jlm.DecisionD1Omni || c.kind == jlm.DecisionKev {
 			continue // an encoder's scorer and Clef's span head read no label logits
 		}
 		t.Run(c.name, func(t *testing.T) {

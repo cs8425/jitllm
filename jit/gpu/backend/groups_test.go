@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/ir"
 	"github.com/jitllm/jitllm/jit/gpu/kernels"
@@ -51,7 +52,7 @@ func groupDevices(t *testing.T, forced uint32) []groupDevice {
 		t.Logf("no Vulkan: %v", err)
 	}
 	for _, in := range infos {
-		if in.Software || !in.Compute {
+		if in.Software || !in.Compute || !testdevices.Has(t, "vulkan", in.Index) {
 			continue
 		}
 		for _, lim := range []uint32{0, forced} {

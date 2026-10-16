@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"os"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/jitllm/jitllm/format/quant"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/ir"
 	"github.com/jitllm/jitllm/jit/gpu/kernels"
@@ -331,9 +330,8 @@ func pagedAttn(t *testing.T, d backend.Device, s kernels.FlashShape, kv bool, p 
 // pagedDevices is every GPU this host has, Vulkan's integrated one included
 // and a software rasteriser (llvmpipe) not: the paged gates sweep thousands of
 // shapes, which on a CPU device is hours of a correct answer the GPUs already
-// gave. JITLLM_PAGED_VK=0,1 opens only those Vulkan devices (none: no Vulkan,
-// and an index names a software one when it is wanted), for a shared host where
-// CUDA_VISIBLE_DEVICES does not reach the Vulkan driver.
+// gave. JITLLM_TEST_DEVICES narrows the sweep to its devices, and a software
+// rasteriser it names is swept.
 func pagedDevices(t *testing.T) []backend.Device {
 	var out []backend.Device
 	for _, d := range backend.Open() {
@@ -343,34 +341,23 @@ func pagedDevices(t *testing.T) []backend.Device {
 		}
 		out = append(out, d)
 	}
-	sel := os.Getenv("JITLLM_PAGED_VK")
-	if sel == "" {
-		infos, err := backend.VulkanDevices()
-		if err != nil {
-			t.Logf("no Vulkan enumeration: %v", err)
-			return out
-		}
-		var real []string
-		for _, in := range infos {
-			if in.Software {
-				t.Logf("vulkan device %d (%s) is a software rasteriser: not swept (JITLLM_PAGED_VK=%d runs it)",
-					in.Index, in.Name, in.Index)
-				continue
-			}
-			real = append(real, strconv.Itoa(in.Index))
-		}
-		if len(real) == 0 {
-			return out
-		}
-		sel = strings.Join(real, ",")
+	infos, err := backend.VulkanDevices()
+	if err != nil {
+		t.Logf("no Vulkan enumeration: %v", err)
+		return out
 	}
-	for _, i := range strings.Split(sel, ",") {
-		if i == "none" {
-			break
+	for _, in := range infos {
+		if !testdevices.Has(t, "vulkan", in.Index) {
+			continue
 		}
-		d, err := backend.OpenVulkan(i)
+		if in.Software && !testdevices.Selected() {
+			t.Logf("vulkan device %d (%s) is a software rasteriser: not swept (JITLLM_TEST_DEVICES=vulkan:%d runs it)",
+				in.Index, in.Name, in.Index)
+			continue
+		}
+		d, err := backend.OpenVulkan(strconv.Itoa(in.Index))
 		if err != nil {
-			t.Logf("vulkan device %s: %v", i, err)
+			t.Logf("vulkan device %d: %v", in.Index, err)
 			continue
 		}
 		out = append(out, d)

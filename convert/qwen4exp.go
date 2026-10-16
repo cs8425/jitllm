@@ -20,6 +20,11 @@ func init() {
 	roleOf["output_hc_norm.weight"] = jlm.RoleHCHeadNorm
 	roleOf["output_hc_down.weight"] = jlm.RoleHCHeadDown
 	roleOf["output_hc_up.weight"] = jlm.RoleHCHeadUp
+	// The prediction block's own head mixer: the trunk's roles, at the
+	// block's index rather than the dense one.
+	roleOf["nextn.hc_head_norm.weight"] = jlm.RoleHCHeadNorm
+	roleOf["nextn.hc_head_down.weight"] = jlm.RoleHCHeadDown
+	roleOf["nextn.hc_head_up.weight"] = jlm.RoleHCHeadUp
 	// Its n-gram block. The table itself is per_layer_token_embd, Gemma's
 	// name, retargeted (retarget) to RoleNGramTable.
 	roleOf["ple_key.weight"] = jlm.RoleNGramKey
@@ -82,6 +87,18 @@ func qwen4expConfig(f *meta.File, c *jlm.Config) error {
 		}
 		if uint64(len(rs)) < uint64(c.NLayer) {
 			return fmt.Errorf("%d compress ratios for %d blocks", len(rs), c.NLayer)
+		}
+		// A prediction block that carries the QSA indexer is a QSA block at
+		// the model's ratio. unsloth's published heads state 0 for it where
+		// llama.cpp's converter writes the ratio (conversion/qwen4exp.py:
+		// "the MTP block is a full-attention QSA layer too"), and the
+		// release's config makes it full attention, which this model runs
+		// as QSA; the tensors decide (RULE 7m).
+		trunk := int(c.NLayer) - int(f.UintKey("nextn_predict_layers", 0))
+		for i := trunk; i < int(c.NLayer) && i < len(rs) && c.QSARatio != 0; i++ {
+			if _, idx := f.Get("blk." + itoa(i) + ".indexer.k_proj.weight"); idx && rs[i] == 0 {
+				rs[i] = uint64(c.QSARatio)
+			}
 		}
 		for i := 0; i < int(c.NLayer); i++ {
 			_, linear := f.Get("blk." + itoa(i) + ".ssm_conv1d.weight")

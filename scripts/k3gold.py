@@ -305,12 +305,13 @@ def perturb(m):
             raise AssertionError(f"unexpected buffer {n}: randomise it or say why not")
 
 
-def save_original(m, d):
+def save_original(m, d, text=TEXT):
     """KimiK3ForConditionalGeneration's layout: the text model under
-    language_model., which llama.cpp's converter reads."""
+    language_model., which llama.cpp's converter reads; text is the
+    configuration the model was built from."""
     out = {"language_model." + n: t.contiguous() for n, t in m.state_dict().items()}
     save_file(out, os.path.join(d, "model.safetensors"), metadata={"format": "pt"})
-    tc = dict(TEXT)
+    tc = dict(text)
     tc.update({"architectures": ["KimiLinearForCausalLM"], "model_type": "kimi_linear",
                "torch_dtype": "float32"})
     c = {"architectures": ["KimiK3ForConditionalGeneration"], "model_type": "kimi_k3",
@@ -322,10 +323,20 @@ def save_original(m, d):
         shutil.copy(os.path.join(CODE, f), d)
 
 
+def ragged_text():
+    # TEXT with the latent and KDA's head 40 wide, not a whole number of the
+    # activation quantizer's 32-element blocks: the ragged-width gate's (the
+    # latent, and KDA's low-rank gates, whose rank is its head width).
+    t = dict(TEXT, routed_expert_hidden_size=40)
+    t["linear_attn_config"] = dict(TEXT["linear_attn_config"], head_dim=40)
+    return t
+
+
 def build(name):
     KimiLinearConfig, ml = load_remote()
     check_shims()
-    cfg = KimiLinearConfig(**TEXT)
+    text = ragged_text() if name.endswith("-ragged") else TEXT
+    cfg = KimiLinearConfig(**text)
     torch.manual_seed(20261004)
     m = ml.KimiLinearForCausalLM(cfg).float().eval()
     # KimiLinearModel forces flash_attention_2, which has no CPU kernel here;
@@ -335,7 +346,7 @@ def build(name):
     d = os.path.join(HFDIR, name)
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
-    save_original(m, d)
+    save_original(m, d, text)
     dst = os.path.join(MODELS, name + ".gguf")
     subprocess.run([PY, os.path.join(LCPP, "convert_hf_to_gguf.py"), d,
                     "--outtype", "f32", "--outfile", dst], check=True)
@@ -472,7 +483,7 @@ def real(name):
     print("wrote", dst)
 
 
-SPECS = {"synth-kimik3": build}
+SPECS = {"synth-kimik3": build, "synth-kimik3-ragged": build}
 
 if __name__ == "__main__":
     for n in sys.argv[1:] or list(SPECS):

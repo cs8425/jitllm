@@ -236,7 +236,7 @@ func reportGPU() {
 // reportHIPList names every HIP device as hip:N, the selector -devices takes.
 func reportHIPList(c backend.HIPConfig) {
 	for i := 0; i < backend.HIPCount(c); i++ {
-		d, err := backend.OpenHIPWith(i, backend.Opts{HIP: c})
+		d, err := backend.OpenHIPWith(i, backend.Opts{HIP: c, Enumerating: true})
 		if err != nil {
 			fmt.Printf("hip:%-5d %v\n", i, err)
 			continue

@@ -3,8 +3,6 @@ package tier
 import (
 	"fmt"
 	"os"
-	"sort"
-	"time"
 
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/kernels"
@@ -97,41 +95,12 @@ func (g *devTier) tuneActIn() {
 // time to be kept: the trial resolves about 1%, and a tie keeps two launches.
 const actInMargin = 0.99
 
-// timeActIn times one site's two arms over the blocks ls, interleaved (two
-// launches first on even rounds, the prologue first on odd), and returns the
-// median of the per-round ratios prologue/two-launch time. ok is false where
-// the trial could not launch or did not resolve (IQR over splitTuneIQR).
+// timeActIn times one site's two arms over the blocks ls (timeRecipes, the
+// two launches the incumbent) and returns the median of the per-round ratios
+// prologue/two-launch time. ok is false where the trial could not launch or
+// did not resolve (IQR over splitTuneIQR).
 func (g *devTier) timeActIn(site int, ls []*layer) (float64, bool) {
-	tuneTrials.Add(1)
 	bs := g.bs
-	// launch is mvIn's and mvrun's launch on a Session: pre is the operand
-	// (a and ax, or the prologue's float row and norm weight), extra the
-	// bias or residual.
-	launch := func(s backend.Session, m mv, k backend.Kernel, r *resident, pre []backend.Buf, out, extra backend.Buf) error {
-		w := 128
-		if m.group {
-			w = kernels.GroupSplitWidth(m.split)
-		}
-		n := m.rows * max(m.split, 1)
-		if m.rowt > 1 {
-			n /= m.rowt
-		}
-		dst := out
-		if m.split > 1 && !m.group {
-			dst = g.partBuf
-		}
-		args := append(append([]backend.Buf{r.qs, r.d, r.sc}, pre...), dst)
-		if extra != nil {
-			args = append(args, extra)
-		}
-		if err := s.Launch(k, (n+w-1)/w, w, args...); err != nil {
-			return err
-		}
-		if m.split > 1 && !m.group {
-			return s.Launch(m.red, (m.rows+127)/128, 128, g.partBuf, out)
-		}
-		return nil
-	}
 	ax := []backend.Buf{bs.a, bs.ax}
 	arm := func(s backend.Session, in bool) error {
 		for _, l := range ls {
@@ -171,7 +140,11 @@ func (g *devTier) timeActIn(site int, ls []*layer) (float64, bool) {
 					if in {
 						k, pre = p.m.kernIn, []backend.Buf{bs.x, l.nAttn}
 					}
-					if err := launch(s, p.m, k, p.r, pre, p.out, p.m.bias); err != nil {
+					var extra []backend.Buf
+					if p.m.bias != nil {
+						extra = append(extra, p.m.bias)
+					}
+					if err := g.mvLaunch(s, p.m, k, p.r, pre, p.out, extra...); err != nil {
 						return err
 					}
 				}
@@ -181,7 +154,7 @@ func (g *devTier) timeActIn(site int, ls []*layer) (float64, bool) {
 					m, r, q, src, dst, resid = l.mvd, l.down, bs.quantF, bs.act, bs.x, bs.x2
 				}
 				if in {
-					if err := launch(s, m, m.resIn, r, []backend.Buf{src}, dst, resid); err != nil {
+					if err := g.mvLaunch(s, m, m.resIn, r, []backend.Buf{src}, dst, resid); err != nil {
 						return err
 					}
 					continue
@@ -192,49 +165,16 @@ func (g *devTier) timeActIn(site int, ls []*layer) (float64, bool) {
 				if err := s.Launch(q, (kernels.QuantizeThreads(m.k/32)+127)/128, 128, src, bs.a, bs.ax); err != nil {
 					return err
 				}
-				if err := launch(s, m, m.res, r, ax, dst, resid); err != nil {
+				if err := g.mvLaunch(s, m, m.res, r, ax, dst, resid); err != nil {
 					return err
 				}
 			}
 		}
 		return nil
 	}
-	timed := func(in bool) (float64, error) {
-		const reps = 3
-		t0 := time.Now()
-		var err error
-		g.dev.Session(func(s backend.Session) {
-			for i := 0; i < reps && err == nil; i++ {
-				err = arm(s, in)
-			}
-			if err == nil {
-				err = s.Sync()
-			}
-		})
-		return time.Since(t0).Seconds(), err
-	}
-	const rounds = 9
-	var ratios []float64
-	for round := 0; round < rounds+1; round++ {
-		var a, b float64
-		var ea, eb error
-		if round%2 == 0 {
-			a, ea = timed(false)
-			b, eb = timed(true)
-		} else {
-			b, eb = timed(true)
-			a, ea = timed(false)
-		}
-		if ea != nil || eb != nil {
-			return 0, false
-		}
-		if round == 0 || a <= 0 {
-			continue // the first round pays first-touch
-		}
-		ratios = append(ratios, b/a)
-	}
-	sort.Float64s(ratios)
-	med := ratios[len(ratios)/2]
-	iqr := ratios[len(ratios)*3/4] - ratios[len(ratios)/4]
-	return med, med > 0 && iqr/med <= splitTuneIQR
+	med, ok := g.timeRecipes([]func(backend.Session) error{
+		func(s backend.Session) error { return arm(s, false) },
+		func(s backend.Session) error { return arm(s, true) },
+	})
+	return med[1], ok[1]
 }

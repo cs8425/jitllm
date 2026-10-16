@@ -31,7 +31,34 @@ func QuantizeThreads(nb int) int { return nb * 8 }
 // difference is a slightly different int8 near a boundary, which diverges deep
 // models (TestQuantizeOnTheRoundingBoundary).
 func Quantize(k, window int) (*ir.Kernel, error) {
-	return quantize(k, window, nil)
+	return quantize(k, window, nil, nil)
+}
+
+// rowPad is a padded quantizer's shape: rows of k floats, read as rows of kp
+// whose columns past k are zero.
+type rowPad struct{ k, kp int }
+
+// load is element at of the padded rows, read from rows of k: a column past
+// k is zero, its address clamped into the row so the load stays in bounds
+// (the IR selects rather than branches; RULE 13).
+func (r *rowPad) load(b *ir.Builder, pX, at ir.Value) ir.Value {
+	kp := b.Const(ir.U32, int64(r.kp))
+	row, col := b.Div(ir.U32, at, kp), b.Rem(ir.U32, at, kp)
+	k := b.Const(ir.U32, int64(r.k))
+	src := b.Add(ir.U32, b.Mul(ir.U32, row, k), b.Min(ir.U32, col, b.Const(ir.U32, int64(r.k-1))))
+	return b.Select(ir.F32, b.Lt(ir.U32, col, k), b.Load(ir.F32, pX, src, 0), b.ConstF32(0))
+}
+
+// QuantizePadded is Quantize over rows rows of k floats each, as rows of kp
+// (a whole number of 32-element blocks) whose columns past k are zero: the
+// activation of a matrix packed at kp with zero columns past its k (a tower
+// 144 wide), which the host pads the same way (model.State.padRows). The
+// window is over the padded rows. Launch QuantizeThreads(rows*kp/32) threads.
+func QuantizePadded(rows, k, kp, window int) (*ir.Kernel, error) {
+	if k <= 0 || kp < k || kp%32 != 0 || rows <= 0 {
+		return nil, fmt.Errorf("kernels: QuantizePadded: %d rows of %d padded to %d", rows, k, kp)
+	}
+	return quantize(rows*kp, window, nil, &rowPad{k, kp})
 }
 
 // QuantizeAct is ActMul followed by Quantize in one launch: element i is
@@ -43,10 +70,10 @@ func QuantizeAct(k, window int, kind ActKind) (*ir.Kernel, error) {
 	if err := actMulKind(kind); err != nil {
 		return nil, err
 	}
-	return quantize(k, window, &kind)
+	return quantize(k, window, &kind, nil)
 }
 
-func quantize(k, window int, kind *ActKind) (*ir.Kernel, error) {
+func quantize(k, window int, kind *ActKind, pad *rowPad) (*ir.Kernel, error) {
 	if k%32 != 0 {
 		return nil, fmt.Errorf("kernels: Quantize: k=%d is not a multiple of 32", k)
 	}
@@ -61,7 +88,7 @@ func quantize(k, window int, kind *ActKind) (*ir.Kernel, error) {
 	span := per * wpb
 	if span > quantGroup {
 		// A window wider than one group's tile loops (quantwide.go).
-		return quantizeWide(k, window, kind)
+		return quantizeWide(k, window, kind, pad)
 	}
 	if quantGroup%span != 0 {
 		return nil, fmt.Errorf("kernels: Quantize: window %d does not tile a %d-thread group", window, quantGroup)
@@ -69,6 +96,8 @@ func quantize(k, window int, kind *ActKind) (*ir.Kernel, error) {
 	name := "quantize"
 	if kind != nil {
 		name = "quantizeact"
+	} else if pad != nil {
+		name = "quantizepadded"
 	}
 	b := ir.New(name, [3]int{quantGroup, 1, 1})
 	var pX, pG, pU, pOut ir.Value
@@ -93,6 +122,10 @@ func quantize(k, window int, kind *ActKind) (*ir.Kernel, error) {
 	base := b.Mul(ir.U32, word, b.Const(ir.U32, 4))
 	var v [4]ir.Value
 	for i := range v {
+		if kind == nil && pad != nil {
+			v[i] = pad.load(b, pX, b.Add(ir.U32, base, b.Const(ir.U32, int64(i))))
+			continue
+		}
 		if kind == nil {
 			v[i] = b.Load(ir.F32, pX, base, int64(i))
 			continue
@@ -1169,7 +1202,7 @@ func WindowMaskRows(rows, heads, sstride int) (*ir.Kernel, error) {
 // and SiLU here, as one launch, before x_proj reads it.
 func BiasAct(width, rows int, k ActKind) (*ir.Kernel, error) {
 	switch k {
-	case ActSiLU, ActGELU, ActQuickGELU, ActReLU2, ActReLU:
+	case ActSiLU, ActGELU, ActQuickGELU, ActReLU2, ActReLU, ActIdentity:
 	default:
 		return nil, fmt.Errorf("kernels: BiasAct: %v is not an ungated activation", k)
 	}

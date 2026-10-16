@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jitllm/jitllm/engine/nn"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -33,7 +34,7 @@ func TestPrefillStreamsHostBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Half the model: the head and a few blocks resident, the rest home.
-	spec := "cuda:0=" + strconv.FormatUint(probe.WeightBytes()/2, 10)
+	spec := testdevices.Like(t, "cuda:0") + "=" + strconv.FormatUint(probe.WeightBytes()/2, 10)
 	// Three device chunks and part of a fourth: auto measures the first two.
 	n := 3*nn.MaxDevicePrefillChunk + nn.MaxDevicePrefillChunk/2
 	prompt := probe.Vocab.Encode(strings.Repeat("The quick brown fox jumps over the lazy dog, and then it runs. ", n/10), true)[:n]

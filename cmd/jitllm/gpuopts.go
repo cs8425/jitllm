@@ -194,6 +194,20 @@ func gpuOptions() []tier.Option {
 	// (tier.WithPersist), JITLLM_GPU_PERSIST_GRID capping their grid;
 	// JITLLM_GPU_PERSIST=deps orders them with dependency counters rather
 	// than grid barriers (tier.WithPersistDeps).
+	// JITLLM_GPU_GATEUP=1 runs a dense FFN's gate and up as one launch
+	// (tier.WithGateUpFuse).
+	if set("JITLLM_GPU_GATEUP") {
+		o = append(o, tier.WithGateUpFuse(str("JITLLM_GPU_GATEUP") != "0"))
+	}
+	// JITLLM_GPU_FFN forces the dense gated FFN's recipe (tier.WithFFNForm):
+	// two, gate2, gate2in or gu; unset leaves it to the per-card trial.
+	if set("JITLLM_GPU_FFN") {
+		f, err := tier.ParseFFNForm(str("JITLLM_GPU_FFN"))
+		if err != nil {
+			panic(err)
+		}
+		o = append(o, tier.WithFFNForm(f))
+	}
 	if str("JITLLM_GPU_PERSIST") == "deps" {
 		o = append(o, tier.WithPersistDeps(true, int(num("JITLLM_GPU_PERSIST_GRID"))))
 	} else if set("JITLLM_GPU_PERSIST") {
@@ -217,6 +231,9 @@ func gpuOptions() []tier.Option {
 		{"JITLLM_NO_GPU_MMA", set("JITLLM_NO_GPU_MMA"), func(c *tier.Config) { c.NoMMA = true }},
 		{"JITLLM_GPU_NO_FUSE", set("JITLLM_GPU_NO_FUSE"), func(c *tier.Config) { c.NoFuse = true }},
 		{"JITLLM_GPU_NO_ACTFUSE", set("JITLLM_GPU_NO_ACTFUSE"), func(c *tier.Config) { c.NoActFuse = true }},
+		{"JITLLM_GPU_QKVGEMM", os.Getenv("JITLLM_GPU_QKVGEMM") == "1", func(c *tier.Config) { c.QKVGemm = true }},
+		{"JITLLM_GPU_NO_ADDNORM", set("JITLLM_GPU_NO_ADDNORM"), func(c *tier.Config) { c.NoAddNormFold = true }},
+		{"JITLLM_GPU_GATEUP2", os.Getenv("JITLLM_GPU_GATEUP2") == "0", func(c *tier.Config) { c.GateUp2 = false }},
 		{"JITLLM_GPU_ACTIN_SITES", set("JITLLM_GPU_ACTIN_SITES"),
 			func(c *tier.Config) { c.ActInSites = num("JITLLM_GPU_ACTIN_SITES") }},
 		{"JITLLM_GPU_ACTIN_PREFETCH", set("JITLLM_GPU_ACTIN_PREFETCH"),
@@ -244,6 +261,14 @@ func gpuOptions() []tier.Option {
 		{"JITLLM_GPU_NO_AUTOSTREAM", set("JITLLM_GPU_NO_AUTOSTREAM"), func(c *tier.Config) { c.NoAutoStream = true }},
 		{"JITLLM_GPU_HYBRID", os.Getenv("JITLLM_GPU_HYBRID") == "1", func(c *tier.Config) { c.HybridExperts = true }},
 		{"JITLLM_GPU_HYBRID", os.Getenv("JITLLM_GPU_HYBRID") == "0", func(c *tier.Config) { c.NoHybrid = true }},
+		// =0 gives a hybrid block no expert cache on the card (tier.WithHybridCache).
+		{"JITLLM_GPU_HYBRID_CACHE", os.Getenv("JITLLM_GPU_HYBRID_CACHE") == "0", func(c *tier.Config) { c.NoHybridCache = true }},
+		{"JITLLM_GPU_SPLIT_PREDICT", num("JITLLM_GPU_SPLIT_PREDICT") > 0,
+			func(c *tier.Config) { c.SplitPredict = num("JITLLM_GPU_SPLIT_PREDICT") }},
+		{"JITLLM_GPU_SPLIT_SWAPS", os.Getenv("JITLLM_GPU_SPLIT_SWAPS") != "",
+			func(c *tier.Config) { c.SplitSwaps = num("JITLLM_GPU_SPLIT_SWAPS") }},
+		{"JITLLM_GPU_SPLIT_ADMIT", num("JITLLM_GPU_SPLIT_ADMIT") > 0,
+			func(c *tier.Config) { c.SplitAdmit = num("JITLLM_GPU_SPLIT_ADMIT") }},
 		{"JITLLM_GPU_STREAM_NOPIN", set("JITLLM_GPU_STREAM_NOPIN"), func(c *tier.Config) { c.StreamNoPin = true }},
 		{"JITLLM_GPU_STREAM_GROUPS", num("JITLLM_GPU_STREAM_GROUPS") > 0,
 			func(c *tier.Config) { c.StreamGroups = num("JITLLM_GPU_STREAM_GROUPS") }},

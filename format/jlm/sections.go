@@ -106,7 +106,12 @@ func (r *rbuf) count(minPer int) int {
 
 // --- Config -------------------------------------------------------------
 
-func encodeConfig(c *Config) []byte {
+func encodeConfig(c *Config) []byte { return encodeConfigAt(c, Version) }
+
+// encodeConfigAt encodes c as a version v container's record: a migration
+// writes the version after the one it read (migrate.go). Write refuses a
+// config that version cannot state (writeAt).
+func encodeConfigAt(c *Config, v uint32) []byte {
 	w := &wbuf{}
 	w.u16(uint16(c.Arch))
 	for _, v := range []uint32{c.NLayer, c.NEmbd, c.NHead, c.NKVHead, c.HeadDim, c.NRot,
@@ -147,7 +152,9 @@ func encodeConfig(c *Config) []byte {
 	w.u32(c.NExpertGroup)
 	w.u32(c.NExpertGroupUsed)
 	// v28: the prediction blocks after the trunk.
-	w.u32(c.NMTP)
+	if v >= 28 {
+		w.u32(c.NMTP)
+	}
 	// (ERNIE 4.5's mixtures write the interleave too, under ArchErnie45MoE,
 	// another code an older reader refuses.)
 	// Llama 4's interleave and temperature are an optional tail, costing no
@@ -283,7 +290,11 @@ func encodeConfig(c *Config) []byte {
 	return w.b
 }
 
-func decodeConfig(b []byte) (*Config, error) {
+func decodeConfig(b []byte) (*Config, error) { return decodeConfigAt(b, Version) }
+
+// decodeConfigAt decodes the config record of a version v container: a
+// migration reads an older one (migrate.go).
+func decodeConfigAt(b []byte, v uint32) (*Config, error) {
 	r := &rbuf{b: b}
 	c := &Config{Arch: Arch(r.u16())}
 	for _, p := range []*uint32{&c.NLayer, &c.NEmbd, &c.NHead, &c.NKVHead, &c.HeadDim, &c.NRot,
@@ -322,7 +333,10 @@ func decodeConfig(b []byte) (*Config, error) {
 	c.ExpertScale = r.f32()
 	c.NExpertGroup = r.u32()
 	c.NExpertGroupUsed = r.u32()
-	c.NMTP = r.u32()
+	// v28 added the prediction blocks' count; an older record has none.
+	if v >= 28 {
+		c.NMTP = r.u32()
+	}
 	// The optional tail; see encodeConfig. Absent means all zero, which is what
 	// every architecture but Llama 4 is.
 	if r.err == nil && len(r.b) > 0 {
@@ -563,7 +577,7 @@ func encodeVision(v *Vision) []byte {
 	// after it is set, so every earlier tower's section is byte-identical.
 	// The pixel bounds of a tower read at its own size come third, and
 	// LFM2-VL's tile size and tolerance fourth.
-	tile := v.TileSize != 0 || v.Tolerance != 0
+	tile := v.TileSize != 0 || v.Tolerance != 0 || v.Audio != nil
 	pix := v.MinPixels != 0 || v.MaxPixels != 0 || tile
 	if v.MinTiles != 0 || v.MaxTiles != 0 || v.WinPattern != 0 || v.WinSize != 0 || pix {
 		w.u32(v.MinTiles)
@@ -580,6 +594,9 @@ func encodeVision(v *Vision) []byte {
 	if tile {
 		w.u32(v.TileSize)
 		w.f32(v.Tolerance)
+	}
+	if v.Audio != nil {
+		encodeAudio(w, v.Audio)
 	}
 	return w.b
 }
@@ -616,6 +633,9 @@ func decodeVision(b []byte) (*Vision, error) {
 	}
 	if r.err == nil && len(r.b) > 0 {
 		v.TileSize, v.Tolerance = r.u32(), r.f32()
+	}
+	if r.err == nil && len(r.b) > 0 {
+		v.Audio = decodeAudio(r)
 	}
 	if r.err != nil {
 		return nil, r.err

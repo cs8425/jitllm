@@ -79,8 +79,12 @@ func decisionPrompts(t *testing.T, d *Decider) []decisionPrompt {
 			for v := range d.variants(q) {
 				p := decisionPrompt{qt: q.Type, v: v}
 				var err error
-				if d.kind == jlm.DecisionLaya {
+				if d.kind == jlm.DecisionKev {
+					p.ids, p.markers, err = d.kevPrompt(state, q, v)
+				} else if d.kind == jlm.DecisionLaya {
 					p.ids, p.markers, err = d.layaSequence(state, q)
+				} else if d.kind == jlm.DecisionD1Omni {
+					p.ids, p.markers, err = d.d1OmniSequence(state, q, d.d1OmniMaxLen())
 				} else {
 					p.ids, p.groups, err = d.prompt(state, q, v)
 				}
@@ -120,8 +124,7 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 		case placed == 0:
 			t.Fatalf("%s took no block: %s", g.Name(), g.Err())
 		case n < 0 && placed != want:
-			t.Skipf("%s held %d of %d blocks: this card is too small for the every-block arm (%s)",
-				g.Name(), placed, want, g.Err())
+			cardTooSmall(t, g.Err(), "%s held %d of %d blocks in the every-block arm", g.Name(), placed, want)
 		}
 	}
 	ps := decisionPrompts(t, d)
@@ -131,6 +134,10 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 			switch {
 			case p.clef != nil:
 				err = d.clefForward(p.clef, d.variantScores(0, len(p.clef.opts)))
+			case d.kind == jlm.DecisionD1Omni:
+				_, err = d.d1OmniForward(p.ids, p.qt, p.markers, p.v)
+			case d.kind == jlm.DecisionKev:
+				_, err = d.kevRows(p.ids, p.markers, p.v)
 			case m.IsEncoder():
 				_, err = d.layaForward(p.ids, p.qt, p.markers, p.v)
 			default:
@@ -177,6 +184,12 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 			reqs = append(reqs, DecisionRequest{State: state, Questions: qs})
 		}
 	}
+	// On a device DecideBatch runs each request alone (batchAlone); the
+	// batch session it keeps for the host is held here all the same.
+	if placed > 0 && d.kind != jlm.DecisionKev { // Kev has no batch session: each request runs alone
+		d.violation = "device-batch"
+		defer func() { d.violation = "" }()
+	}
 	for range 2 {
 		if _, err := d.DecideBatch(reqs); err != nil {
 			t.Fatal(err)
@@ -193,7 +206,10 @@ func decisionAllocs(t *testing.T, m *Model, g *tier.GPU, n int) {
 			t.Fatal(err)
 		}
 	})
-	if !m.IsEncoder() && d.kind != jlm.DecisionClef {
+	// A non-causal model's prompts run one at a time (runJobs), and Kev
+	// runs each request alone (its head reads rows a batch session does
+	// not give back).
+	if !m.IsEncoder() && d.kind != jlm.DecisionClef && !d.nonCausal() && d.kind != jlm.DecisionKev {
 		st := d.BatchStats()
 		if st.Steps == st0.Steps || st.MaxSeqs < 2 {
 			t.Fatalf("the batch ran %d steps, at most %d prompts in one: it was not batched", st.Steps-st0.Steps, st.MaxSeqs)

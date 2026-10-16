@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jitllm/jitllm/engine/model"
@@ -77,8 +78,11 @@ func speedCmd(args []string) error {
 		return err
 	}
 	defer m.Close()
+	if err := preloadWait(m); err != nil {
+		return err
+	}
 	tOpen := time.Since(t00)
-	d, closeDev, name, err := openDevices(*dev, *vram, 0, m.StreamGroups())
+	d, closeDev, name, err := openDevices(*dev, *vram, 0, m.StreamGroups(), 0)
 	if err != nil {
 		return err
 	}
@@ -246,6 +250,19 @@ func speedCmd(args []string) error {
 			fmt.Printf("device %s: prompt on %d/%d blocks, decode on %d, %d spill(s), %d relocation(s)+reclaim(s), %s\n", name,
 				ppOn, m.Cfg.NLayer, st2.GPULayers(), spills+st2.Spills(),
 				moves+st2.Relocations()+st2.Reclaims(), deviceStats(d))
+			// JITLLM_SPEED_WALL=1: the decode as a fraction of the card's read
+			// wall, measured here (RULE 1). The bytes are the resident
+			// weights, each read once a token by a dense decode.
+			if g, ok := d.(*tier.GPU); ok && os.Getenv("JITLLM_SPEED_WALL") == "1" {
+				if wall, wname, werr := deviceReadWall("ptx", 2048, 21); werr != nil {
+					fmt.Printf("read wall: %v\n", werr)
+				} else {
+					rate := float64(*n) / tg.Seconds()
+					gb := float64(g.Bytes()) / 1e9
+					fmt.Printf("eta: %s, %.3f GB/token x %.1f tok/s = %.1f GB/s of a %.1f GB/s read wall = %.1f%%\n",
+						wname, gb, rate, gb*rate, wall, 100*gb*rate/wall)
+				}
+			}
 			if tails > 0 {
 				// engine/model/tailrows.go
 				fmt.Printf("prompt: %d few-row chunk(s) ran as a ragged step\n", tails)
@@ -390,6 +407,19 @@ func printKernelTimes(unit string, steps int) {
 	us, cnt := backend.CUDAKernelTimes()
 	if len(us) == 0 {
 		return
+	}
+	// A background tuner's trials are timed apart (backend.TrialPrefix): they
+	// ran beside the work, and a cold profile that summed them read the
+	// output head's matvec twenty times into one 8B prompt.
+	trialUS, trialN := 0.0, 0
+	for k, v := range us {
+		if strings.HasPrefix(k, backend.TrialPrefix) {
+			trialUS, trialN = trialUS+v, trialN+cnt[k]
+			delete(us, k)
+		}
+	}
+	if trialN > 0 {
+		fmt.Printf("cuda kernel timing: %.1f us in %d tuner-trial launches beside the work, not counted below\n", trialUS, trialN)
 	}
 	names := slices.SortedFunc(maps.Keys(us), func(a, b string) int { return cmp.Compare(us[b], us[a]) })
 	tot := 0.0

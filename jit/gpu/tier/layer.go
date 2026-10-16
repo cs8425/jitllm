@@ -68,6 +68,9 @@ type layer struct {
 	// set from the plan, not inferred from a nil weight.
 	linear                 bool
 	ssmGate, ssmBA, ssmOut *resident
+	// centred is a short convolution with no state over a whole non-causal
+	// call (nn.RecurrentPlan.Centred).
+	centred bool
 	// KDA's two low-rank gates, nil on qwen3next.
 	ssmFA, ssmFB, ssmGA, ssmGB *resident
 	mvSG, mvBA, mvSO           mv
@@ -220,7 +223,18 @@ type layer struct {
 	// mlaQK is MLA's query projection (q, or q_a under a q LoRA) and kv_a in
 	// one launch, and shGU the shared expert's gate and up: two matvecs over
 	// one activation each, built by fuseQKV like qkv. nil where declined.
-	mlaQK, shGU   *segLaunch
+	mlaQK, shGU *segLaunch
+	// gu is a dense gated FFN's gate and up in one launch (Config.GateUpFuse,
+	// fuseGateUp), and guDown the down projection forming act(gate)*up from
+	// their rows and quantizing it in its prologue, with the residual add:
+	// three launches where there were four. nil where declined.
+	gu     *segLaunch
+	guDown backend.Kernel
+	// ffnForm is the recipe this block's dense gated FFN runs where
+	// Config.FFNForm leaves it to the tuner (tuneFFN; recipe.go), and ffnKey
+	// the shape key it was decided under.
+	ffnForm       FFNForm
+	ffnKey        string
 	mvo, mvg, mvu mv
 	mvd           mv
 	// MoE only: the F32 router matrix and its matvec. gate/up/down above hold
@@ -306,6 +320,9 @@ type streamBank struct {
 	tick    uint64
 	slotSel []uint32
 	bank    *resident
+	// plain is the bank a cache sized after placement replaced (cacheBlock),
+	// kept so dropCaches can give the cache back.
+	plain [3]*resident
 	// nExpert is the bank's expert count, so a cache can be set up after
 	// placement (GPU.sizeAutoCaches).
 	nExpert int
@@ -322,6 +339,21 @@ type streamBank struct {
 	li            int  // the block, for the session's host side (hostFor)
 	hin, hw, hout []float32
 	hsel          []uint32
+	// rowSel and rowW are a split step's misses for the host (splitRows).
+	rowSel []uint32
+	rowW   []float32
+	// The split (hybrid with a cache): heat counts each expert's selections,
+	// halved every heatHalf tokens; hit marks which of this token's
+	// selection the cache holds; dw is the card's weights (a miss's zeroed),
+	// and msel and mw the misses the host runs.
+	heat []uint32
+	own  []uint32
+	// owned counts the tokens st.own has counted, for its halving.
+	owned uint64
+	hit   []bool
+	dw    []float32
+	msel  []uint32
+	mw    []float32
 	// pred is this block's selection as the previous block's probe predicted
 	// it (Config.StreamProbe), valid while havePred; score compares it with
 	// the real one and clears it.
@@ -349,6 +381,14 @@ func (st *streamBank) score(g *devTier, li int) {
 		}
 	}
 	g.ProbeExperts += len(st.sel)
+}
+
+// growF32 returns s resized to n, reusing its array when it is big enough.
+func growF32(s []float32, n int) []float32 {
+	if cap(s) < n {
+		return make([]float32, n)
+	}
+	return s[:n]
 }
 
 // growU32 returns s resized to n, reusing its array when it is big enough.
@@ -548,6 +588,115 @@ func (st *streamBank) runHostRows(sid uint64, g *devTier, s backend.Session, sel
 	return err
 }
 
+// splitRows is split for a step of several rows (a speculation step's
+// verification, a few-row chunk): every row's selection goes through split
+// and splitWeights as one token's does -- its heat counted, its hits mapped
+// to their cache slots, nothing evicted or admitted. The rows' input, weights
+// and selections come home; sel and w are written back as the card's share
+// (split's slots, splitWeights' weights with the misses zeroed) for the
+// grouped expert kernels over the cache bank, each cached expert read once
+// for every row that chose it, and the misses are kept (st.rowSel, a hit's
+// place holding noExpert) for hostRowsLate, which runs them while the card
+// runs the hits. rows is the step's padded width, valid its real rows: a
+// padding row is all zero weights at slot 0, since its selection names
+// experts the cache bank does not hold. It returns the hits.
+func (st *streamBank) splitRows(g *devTier, s backend.Session, sel, w, in backend.Buf, n, k, rows, valid int) (int, error) {
+	if cap(st.hin) < valid*n {
+		st.hin = make([]float32, valid*n)
+		st.hout = make([]float32, valid*n)
+	}
+	st.hin, st.hout = st.hin[:valid*n], st.hout[:valid*n]
+	st.hw = growF32(st.hw, rows*k)
+	st.hsel = growU32(st.hsel, rows*(k+1))
+	st.rowSel = growU32(st.rowSel, valid*(k+1))
+	st.rowW = growF32(st.rowW, valid*k)
+	if err := s.Sync(); err != nil {
+		return 0, err
+	}
+	if err := s.Read(in, f32b(st.hin)); err != nil {
+		return 0, err
+	}
+	if err := s.Read(w, f32b(st.hw)); err != nil {
+		return 0, err
+	}
+	if err := s.Read(sel, u32b(st.hsel)); err != nil {
+		return 0, err
+	}
+	// split reads st.sel, the decode step's selection buffer: it is pointed
+	// at each row in turn and put back.
+	tok := st.sel
+	defer func() { st.sel = tok }()
+	hits := 0
+	for r := 0; r < rows; r++ {
+		if r >= valid {
+			for j := 0; j < k; j++ {
+				st.hsel[r*(k+1)+j], st.hw[r*k+j] = 0, 0
+			}
+			continue
+		}
+		row := st.hsel[r*(k+1) : r*(k+1)+k]
+		st.sel = row
+		hits += st.split(g)
+		st.splitWeights(st.hw[r*k : (r+1)*k])
+		st.rowSel[r*(k+1)+k] = st.hsel[r*(k+1)+k]
+		for j := 0; j < k; j++ {
+			st.rowW[r*k+j] = st.hw[r*k+j]
+			st.rowSel[r*(k+1)+j] = row[j]
+			if st.hit[j] {
+				st.rowSel[r*(k+1)+j] = noExpert
+			}
+		}
+		copy(st.hw[r*k:(r+1)*k], st.dw)
+		copy(row, st.slotSel[:k])
+	}
+	if err := s.WriteAt(sel, 0, u32b(st.hsel)); err != nil {
+		return 0, err
+	}
+	return hits, s.WriteAt(w, 0, f32b(st.hw))
+}
+
+// noExpert holds a hit's place in the host's share of a split step: an id no
+// expert has, which the host's expert-major pass matches to nothing.
+const noExpert = ^uint32(0)
+
+// hostRowsLate runs splitRows' misses on the host, row by row as decode's
+// hostLate runs one token's (a few rows share few of their experts, so the
+// host's bytes are the same either way, and the session's host side picks
+// its own order for a row), while the card runs the hits queued before it,
+// and writes the rows' sum to dst. A row with no miss sums to zero.
+func (st *streamBank) hostRowsLate(sid uint64, g *devTier, s backend.Session, dst backend.Buf, k, valid int) error {
+	t0 := time.Now()
+	host := g.hostFor(sid, st)
+	if host == nil {
+		return fmt.Errorf("tier: this session offered no host side for a hybrid block")
+	}
+	n := len(st.hin) / valid
+	for r := 0; r < valid; r++ {
+		st.msel, st.mw = st.msel[:0], st.mw[:0]
+		for j := 0; j < k; j++ {
+			if e := st.rowSel[r*(k+1)+j]; e != noExpert {
+				st.msel = append(st.msel, e)
+				st.mw = append(st.mw, st.rowW[r*k+j])
+			}
+		}
+		out := st.hout[r*n : (r+1)*n]
+		if len(st.msel) == 0 {
+			clear(out)
+			continue
+		}
+		if err := host(st.msel, st.mw, st.hin[r*n:(r+1)*n], out); err != nil {
+			return err
+		}
+	}
+	g.TSplitHost += time.Since(t0)
+	g.SplitRowSteps++
+	g.HybridRows += valid
+	tw := time.Now()
+	err := s.WriteAt(dst, 0, f32b(st.hout))
+	g.TLateWrite += time.Since(tw)
+	return err
+}
+
 // hostFor is session sid's host side for st's block, nil when this
 // session never offered one. Never the placing session's: that State may be
 // closed, and its generated code with it. Callers hold g.mu.
@@ -560,6 +709,93 @@ func (g *devTier) hostFor(sid uint64, st *streamBank) func(sel []uint32, w, in, 
 type hostSide struct {
 	one  func(sel []uint32, w, in, out []float32) error
 	rows func(sel []uint32, w, in, out []float32, rows, k int) error
+	// uses is the session's counts of this block's experts
+	// (nn.LayerWeights.ExpertUses).
+	uses []uint32
+}
+
+// splitIn brings a split step's input and routing weights home and divides
+// the weights between the card and the host. The Sync before the selection
+// was read covers in.
+func (st *streamBank) splitIn(s backend.Session, in, w backend.Buf, n, k int) error {
+	if err := st.home(s, in, w, n, k); err != nil {
+		return err
+	}
+	st.splitWeights(st.hw[:k])
+	return nil
+}
+
+// home reads a hybrid step's expert input and routing weights back.
+func (st *streamBank) home(s backend.Session, in, w backend.Buf, n, k int) error {
+	if cap(st.hin) < n {
+		st.hin = make([]float32, n)
+		st.hout = make([]float32, n)
+	}
+	st.hin, st.hout = st.hin[:n], st.hout[:n]
+	if cap(st.hw) < k+1 {
+		st.hw = make([]float32, k+1)
+	}
+	st.hw = st.hw[:k+1]
+	if err := s.Read(in, f32b(st.hin)); err != nil {
+		return err
+	}
+	return s.Read(w, f32b(st.hw))
+}
+
+// hybridIn is splitIn for a step with no hit: every selected expert is the
+// host's.
+func (st *streamBank) hybridIn(s backend.Session, in, w backend.Buf, n, k int) error {
+	if err := st.home(s, in, w, n, k); err != nil {
+		return err
+	}
+	st.msel = append(st.msel[:0], st.sel...)
+	st.mw = append(st.mw[:0], st.hw[:k]...)
+	return nil
+}
+
+// hostLate runs the host's share of a step -- a split's misses, or a hybrid
+// step's whole selection -- while the card runs what was queued before it,
+// and queues the sum into dst.
+func (st *streamBank) hostLate(sid uint64, g *devTier, s backend.Session, dst backend.Buf, split bool) error {
+	t0 := time.Now()
+	host := g.hostFor(sid, st)
+	if host == nil {
+		return fmt.Errorf("tier: this session offered no host side for a hybrid block")
+	}
+	if len(st.msel) == 0 {
+		clear(st.hout)
+	} else if err := host(st.msel, st.mw, st.hin, st.hout); err != nil {
+		return err
+	}
+	// The host's arithmetic alone: the write after it can wait for the
+	// card to finish what was queued before it.
+	if split {
+		g.TSplitHost += time.Since(t0)
+		g.SplitRuns++
+		g.SplitHits += len(st.sel) - len(st.msel)
+	} else {
+		g.THybrid += time.Since(t0)
+	}
+	tw := time.Now()
+	err := s.WriteAt(dst, 0, f32b(st.hout))
+	g.TLateWrite += time.Since(tw)
+	return err
+}
+
+// splitSwaps is Config.SplitSwaps with its default.
+func (g *devTier) splitSwaps() int {
+	if g.SplitSwaps != 0 {
+		return max(g.SplitSwaps, 0)
+	}
+	return 8
+}
+
+// splitAdmit is Config.SplitAdmit with its default.
+func (g *devTier) splitAdmit() int {
+	if g.SplitAdmit > 0 {
+		return g.SplitAdmit
+	}
+	return 2
 }
 
 // runHost is the hybrid suspension: in (the experts' input, n wide -- the
@@ -624,6 +860,12 @@ func (st *streamBank) initCache(n, nExpert int) {
 	st.slotSel = make([]uint32, len(st.sel))
 }
 
+// uncache returns a block to its plain bank: no cache, nothing held.
+func (st *streamBank) uncache() {
+	st.slotOf, st.owner, st.used, st.slotSel = nil, nil, nil, nil
+	st.heat, st.own, st.hit, st.bank = nil, nil, nil, nil
+}
+
 // cached reports whether this block's bank is an expert cache.
 func (st *streamBank) cached() bool { return st.owner != nil }
 
@@ -660,6 +902,426 @@ func (st *streamBank) lookup(g *devTier) {
 		st.items = append(st.items, streamItem{e: e, slot: v})
 		g.StreamCacheMisses++
 	}
+}
+
+// heatHalf is how many tokens a block's own selection counts last at full
+// weight, for a session that hands the tier none (nn.LayerWeights.ExpertUses
+// is the model's, which halves its own).
+const heatHalf = 256
+
+// heatMargin is the floor of the hysteresis a miss clears to take an occupied
+// slot: twice the slot expert's selections and this many more.
+const heatMargin = 2
+
+// count adds this token's selection, which the card routed, to uses -- the
+// session's own counts of the block's experts (nn.LayerWeights.ExpertUses,
+// model.Hotness), one source for the model's measure of its experts and for
+// the expert cache -- or to the block's own counts when the session handed
+// none, halved every heatHalf tokens. The cache keeps by st.heat.
+func (st *streamBank) count(uses []uint32) {
+	if len(uses) == st.nExpert && st.nExpert > 0 {
+		st.heat = uses
+	} else {
+		if len(st.own) != st.nExpert {
+			st.own = make([]uint32, st.nExpert)
+		}
+		st.heat = st.own
+		st.owned++
+		if st.owned%heatHalf == 0 {
+			for i := range st.heat {
+				st.heat[i] >>= 1
+			}
+		}
+	}
+	for _, e := range st.sel {
+		if int(e) < len(st.heat) && st.heat[e] != ^uint32(0) {
+			st.heat[e]++
+		}
+	}
+}
+
+// split maps this token's selection onto a hybrid block's cache without
+// evicting anything: a hit runs on the card from its slot, a miss on the
+// host. It counts the selection into uses -- the session's own expert counts
+// (nn.LayerWeights.ExpertUses, model.Hotness), one source for the model's
+// placement and this cache -- or the block's own when the session gave none,
+// and returns the hits. A miss's slot
+// is the first hit's, so the card's kernels read a sheet that holds an
+// expert (its weight is zero in dw); with no hit nothing runs on the card.
+func (st *streamBank) split(g *devTier) int {
+	if st.hit == nil {
+		st.hit = make([]bool, len(st.sel))
+	}
+	st.tick++
+	hits, first := 0, uint32(0)
+	for i, e := range st.sel {
+		sl := st.slotOf[e]
+		st.hit[i] = sl >= 0
+		if sl < 0 {
+			continue
+		}
+		st.used[sl] = st.tick
+		st.slotSel[i] = uint32(sl)
+		if hits == 0 {
+			first = uint32(sl)
+		}
+		hits++
+	}
+	for i := range st.sel {
+		if !st.hit[i] {
+			st.slotSel[i] = first
+		}
+	}
+	g.StreamCacheHits += hits
+	g.StreamCacheMisses += len(st.sel) - hits
+	return hits
+}
+
+// splitWeights divides the routing weights w (the selection's order) into
+// the card's, a miss's zeroed, and the host's misses with theirs.
+func (st *streamBank) splitWeights(w []float32) {
+	st.dw = append(st.dw[:0], w...)
+	st.msel, st.mw = st.msel[:0], st.mw[:0]
+	for i, e := range st.sel {
+		if !st.hit[i] {
+			st.dw[i] = 0
+			st.msel = append(st.msel, e)
+			st.mw = append(st.mw, w[i])
+		}
+	}
+}
+
+// admit takes up to max of this token's misses into a hybrid block's cache,
+// each into the coldest slot this token does not read, when the miss has
+// been selected more often than that slot's expert (an empty slot takes
+// any). The uploads are queued behind the launches that read this token's
+// slots, so a slot changes only after its last reader.
+func (st *streamBank) admit(g *devTier, s backend.Session, l *layer, nExpert, max int) error {
+	st.items = st.items[:0]
+	// The swaps -- a slot changing hands -- share a budget per token across
+	// the blocks (Config.SplitSwaps); filling an empty slot does not spend it.
+	// A block at or before the last one that admitted starts a new token.
+	if st.li <= g.swapLi {
+		g.swapsLeft = g.splitSwaps()
+	}
+	g.swapLi = st.li
+	for i, e := range st.sel {
+		if len(st.items) >= max {
+			break
+		}
+		if st.hit[i] || st.slotOf[e] != -1 {
+			continue
+		}
+		v := -1
+		for sl, o := range st.owner {
+			if st.used[sl] == st.tick {
+				continue
+			}
+			if o < 0 {
+				v = sl
+				break
+			}
+			if v < 0 || st.heat[o] < st.heat[st.owner[v]] {
+				v = sl
+			}
+		}
+		if v < 0 {
+			break
+		}
+		if o := st.owner[v]; o >= 0 {
+			// A slot changes hands only to an expert selected clearly more
+			// often: a sheet costs a transfer, and two experts trading one
+			// slot back and forth pay it every token.
+			if st.heat[e] < 2*st.heat[o]+heatMargin || g.swapsLeft <= 0 {
+				continue
+			}
+			g.swapsLeft--
+			st.slotOf[o] = -1
+		}
+		st.owner[v], st.slotOf[e], st.used[v] = int32(e), slotInFlight, st.tick
+		st.items = append(st.items, streamItem{e: e, slot: v})
+	}
+	if len(st.items) == 0 {
+		return nil
+	}
+	// The sheets are sent later, where the host would wait anyway: at the
+	// next block's wait for its router, or at the call's end (flushAdmits).
+	lo := len(g.admItems)
+	g.admItems = append(g.admItems, st.items...)
+	g.adm = append(g.adm, admJob{st: st, l: l, nExpert: nExpert, lo: lo, hi: len(g.admItems)})
+	return nil
+}
+
+// slotInFlight marks an expert whose sheet is on its way to a slot: a miss
+// until the sheet has landed (finishAdmits), and not admitted again.
+const slotInFlight = -2
+
+// admJob is one block's admissions waiting to be sent: g.admItems[lo:hi].
+type admJob struct {
+	st      *streamBank
+	l       *layer
+	nExpert int
+	lo, hi  int
+}
+
+// flushAdmits sends the admissions admit queued. It runs where the host waits
+// on the card anyway -- before a block's router readback, and at the call's
+// end -- so a sheet's page read and host copy are off the token's path. On a
+// session with a copy queue (backend.Uploader) the sheets are copied into a
+// page-locked ring and sent beside the launches, and the slots are taken
+// into use at the call's end (finishAdmits), once the copies have landed;
+// otherwise they are sent in order with the launches (put) and in use at once.
+func (g *devTier) flushAdmits(s backend.Session) error {
+	if len(g.adm) == 0 {
+		return nil
+	}
+	defer func(t0 time.Time) { g.TAdmit += time.Since(t0) }(time.Now())
+	up, _ := s.(backend.Uploader)
+	if up != nil && !g.upRingReady() {
+		up = nil
+	}
+	var err error
+	for _, j := range g.adm {
+		st := j.st
+		items := g.admItems[j.lo:j.hi]
+		st.want = st.want[:0]
+		for _, it := range items {
+			st.want = append(st.want, it.e)
+		}
+		switch {
+		case st.pre != nil:
+			err = st.pre(st.want)
+		case st.ensure != nil:
+			err = st.ensure(&st.w)
+		}
+		if err == nil && st.sel2 != nil {
+			err = st.sel2(&st.w, st.want)
+		}
+		if err == nil && up != nil {
+			err = st.upload(g, up, j.l, j.nExpert, items)
+			if err == nil {
+				g.admPub = append(g.admPub, j)
+				g.SplitQueued += len(items)
+			}
+		} else if err == nil {
+			st.items = append(st.items[:0], items...)
+			if err = st.put(g, s, j.l, j.nExpert, [2]int{0, len(items)}); err == nil {
+				st.publish(items)
+			}
+		}
+		if err != nil {
+			// A sheet half sent is not the expert the map names.
+			st.forget()
+			break
+		}
+		g.SplitAdmits += len(items)
+	}
+	g.adm = g.adm[:0]
+	return err
+}
+
+// finishAdmits sends what is queued, waits for the copy queue and takes the
+// landed slots into use. It runs at the end of every call that admitted,
+// so no sheet is in flight between calls (dropCaches frees banks there).
+func (g *devTier) finishAdmits(s backend.Session) error {
+	err := g.flushAdmits(s)
+	if len(g.admPub) > 0 {
+		t0 := time.Now()
+		if up, ok := s.(backend.Uploader); ok {
+			if werr := up.UploadWait(); err == nil {
+				err = werr
+			}
+		}
+		for _, j := range g.admPub {
+			if err != nil {
+				j.st.forget()
+				continue
+			}
+			j.st.publish(g.admItems[j.lo:j.hi])
+		}
+		g.admPub = g.admPub[:0]
+		g.TAdmit += time.Since(t0)
+	}
+	if len(g.adm) == 0 {
+		g.admItems = g.admItems[:0]
+	}
+	g.ringUsed = 0
+	return err
+}
+
+// publishAdmits waits for the copy queue and takes every sheet sent so far
+// into use, before a block's split reads the cache map.
+func (g *devTier) publishAdmits(s backend.Session) error {
+	t0 := time.Now()
+	var err error
+	if up, ok := s.(backend.Uploader); ok {
+		err = up.UploadWait()
+	}
+	for _, j := range g.admPub {
+		if err != nil {
+			j.st.forget()
+			continue
+		}
+		j.st.publish(g.admItems[j.lo:j.hi])
+	}
+	g.admPub = g.admPub[:0]
+	g.TAdmit += time.Since(t0)
+	return err
+}
+
+// predictAdmit queues the predicted experts of this block (st.pred, from the
+// block before's row through this block's router) that the cache does not
+// hold, at most max, each into the coldest slot whose expert is selected no
+// more often than the prediction -- a prediction only moves sheets, and the
+// real router still decides. They are sent where the host waits before this
+// block's router (flushAdmits) and taken into use after it (publishAdmits).
+func (st *streamBank) predictAdmit(g *devTier, l *layer, nExpert, max int) {
+	if st.heat == nil || st.owner == nil {
+		return
+	}
+	st.items = st.items[:0]
+	for _, e := range st.pred {
+		if len(st.items) >= max {
+			break
+		}
+		if int(e) >= len(st.slotOf) || st.slotOf[e] != -1 {
+			continue
+		}
+		v := -1
+		for sl, o := range st.owner {
+			if o >= 0 && int(o) < len(st.slotOf) && st.slotOf[o] == slotInFlight {
+				continue
+			}
+			if o < 0 {
+				v = sl
+				break
+			}
+			if v < 0 || st.heat[o] < st.heat[st.owner[v]] {
+				v = sl
+			}
+		}
+		if v < 0 {
+			break
+		}
+		if o := st.owner[v]; o >= 0 {
+			if st.heat[o] > st.heat[e] {
+				continue
+			}
+			st.slotOf[o] = -1
+		}
+		st.owner[v], st.slotOf[e] = int32(e), slotInFlight
+		st.items = append(st.items, streamItem{e: e, slot: v})
+	}
+	if len(st.items) == 0 {
+		return
+	}
+	g.SplitPredicted += len(st.items)
+	lo := len(g.admItems)
+	g.admItems = append(g.admItems, st.items...)
+	g.adm = append(g.adm, admJob{st: st, l: l, nExpert: nExpert, lo: lo, hi: len(g.admItems)})
+}
+
+// splitPredict is Config.SplitPredict.
+func (g *devTier) splitPredict() int { return max(g.SplitPredict, 0) }
+
+// publish takes landed sheets into use: an expert whose slot is still its own
+// (no forget or later eviction moved it) is a hit from the next token.
+func (st *streamBank) publish(items []streamItem) {
+	for _, it := range items {
+		if st.owner != nil && it.slot < len(st.owner) && st.owner[it.slot] == int32(it.e) &&
+			int(it.e) < len(st.slotOf) && st.slotOf[it.e] == slotInFlight {
+			st.slotOf[it.e] = int32(it.slot)
+		}
+	}
+}
+
+// upRingBytes is the page-locked ring flushAdmits copies sheets through.
+const upRingBytes = 64 << 20
+
+// upRingReady allocates the ring on first use, and reports false where the
+// device has no page-locked memory.
+func (g *devTier) upRingReady() bool {
+	if g.upRing != nil {
+		return true
+	}
+	hp, ok := g.dev.(backend.HostPinner)
+	if !ok || g.noPin || g.StreamNoPin {
+		return false
+	}
+	b, err := hp.PinHost(upRingBytes)
+	if err != nil {
+		return false
+	}
+	g.upRing = b
+	return true
+}
+
+// upload copies items' sheets through the ring onto the copy queue, at their
+// slots. A sheet plane larger than the ring goes the ordered way.
+func (st *streamBank) upload(g *devTier, up backend.Uploader, l *layer, nExpert int, items []streamItem) error {
+	for m, pair := range [3]struct {
+		r *resident
+		w nn.Weight
+	}{{l.gate, st.w.Gate}, {l.up, st.w.Up}, {l.down, st.w.Down}} {
+		if m == 0 && pair.r == nil && pair.w.Packed == nil && pair.w.Data == nil {
+			continue
+		}
+		if pair.r == nil || !pair.r.ok || pair.w.Packed == nil {
+			return fmt.Errorf("tier: streamed bank %d has no host side", m)
+		}
+		pk := pair.w.Packed
+		for pl := 0; pl < 3; pl++ {
+			n := st.sh[m][pl]
+			if n == 0 {
+				continue
+			}
+			if n > len(g.upRing) {
+				return fmt.Errorf("tier: a %d-byte sheet plane is wider than the upload ring", n)
+			}
+			dst := [3]backend.Buf{pair.r.qs, pair.r.d, pair.r.sc}[pl]
+			for _, it := range items {
+				if int(it.e) >= nExpert {
+					return fmt.Errorf("tier: the router selected expert %d of %d", it.e, nExpert)
+				}
+				if g.ringUsed+n > len(g.upRing) {
+					// Every copy from the ring has landed before it is reused.
+					if err := up.UploadWait(); err != nil {
+						return err
+					}
+					g.ringUsed = 0
+				}
+				buf := g.upRing[g.ringUsed : g.ringUsed+n : g.ringUsed+n]
+				if pk.Sheet != nil {
+					sp, rel, err := pk.Sheet(int(it.e))
+					if err != nil {
+						rel()
+						return err
+					}
+					src := [3][]byte{sp.QS, sp.D, sp.SC}[pl]
+					if len(src) != n {
+						rel()
+						return fmt.Errorf("tier: expert %d plane %d is %d bytes, want %d", it.e, pl, len(src), n)
+					}
+					copy(buf, src)
+					rel()
+				} else {
+					whole := [3][]byte{pk.QS, pk.D, pk.SC}[pl]
+					off := int(it.e) * n
+					if off+n > len(whole) {
+						return fmt.Errorf("tier: expert %d plane %d wants bytes %d..%d of %d",
+							it.e, pl, off, off+n, len(whole))
+					}
+					copy(buf, whole[off:off+n])
+				}
+				g.ringUsed += n
+				if err := up.Upload(dst, it.slot*n, buf); err != nil {
+					return err
+				}
+				g.StreamBytes += int64(n)
+			}
+		}
+	}
+	return nil
 }
 
 // forget empties the cache, for when the bank's bytes can no longer be
@@ -1050,6 +1712,11 @@ type mvTail struct {
 }
 
 type mv struct {
+	// pad is set on a matvec over a ragged tower's padded width
+	// (nn.LayerPlan.KPad): its activation is the padded int8 rows, so a
+	// batched twin that reads the float rows instead (an f16 conversion
+	// at k) would read them at the wrong stride, and is not taken.
+	pad  bool
 	kern backend.Kernel
 	// tail is a second launch of the batched twin over the tokens the first
 	// one's block does not divide (tileMV); it takes the same parameters.
@@ -1098,6 +1765,13 @@ type mv struct {
 	// ActMul launch goes. nil elsewhere, and on a split whose last pass is a
 	// reduce (which would have to apply it instead).
 	gated backend.Kernel
+	// gate2 is gated summing the gate's row itself (kernels.MatVecShape.Gate2):
+	// gate and up in one launch (Config.GateUp2). Built beside gated.
+	gate2 backend.Kernel
+	// gate2In is gate2 normalising and quantizing its own operand
+	// (kernels.ActIn with Norm): the FFN norm, gate and up in one launch,
+	// the FFN site's gate2in recipe. Built by fuseActIn beside gate2.
+	gate2In backend.Kernel
 	// resIn, gatedIn and kernIn are res, gated and kern building their own
 	// operand (kernels.ActIn) from the float row: pIn [pNW] in pA/pAX's
 	// place. Built by fuseActIn; nil where the block cannot take them.
@@ -1117,6 +1791,9 @@ type mv struct {
 	// actN threads.
 	act  backend.Kernel
 	actN int
+	// vt is the GemmVolta tile a binary16 twin was built at (stagedGemm), so
+	// a block's q, k and v can be put in one grid (qkvGemm); zero elsewhere.
+	vt kernels.VoltaTile
 }
 
 // kvPair is one sequence's attention history for one block.
@@ -1585,6 +2262,11 @@ type blockScratch struct {
 	vwins    []backend.Buf
 	winMask  backend.Kernel
 	vwinRows int
+	// vsegs is the packed sequences' runs as each pass's rows' windows,
+	// which every unwindowed non-causal block masks with (SetSeqRuns), and
+	// vsegRows the rows they cover; 0 is one sequence and no mask.
+	vsegs    []backend.Buf
+	vsegRows int
 	// DBRX's clamp on q, k and v (LayerPlan.ClampKQV), out of place for the
 	// same reason: the clamped copies are what everything after the
 	// projections reads. nil for every other architecture.
@@ -1774,6 +2456,11 @@ type blockScratch struct {
 	// (scMul, kernels.ActMul with the identity).
 	scB, scC, scBx, scY backend.Buf
 	scMul               backend.Kernel
+	// convCentred is an LFM2 encoder's convolution (kernels.Conv3Centred),
+	// and vwinAll every row's window in one buffer, the taps' bounds
+	// (setWindowsLocked writes it beside the per-pass vwins).
+	convCentred backend.Kernel
+	vwinAll     backend.Buf
 	// ragLin is a ragged step's linear block per row count (LayersRows): the
 	// convolution and the fused rule over the step's runs, each a sequence's
 	// rows at consecutive positions (kernels' run forms), built for the real
@@ -1853,6 +2540,12 @@ type blockScratch struct {
 	// rwProbe is the cross-layer probe's routing weights, kept off rw, which
 	// holds the block's own until its combine reads them.
 	rwProbe backend.Buf
+	// rwHit, esplit and hsum are the split's (streamBank.split): the card's
+	// routing weights with the misses zeroed, the card's sum of the hits and
+	// the host's of the misses.
+	rwHit, esplit, hsum backend.Buf
+	// rselPred is the next block's predicted selection (Config.SplitPredict).
+	rselPred backend.Buf
 	// The V3 family's grouped selection: gscore writes one score per expert
 	// group into rgs, gmask writes the masked selection plane into rbm, and
 	// rank then counts over rbm instead of over the logits. Both are nil on
@@ -1934,7 +2627,13 @@ func declineReason(p *nn.LayerPlan) string {
 		return r
 	}
 	switch {
-	case p.NonCausal && (p.Parallel || p.Recurrent.Conv > 0 || p.MLA() || p.NExpert > 0 || p.AttnSinks):
+	case p.Recurrent.Centred && (!p.NonCausal || !p.Recurrent.ShortConv || p.Recurrent.Conv != 3 || !p.Windowed):
+		// The centred convolution reads its neighbours through the call's row
+		// windows (kernels.Conv3Centred): a non-causal call is the whole
+		// sequence, and the windows are where the taps stop.
+		return "a centred convolution outside a windowed non-causal short convolution of three taps"
+	case p.NonCausal && (p.Parallel || p.Recurrent.Conv > 0 && !p.Recurrent.Centred || p.MLA() || p.NExpert > 0 ||
+		p.AttnSinks):
 		// A non-causal call is one submission of the block body's plain
 		// attention over its runs; these features are built only on the causal
 		// paths, and no non-causal model has them.
@@ -1960,11 +2659,8 @@ func declineReason(p *nn.LayerPlan) string {
 		// The gated delta rule runs (recPair gives every kernel an out-of-place
 		// state); what is left is a shape check.
 		return "a linear-attention block with no key heads"
-	case p.Recurrent.Mamba1 && (p.Recurrent.Rank <= 0 || p.Recurrent.Rank%32 != 0):
-		// dt_proj reads a quantized activation of rank width, and
-		// kernels.Quantize works in 32-element blocks.
-		return fmt.Sprintf("a Mamba-1 dt rank of %d (the activation quantizer works in 32-element blocks)",
-			p.Recurrent.Rank)
+	case p.Recurrent.Mamba1 && p.Recurrent.Rank <= 0:
+		return fmt.Sprintf("a Mamba-1 dt rank of %d", p.Recurrent.Rank)
 	case p.Recurrent.WithAttn && (!p.Recurrent.SSD || p.MLA() || p.NoFFN):
 		// The sum is built for Falcon-H1's shape alone: Mamba-2 beside plain
 		// attention, then an FFN.
@@ -1977,12 +2673,6 @@ func declineReason(p *nn.LayerPlan) string {
 		(p.Recurrent.VHeads*p.Recurrent.VDim)%p.Recurrent.NormGroups != 0):
 		return fmt.Sprintf("a Mamba-2 gated norm of %d groups over %d channels",
 			p.Recurrent.NormGroups, p.Recurrent.VHeads*p.Recurrent.VDim)
-	case p.Recurrent.Conv > 0 && p.Recurrent.ChanDecay && p.Recurrent.KDim%32 != 0:
-		// KDA's second low-rank matvec reads a quantized activation of rank
-		// width, the rank is KDim, and kernels.Quantize works in 32-element
-		// blocks. Declined by name rather than failing inside prepLayer.
-		return fmt.Sprintf("a rank-%d low-rank gate (the activation quantizer "+
-			"works in 32-element blocks)", p.Recurrent.KDim)
 	case !actHasKernel(p):
 		// Every activation the host bakes has a device kernel (quick-GELU
 		// for CLIP towers, swiglu-oai for gpt-oss); what is left is a kind in a
@@ -2087,14 +2777,10 @@ func routeOf(p *nn.LayerPlan) kernels.MoERoute {
 // or 0 for the format's own. It is float-only: a quantized format's scales are
 // laid out against its sub-block (see kernels.MatVecShape.Sub), while a float
 // weight has no scale plane. What reaches this is MLA's absorbed banks, whose k
-// can be below 32 on a small fixture; the sub-block narrows to the width
-// itself.
-func subFor(q kernels.Quant, k int) int {
-	if !kernels.IsFloat(q) || k >= 32 || k <= 0 || k%4 != 0 {
-		return 0
-	}
-	return k
-}
+// can be below 32 on a small fixture, where the sub-block narrows to the width
+// itself, and a ragged width past 32 (KDA's output at two heads of 40), where
+// it narrows to the widest of 16, 8 and 4 that divides k.
+func subFor(q kernels.Quant, k int) int { return kernels.FloatSub(q, k) }
 
 // mlaWhyNot names the MLA shape this tier cannot express, or "". Each is a
 // width, so each is a kernel owed rather than a refusal (RULE 8): the
@@ -2218,7 +2904,7 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 		if g.hostFns[sid] == nil {
 			g.hostFns[sid] = map[int]hostSide{}
 		}
-		g.hostFns[sid][li] = hostSide{one: w.HostExperts, rows: w.HostExpertsRows}
+		g.hostFns[sid][li] = hostSide{one: w.HostExperts, rows: w.HostExpertsRows, uses: w.ExpertUses}
 		g.mu.Unlock()
 	}
 	// Shapes this tier cannot express are declined first and by name (RULE 8a):
@@ -2365,11 +3051,18 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 		if g.bs = g.initScratch(sp, 1); g.bs == nil {
 			return false
 		}
-	} else if want := g.bs.p; p.NonCausal && sp.NFFN > want.NFFN {
+	} else if want := g.bs.p; p.NonCausal && (sp.NFFN > want.NFFN || sp.Recurrent.Conv > 0 && want.Recurrent.Conv == 0 ||
+		sp.QKNorm && !want.QKNorm) {
 		// A non-causal block with a wider MLP than the set was built for (a
 		// decision head after its encoder): the set grows to it, and every
-		// block runs its own width inside it (layer.nffn).
-		want.NFFN, want.MaxSeq = sp.NFFN, g.visMax
+		// block runs its own width inside it (layer.nffn). An LFM2 encoder's
+		// convolution blocks and attention blocks share a set too: it carries
+		// the convolution's kernels and the q/k norm's, whichever came first.
+		want.NFFN, want.MaxSeq = max(want.NFFN, sp.NFFN), g.visMax
+		if want.Recurrent.Conv == 0 {
+			want.Recurrent = sp.Recurrent
+		}
+		want.QKNorm = want.QKNorm || sp.QKNorm
 		if !g.towerAt(&want, g.visCap) {
 			return false
 		}
@@ -2409,6 +3102,11 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 		q, ok := quantOf(x.T)
 		if !ok {
 			return mv{}, false
+		}
+		// A narrowed float sub-block (subFor) walks k/sub steps, which the
+		// split, chosen against k/32, must divide.
+		if sub := subFor(q, x.K); sub > 0 && (x.K/sub)%split != 0 {
+			split = 1
 		}
 		// The decode row tile: its rows are adjacent, so a lane loads Rowt
 		// contiguous u32 instead of one. It composes with the split (the tile buys
@@ -2454,7 +3152,7 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 			return mv{}, false
 		}
 		return mv{kern: kern, red: red, rows: x.Rows, split: split, q: q, k: x.K,
-			rowt: rowt, group: grp}, true
+			rowt: rowt, group: grp, pad: p.KPad > 0 && x.K == p.KPad}, true
 	}
 	// bias is threaded into every kernel: a 6-buffer kernel launched with 7 is
 	// refused on Vulkan and silently drops the bias on CUDA, which does not
@@ -2560,7 +3258,16 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 	hostExp := w.HostExperts != nil && (auto && mode == expHost ||
 		g.HybridExperts && !(auto && mode == expCard) || auto && mode == expAuto && !g.NoHybrid)
 	stream := moe && (g.StreamExperts || auto) && slots < bank && (slots > 1 || hostExp)
-	hybrid := stream && hostExp
+	// A hybrid block that can hold an expert cache (Config.NoHybridCache)
+	// is placed as a streamed one -- the compact bank and its kernels on the
+	// card -- marked hybrid, so the cache sized after placement has kernels
+	// to run its experts with (streamBank.split). One whose experts carry
+	// biases or a dense scale keeps no bank, as cacheSlotsFor refuses them,
+	// and so does a float bank, which has no packed sheets to send.
+	cacheable := !g.NoHybridCache && g.StreamCacheSlots >= 0 && slots > 1 && !p.DenseMoE &&
+		w.ExpGateB == nil && w.ExpUpB == nil && w.ExpDownB == nil &&
+		w.Up.Packed != nil && w.Down.Packed != nil && (w.Gate.Packed != nil || len(w.Gate.Data) == 0)
+	hybrid := stream && hostExp && !cacheable
 	// cslots is the streamed bank's size in sheets, decided at the first bank
 	// matrix (cacheSlotsFor): slots without an expert cache, more with one.
 	cslots := -1
@@ -3060,6 +3767,7 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 		if i == 5 && e <= 1 && bias[i] == nil && !ungatedFFN(p) && k.kern != nil && k.rowt <= 1 &&
 			(p.Act == kernels.ActSiLU || p.Act == kernels.ActGELU) {
 			k.gated = g.gatedKernel(k.q, k.k, k.rows, k.split, k.group, p.Act)
+			k.gate2 = g.gate2Kernel(k.q, k.k, k.rows, k.split, k.group, p.Act)
 			// nil at a partial-writing split; the retune builds it once the
 			// split it picks has a final-row form.
 			k.wantGated = true
@@ -3460,7 +4168,8 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 	l.linear = linear
 	l.withAttn = p.Recurrent.WithAttn
 	l.noFFN = p.NoFFN
-	if linear {
+	l.centred = p.Recurrent.Centred
+	if linear && !l.centred {
 		if !g.addSessionRec(sid, l, p) {
 			return false
 		}
@@ -3603,7 +4312,7 @@ func (g *devTier) prepLayer(sid uint64, li int, p *nn.LayerPlan, w *nn.LayerWeig
 	// to the backend goroutine that is blocked running the session -- a
 	// deadlock. prepBatch walks the causal layers eagerly for the same reason.
 	if p.NonCausal && g.bs != nil {
-		for _, m := range []*mv{&l.mvq, &l.mvk, &l.mvv, &l.mvo, &l.mvg, &l.mvu, &l.mvd} {
+		for _, m := range []*mv{&l.mvq, &l.mvk, &l.mvv, &l.mvo, &l.mvg, &l.mvu, &l.mvd, &l.mvSG, &l.mvBA, &l.mvSO} {
 			if m.kern == nil {
 				continue
 			}
@@ -3837,7 +4546,7 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 	if p.NExpert > 0 {
 		moeWide = p.NExpertUsed * p.NFFNExp
 	}
-	wide := p.NEmbd
+	wide := ePad(p)
 	// The shared expert, the linear block's gated output (VHeads*VDim) and its
 	// conv channels, and MLA's four widths below all quantize through the same
 	// buffers, so all are in the max.
@@ -3859,7 +4568,11 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 	if d := p.DS4; d != nil {
 		ds4QA, ds4OA = p.QLoraRank, d.OGroups*d.OLoraRank
 	}
-	for _, n := range []int{p.NFFN, qdim, moeWide, p.NFFNShExp, inner, chans,
+	k3Lat := 0
+	if p.K3 != nil {
+		k3Lat = pad32(p.K3.Latent)
+	}
+	for _, n := range []int{p.NFFN, qPad(p, qdim), pad32(p.PLEDim), k3Lat, moeWide, p.NFFNShExp, pad32(inner), chans,
 		mlaNopeW, mlaLatW, mlaOutW, mlaQAW, ds4QA, ds4OA} {
 		if n > wide {
 			wide = n
@@ -3913,6 +4626,10 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 		al(&bs.rtop, (k+1)*4)
 		al(&bs.rw, (k+1)*4) // slot k is ExpertRoute's bin
 		al(&bs.rwProbe, (k+1)*4)
+		al(&bs.rwHit, (k+1)*4)
+		al(&bs.rselPred, (k+1)*4)
+		al(&bs.esplit, max(p.ExpWidth(), p.NEmbd)*4)
+		al(&bs.hsum, max(p.ExpWidth(), p.NEmbd)*4)
 		if p.DenseMoE {
 			al(&bs.hr, rows*p.NEmbd*4)
 			al(&bs.rwS, k*4)
@@ -4066,8 +4783,8 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			// and after theirs.
 			al(&bs.dLowRank, rows*r.Rank*4)
 			al(&bs.m1LowN, rows*r.Rank*4)
-			al(&bs.dLRa, rows*r.Rank)
-			al(&bs.dLRax, 3*rows*(r.Rank/32)*4)
+			al(&bs.dLRa, rows*pad32(r.Rank))
+			al(&bs.dLRax, 3*rows*(pad32(r.Rank)/32)*4)
 			for _, b := range []*backend.Buf{&bs.m1B, &bs.m1C, &bs.m1BN, &bs.m1CN} {
 				al(b, rows*r.KDim*4)
 			}
@@ -4079,8 +4796,8 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			// The scale plane is three floats per 32-element group (a scale per 32
 			// and a sum per 16), as bs.ax is sized. An undersized one ran on CUDA
 			// and failed on Vulkan.
-			al(&bs.dLRa, rows*r.KDim)
-			al(&bs.dLRax, 3*rows*(r.KDim/32)*4)
+			al(&bs.dLRa, rows*pad32(r.KDim))
+			al(&bs.dLRax, 3*rows*(pad32(r.KDim)/32)*4)
 			al(&bs.dGateWaste, rows*nGate*4)
 		}
 		// q and k ping-pong between two buffers each: every device kernel is out
@@ -4295,6 +5012,9 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 		// clamps it: a session window wider than a row (a per-token model's)
 		// must not take the next row's maximum.
 		{&bs.quantE, func() (*ir.Kernel, error) {
+			if p.KPad > 0 {
+				return kernels.QuantizePadded(rows, p.NEmbd, p.KPad, kernels.ClampWindow(actWin, p.KPad))
+			}
 			return kernels.Quantize(rows*p.NEmbd, kernels.ClampWindow(actWin, p.NEmbd))
 		}},
 		{&bs.quantF, func() (*ir.Kernel, error) {
@@ -4334,9 +5054,14 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			if r.Conv == 0 {
 				return nil, nil
 			}
-			return kernels.Quantize(rows*r.VHeads*r.VDim, kernels.ClampWindow(actWin, r.VHeads*r.VDim))
+			return quantizeRows(rows, r.VHeads*r.VDim, kernels.ClampWindow(actWin, pad32(r.VHeads*r.VDim)))
 		}},
-		{&bs.quantQ, func() (*ir.Kernel, error) { return kernels.Quantize(rows*qdim, kernels.ClampWindow(actWin, qdim)) }},
+		{&bs.quantQ, func() (*ir.Kernel, error) {
+			if w := qPad(p, qdim); w != qdim {
+				return kernels.QuantizePadded(rows, qdim, w, kernels.ClampWindow(actWin, w))
+			}
+			return kernels.Quantize(rows*qdim, kernels.ClampWindow(actWin, qdim))
+		}},
 		// The norm is two kernels (RMSNorm) or three (LayerNorm: mean, variance
 		// about it, apply); see blockScratch.normVar.
 		{&bs.normPart, func() (*ir.Kernel, error) {
@@ -4869,7 +5594,7 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			if p.PLEDim == 0 {
 				return nil, nil
 			}
-			return kernels.Quantize(rows*p.PLEDim, actWin)
+			return quantizeRows(rows, p.PLEDim, actWin)
 		}},
 		{&bs.ewScale, func() (*ir.Kernel, error) {
 			if !p.DenseMoE {
@@ -4968,7 +5693,7 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			if r.Conv == 0 || !r.Mamba1 {
 				return nil, nil
 			}
-			return kernels.Quantize(rows*r.Rank, actWin)
+			return quantizeRows(rows, r.Rank, actWin)
 		}},
 		{&bs.m1NormDt, func() (*ir.Kernel, error) {
 			if r.Conv == 0 || !r.Mamba1 {
@@ -5029,6 +5754,12 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			}
 			return kernels.ActMul(rows*r.Chans, kernels.ActIdentity)
 		}},
+		{&bs.convCentred, func() (*ir.Kernel, error) {
+			if !r.Centred {
+				return nil, nil
+			}
+			return kernels.Conv3Centred(r.Chans, rows)
+		}},
 		{&bs.convShift, func() (*ir.Kernel, error) {
 			if r.Conv == 0 {
 				return nil, nil
@@ -5070,7 +5801,7 @@ func (g *devTier) initScratch(p *nn.LayerPlan, rows int) (out *blockScratch) {
 			if r.Conv == 0 || r.ShortConv || !r.ChanDecay {
 				return nil, nil
 			}
-			return kernels.Quantize(rows*r.KDim, actWin)
+			return quantizeRows(rows, r.KDim, actWin)
 		}},
 		{&bs.deltaStepChan, func() (*ir.Kernel, error) {
 			if r.Conv == 0 || r.ShortConv || !r.ChanDecay {
@@ -5812,7 +6543,7 @@ func (g *devTier) layersCall(sid uint64, lo, hi, pos, n int, x, cs, csSWA []floa
 		bs := g.bs
 		// The windows staged in the set are whichever session's picture
 		// came last: this session's go in again.
-		wok := g.setWindowsLocked(g.winRuns, g.winPerRow)
+		wok := g.setWindowsLocked(g.winRuns, g.winPerRow) && g.setSeqsLocked(g.seqRuns)
 		g.mu.Unlock()
 		if !wok {
 			return false
@@ -5879,9 +6610,10 @@ func (g *devTier) layersCall(sid uint64, lo, hi, pos, n int, x, cs, csSWA []floa
 		// room for the next or the lane holds maxExactWidths (keepExact);
 		// a dropped width's kernels stay in the caches.
 		ww := 0
-		if !g.NoExactPrompt && w != bw && g.keepExact(w) {
-			ww = w
-			g.ExactPrompts++
+		if !g.NoExactPrompt && w != bw {
+			if ww = g.keepExact(w); ww != 0 {
+				g.ExactPrompts++
+			}
 		}
 		if ww == 0 {
 			ww = g.batchFor(w)
@@ -5992,6 +6724,14 @@ func (g *devTier) layersCall(sid uint64, lo, hi, pos, n int, x, cs, csSWA []floa
 			return true
 		}
 		if (!ok || bbs == nil) && dbs == nil {
+			return false
+		}
+		if (!ok || bbs == nil) && bidirCheck(g.bidir, pos, 1, &dbs.p, true) != "" && g.attendsIn(lo, hi) {
+			// One row at a time cuts a bidirectional run the chunk holds,
+			// which attention cannot read row by row: refused before any
+			// block runs (nothing has advanced), so the chunk restarts on
+			// the host whole.
+			g.LastErr = "a bidirectional chunk this device has no batched scratch for"
 			return false
 		}
 		if !ok || bbs == nil {
@@ -6164,6 +6904,10 @@ type graphKey struct {
 	// names, and a step of the same rows wanting fewer logits differs only
 	// here.
 	ragHead int
+	// ragMap is the ragged call's run-table width (raggedprefill.go): it
+	// picks the run-table launch, which a recording names, and 0 is the
+	// decode plan for every row.
+	ragMap int
 	// hnorm is which norm the head reads (headNormFor): a recording names its
 	// buffer by address.
 	hnorm int
@@ -6173,6 +6917,18 @@ type graphKey struct {
 	// persistDeps says those kernels are ordered by dependency counters
 	// (Config.PersistDeps) rather than grid barriers.
 	persistDeps bool
+	// gateUp says the dense FFNs ran gate and up as one launch
+	// (Config.GateUpFuse).
+	gateUp bool
+	// gateUp2 says the dense FFNs ran gate and up as one Gate2 launch
+	// (Config.GateUp2).
+	gateUp2 bool
+	// gateUp2Force says Gate2 ran whatever the tuner chose
+	// (Config.GateUp2Force).
+	gateUp2Force bool
+	// noAddNorm says a prompt chunk's block-end adds ran alone
+	// (Config.NoAddNormFold).
+	noAddNorm bool
 	// sid is the session the recording was made for: it bakes that session's
 	// page descriptors and recurrent seats, so another session never replays
 	// it. Keying on it, rather than dropping every recording when the current
@@ -6185,6 +6941,8 @@ type graphKey struct {
 	noFuse bool
 	// noActFuse is Config.NoActFuse, verify -ab actfuse's switch.
 	noActFuse bool
+	// ffnForm is Config.FFNForm, verify -ab ffn's switch.
+	ffnForm FFNForm
 }
 
 // canRecord reports whether this device's sessions can capture a launch
@@ -6347,6 +7105,12 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 			return refuse("block %d attends inside windows and the device holds windows for %d "+
 				"rows, not %d (SetKeyRuns)", li, bs.vwinRows, len(x)/bs.p.NEmbd)
 		}
+		// Packed sequences over other rows than the call's would let a row
+		// read another sequence's keys.
+		if l.nonCausal && bs.vsegRows != 0 && bs.vsegRows != len(x)/bs.p.NEmbd {
+			return refuse("block %d: the device holds packed sequences over %d rows, not %d (SetSeqRuns)",
+				li, bs.vsegRows, len(x)/bs.p.NEmbd)
+		}
 	}
 	g.Submits++
 	p := &bs.p
@@ -6430,7 +7194,10 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	if g.canRecord() && R == 1 {
 		nCap = (int(n) + scoreGrain - 1) / scoreGrain * scoreGrain
 	}
-	if len(g.bidir) > 0 && !p.NonCausal {
+	// A call with no attention block in it (the head alone, or a hybrid's
+	// linear blocks, which scan their rows in order) cuts no run: a run is
+	// a key count, and only attention reads one.
+	if len(g.bidir) > 0 && !p.NonCausal && g.attendsIn(lo, hi) {
 		if why := bidirCheck(g.bidir, pos, nrow, p, g.pagedPlan(p)); why != "" {
 			return refuse("rows [%d,%d): %s", pos, pos+nrow, why)
 		}
@@ -6525,6 +7292,10 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 			if pk.st != nil && (pk.msa != nil || pk.qsa != nil) {
 				return refuse("the block selection reads the whole history and part of it is evicted")
 			}
+		}
+		pk.ragRows = 0
+		if rag != nil && pk.cur != nil {
+			g.ragPrep(bs)
 		}
 		pk.prefill = pk.pf != nil && pk.cur != nil && pk.st == nil && rag == nil && R > 1 && nrow > 0
 		if pk.prefill {
@@ -6648,7 +7419,12 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	// The label pick: one row's logits, a decode's or a folded chunk's last.
 	pick := head != nil && !argmax && sampleK == 0 && len(head.Pick) > 0 && rag == nil && !allRows &&
 		(R == 1 || fold) && g.prepPick(head)
-	ragN, ragRuns, ragHead := 0, 0, 0
+	ragN, ragRuns, ragHead, ragMap := 0, 0, 0, 0
+	if bs.pkv != nil {
+		// The width, and whether the decode plan runs beside it (ragAlone):
+		// two launch sequences a recording names.
+		ragMap = bs.pkv.ragKey()
+	}
 	if rag != nil {
 		ragN, ragRuns = len(rag.pos), len(rag.runs)
 		if head != nil {
@@ -6669,7 +7445,13 @@ func (g *devTier) layersOnce(sid uint64, bs *blockScratch, lo, hi, pos int, x, c
 	// home, whose uploads sit between launches.
 	persistOn := R == 1 && rag == nil && !(bs.pkv != nil && bs.pkv.st != nil) && g.ensurePersist()
 	key := graphKey{lo, hi, nCap, R, head != nil, g.TableSplit, g.ScalarSoftmax, g.flashOn(), g.KVF16,
-		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, hNormID, persistOn, persistOn && g.PersistDeps, sid, g.NoFuse, g.NoActFuse}
+		ropeDev, argmax, sampleK, samplePen, pick, ragN, ragRuns, par, pagedVar, ragHead, ragMap, hNormID, persistOn, persistOn && g.PersistDeps, g.GateUpFuse, g.GateUp2, g.GateUp2Force, g.NoAddNormFold, sid, g.NoFuse, g.NoActFuse, g.FFNForm}
+	if lo == hi {
+		// The head alone reads no history, so the capacity is not part of
+		// what it records: keyed by it, prompts on either side of a growth
+		// would retire each other's recording on every call.
+		key.scoreN = 0
+	}
 	if _, live := g.recs[key]; !live {
 		for k, r := range g.recs {
 			older := k
@@ -6848,6 +7630,14 @@ func (g *devTier) layersSession(s backend.Session) {
 	var err error
 	direct := false
 	defer func() { a.err, a.direct = err, direct }()
+	// Runs first: no admitted sheet is in flight when the call returns.
+	defer func() {
+		if len(g.adm) > 0 || len(g.admPub) > 0 {
+			if aerr := g.finishAdmits(s); err == nil {
+				err = aerr
+			}
+		}
+	}()
 	w := func(b backend.Buf, p []byte) {
 		if err == nil {
 			t := time.Now()
@@ -7210,6 +8000,10 @@ func (g *devTier) layersSession(s backend.Session) {
 			}
 			g.ds4Tables(lc, bs, R)
 		}
+		// A block-end residual add held for the next block's attention norm
+		// to do in its own launch (foldAddNorm): x = pendX + pendY.
+		var pendX, pendY backend.Buf
+		var pendNorm, pendConv backend.Kernel
 		for li := lo; li < hi; li++ {
 			attnFused, ffnFused := false, false
 			l := g.layers[li]
@@ -7223,6 +8017,11 @@ func (g *devTier) layersSession(s backend.Session) {
 			// and the attention.
 			voltaOnly := R > 1 && rag == nil && g.voltaBlock(l, R, bs.tok) && l.altRouter == nil && l.ds4 == nil &&
 				l.k3 == nil && l.q4e == nil
+			// A held add this block's norm will not take runs alone first.
+			if pendX != nil && !g.foldTakes(l, R, voltaOnly, skip) {
+				addRes(pendX, pendY, bs.x)
+				pendX, pendY = nil, nil
+			}
 			// Gemma 3n: every stream's prediction, the block run on the active
 			// one (altup.go).
 			if l.altRouter != nil {
@@ -7298,16 +8097,30 @@ func (g *devTier) layersSession(s backend.Session) {
 				} else if voltaOnly && !skip["norm"] {
 					// The norm writes the first projection's binary16 operand
 					// too, and the memo tells its GEMM so.
-					nk, conv := backend.Kernel(nil), backend.Kernel(nil)
-					if l.nAttnB == nil && l.nAttn != nil && l.altRouter == nil {
-						nk, conv = g.rmsF16For(bs, l.mvq, R, false)
-					}
-					if nk != nil {
-						laRows(nk, ain, l.nAttn, bs.h, g.f16Buf)
-						actMemoK, actMemoSrc = conv, bs.h
+					if pendX != nil {
+						// The previous block's residual add and this norm, one
+						// launch: x = pendX + pendY and h = RMSNorm(x).
+						y := pendY
+						if addNormBroken {
+							y = pendX
+						}
+						laRows(pendNorm, pendX, y, l.nAttn, bs.x, bs.h, g.f16Buf)
+						actMemoK, actMemoSrc = pendConv, bs.h
+						pendX, pendY = nil, nil
 						g.NormF16++
+						g.AddNormFolded++
 					} else {
-						norm(ain, l.nAttn, l.nAttnB)
+						nk, conv := backend.Kernel(nil), backend.Kernel(nil)
+						if l.nAttnB == nil && l.nAttn != nil && l.altRouter == nil {
+							nk, conv = g.rmsF16For(bs, l.mvq, R, false)
+						}
+						if nk != nil {
+							laRows(nk, ain, l.nAttn, bs.h, g.f16Buf)
+							actMemoK, actMemoSrc = conv, bs.h
+							g.NormF16++
+						} else {
+							norm(ain, l.nAttn, l.nAttnB)
+						}
 					}
 					fsrc = bs.h
 					g.QuantSkipped++
@@ -7320,7 +8133,7 @@ func (g *devTier) layersSession(s backend.Session) {
 						norm(ain, l.nAttn, l.nAttnB)
 					}
 					if !skip["quant"] {
-						lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+						lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
 					}
 					if l.altRouter != nil {
 						g.emitLaurel(lc, bs, l, R, mvrun, norm)
@@ -7410,7 +8223,7 @@ func (g *devTier) layersSession(s backend.Session) {
 								w   int
 							}{{l.mvq, l.wq, bs.q, qdim}, {l.mvk, l.wk, bs.k, kvDim}, {l.mvv, l.wv, bs.v, kvDim}} {
 								lc.la(bs.clampK[2*s], R*p.NEmbd, bs.h, l.clampB, bs.cin)
-								lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.cin, bs.a, bs.ax)
+								lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.cin, bs.a, bs.ax)
 								fsrc = bs.cin
 								mvrun(pr.m, pr.r, pr.out)
 							}
@@ -7418,6 +8231,39 @@ func (g *devTier) layersSession(s backend.Session) {
 							mvIn(l.mvq, l.mvq.kernIn, l.wq, bs.q, ain, l.nAttn, l.mvq.bias)
 							mvIn(l.mvk, l.mvk.kernIn, l.wk, bs.k, ain, l.nAttn, l.mvk.bias)
 							mvIn(l.mvv, l.mvv.kernIn, l.wv, bs.v, ain, l.nAttn, l.mvv.bias)
+						} else if qs, ok := g.qkvGemm(l, R, rag != nil); ok {
+							// q, k and v as one grid over one binary16 operand
+							// (GemmVoltaSegments); a projection left out runs alone.
+							if qs.act != actMemoK || fsrc != actMemoSrc {
+								lc.la(qs.act, qs.actN, fsrc, g.f16Buf)
+								g.ActF16Launches++
+							}
+							actMemoK, actMemoSrc = qs.act, fsrc
+							all := [3]struct {
+								m   mv
+								r   *resident
+								out backend.Buf
+							}{{l.mvq, l.wq, bs.q}, {l.mvk, l.wk, bs.k}, {l.mvv, l.wv, bs.v}}
+							var arr [16]backend.Buf
+							bufs := append(arr[:0], g.f16Buf)
+							for _, i := range qs.segs {
+								sg := all[i]
+								w := sg.r
+								if qkvGemmSwapped && i > 0 && qs.has(3-i) && all[3-i].r.t == w.t && all[3-i].m.rows == sg.m.rows {
+									w = all[3-i].r
+								}
+								bufs = append(bufs, w.qs, w.d, w.sc, sg.out)
+								if sg.m.bias != nil {
+									bufs = append(bufs, sg.m.bias)
+								}
+							}
+							lc.law(qs.kern, qs.threads, qs.width, bufs...)
+							g.QKVGemmRuns++
+							for i, sg := range all {
+								if !qs.has(i) {
+									mvrun(sg.m, sg.r, sg.out)
+								}
+							}
 						} else {
 							mvrun(l.mvq, l.wq, bs.q)
 							mvrun(l.mvk, l.wk, bs.k)
@@ -7728,8 +8574,21 @@ func (g *devTier) layersSession(s backend.Session) {
 						// window its keyStart (pRowW), through the decode plan
 						// chosen before the submission (pagedPlanFor).
 						desc := pk.pRow
-						if p.Window(li) > 0 && !pagedFaulted("window") && !(rag != nil && rowsFaulted("nowin")) {
+						win := p.Window(li) > 0 && !pagedFaulted("window") && !(rag != nil && rowsFaulted("nowin"))
+						if win {
 							desc = pk.pRowW
+						}
+						// A ragged call with a run table: the decode plan over
+						// the descriptors with the table's rows emptied, then
+						// the table's prefill over those rows
+						// (raggedprefill.go).
+						ragOn := rag != nil && pk.ragRows > 0
+						dec := desc
+						if ragOn {
+							dec = pk.pRowDec
+							if win {
+								dec = pk.pRowDecW
+							}
 						}
 						var sk backend.Buf
 						if p.AttnSinks {
@@ -7737,12 +8596,27 @@ func (g *devTier) layersSession(s backend.Session) {
 								sk = bs.noSink
 							}
 						}
-						if err == nil {
-							err = pk.attend(s, lc, g.kvp.layers[l.kvSrc], qAtt, kDst, vDst, bs.n, bs.xb, pgTab, desc, sk)
+						if err == nil && !(ragOn && pk.ragAlone) {
+							err = pk.attend(s, lc, g.kvp.layers[l.kvSrc], qAtt, kDst, vDst, bs.n, bs.xb, pgTab, dec, sk)
 							g.PagedLaunches++
 							if pk.cur.plan.Path == kernels.PathStaged {
 								g.PagedStagedLaunches++
 							}
+						}
+						if ragOn && err == nil {
+							tabRag := desc
+							if rowsFaulted("ragtab") {
+								// The violation: the table's rows read their
+								// keys through the emptied set, so they attend
+								// nothing of their own.
+								tabRag = dec
+							}
+							if pk.ragStaged {
+								err = pk.ragStagedAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk, win)
+							} else {
+								err = pk.ragAttend(lc, qAtt, kDst, vDst, bs.n, bs.xb, pgTab, tabRag, sk)
+							}
+							g.RagPrefills++
 						}
 					} else if !skipAttn && useFlash {
 						dst := bs.xb
@@ -7832,7 +8706,9 @@ func (g *devTier) layersSession(s backend.Session) {
 							// Qwen2.5-VL's windowed blocks: every key outside a
 							// row's window to -inf before the softmax, the windows
 							// of this pass's rows in win.
-							if l.windowed {
+							// Packed sequences: every key outside a row's own
+							// sequence, the same mask over the runs (SetSeqRuns).
+							if win != nil {
 								lc.la(bs.winMask, R*p.NHead*bs.sstride, att, win, bs.attWin)
 								att = bs.attWin
 							}
@@ -7897,10 +8773,10 @@ func (g *devTier) layersSession(s backend.Session) {
 						g.QuantSkipped++
 					} else if l.clampB != nil {
 						lc.la(bs.clampK[6], R*qdim, aSrc, l.clampB, bs.cin)
-						lc.la(bs.quantQ, kernels.QuantizeThreads(R*qdim/32), bs.cin, bs.a, bs.ax)
+						lc.la(bs.quantQ, kernels.QuantizeThreads(R*qPad(p, qdim)/32), bs.cin, bs.a, bs.ax)
 						fsrc = bs.cin
 					} else if !skip["quant"] {
-						lc.la(bs.quantQ, kernels.QuantizeThreads(R*qdim/32), aSrc, bs.a, bs.ax)
+						lc.la(bs.quantQ, kernels.QuantizeThreads(R*qPad(p, qdim)/32), aSrc, bs.a, bs.ax)
 					}
 					if oIn {
 						mvIn(l.mvo, l.mvo.resIn, l.wo, bs.x2, aSrc, nil, bs.x)
@@ -7954,11 +8830,18 @@ func (g *devTier) layersSession(s backend.Session) {
 			// quantize the stream themselves, and the down projection
 			// quantizes act(gate)*up; the FFN norm and its quantize go. Only
 			// on a plain gated FFN, where nothing else reads the normed row.
-			ffnIn := R == 1 && rag == nil && g.actInOn() && l.mvg.kernIn != nil && (l.mvu.gatedIn != nil || l.mvu.kernIn != nil) &&
+			ffnPlain := R == 1 && rag == nil && g.actInOn() &&
 				!voltaOnly && !skipFFN && !skip["norm"] && !skip["quant"] && !skip["actmul"] && bs.normVar == nil &&
 				l.nFFNB == nil && l.nFFN != nil && l.nResid == nil && l.router == nil && l.clampB == nil &&
 				!l.nonCausal && !l.sparse && l.k3 == nil && l.q4e == nil && l.ds4 == nil && l.altRouter == nil && !p.Parallel &&
 				!ungatedFFN(p) && !(g.TableSplit && (l.mvg.alt != nil || l.mvu.alt != nil))
+			ffnIn := ffnPlain && l.mvg.kernIn != nil && (l.mvu.gatedIn != nil || l.mvu.kernIn != nil)
+			// The FFN site's gate2in recipe (recipe.go): Gate2 building its
+			// own operand from the residual the attention output's launch
+			// wrote, so the norm launch goes. Only behind a fused residual:
+			// otherwise the norm's launch is the add too, and stays.
+			g2in := ffnPlain && !ffnIn && attnFused && g.ffnFormOf(l) == FFNGate2In && l.mvu.gate2In != nil &&
+				g.gateUp2On(l, R, false, voltaOnly, false, skip["actmul"])
 			// The FFN norm's fused form where the block runs binary16 GEMMs:
 			// it writes the first FFN projection's operand too.
 			var ffnNorm, ffnConv backend.Kernel
@@ -8031,7 +8914,7 @@ func (g *devTier) layersSession(s backend.Session) {
 				if !skip["add"] && !attnFused {
 					addRes(bs.x, aout, bs.x2)
 				}
-				if ffnIn {
+				if ffnIn || g2in {
 					g.ActInSaved++
 					quantDone = true
 				} else if !voltaOnly && !skip["norm"] && !skip["quant"] && bs.rmsQ != nil && bs.normVar == nil && l.nFFNB == nil &&
@@ -8052,7 +8935,7 @@ func (g *devTier) layersSession(s backend.Session) {
 				fsrc = bs.h
 				g.QuantSkipped++
 			} else if !skip["quant"] && !quantDone {
-				lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+				lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
 			}
 			// ffnOut is what the FFN produced: bs.mvOut for every model, and
 			// the shared-expert sum where one exists.
@@ -8078,7 +8961,28 @@ func (g *devTier) layersSession(s backend.Session) {
 				if latent {
 					ein, eout = bs.k3.lat, bs.k3.latAcc
 				}
-				hybrid := false
+				hybrid, split := false, false
+				// late is host expert work left to run after the card's next
+				// launches (the hits, the shared expert) are queued, so the
+				// card computes while the host does: the misses' sum goes to
+				// lateDst, and lateAdd adds it to the card's hits into eout.
+				late, lateAdd := false, false
+				var lateDst backend.Buf
+				finishLate := func() {
+					if !late {
+						return
+					}
+					late = false
+					if err == nil {
+						err = l.stream.hostLate(sid, g, s, lateDst, split)
+					}
+					if lateAdd {
+						lc.la(bs.addE, p.ExpWidth(), bs.esplit, bs.hsum, eout)
+					}
+					if err == nil && l.stream.cached() {
+						err = l.stream.admit(g, s, l, p.NExpert, g.splitAdmit())
+					}
+				}
 				if R > 1 {
 					if latent {
 						g.k3LatentIn(lc, bs, l, R, mvrun)
@@ -8093,6 +8997,12 @@ func (g *devTier) layersSession(s backend.Session) {
 					// cross-layer probe can run the NEXT block's router over this block's
 					// row through exactly the launches that block will run itself.
 					route := func(l *layer, weights bool) bool {
+						// A prediction writes its selection apart (rselPred), so the
+						// block's own can be read after it.
+						selDst := bs.rsel
+						if !weights && g.splitPredict() > 0 {
+							selDst = bs.rselPred
+						}
 						lc.la(l.mvRouter, kernels.RouterThreads(bs.nExpert), l.router, rin, bs.rlogits)
 						logits := bs.rlogits
 						if l.routerB != nil {
@@ -8136,14 +9046,14 @@ func (g *devTier) layersSession(s backend.Session) {
 							}
 							if err == nil {
 								err = lc.launch(bs.route, 1, bs.routeWidth,
-									logits, bs.rsel, bs.rtop, rwDst)
+									logits, selDst, bs.rtop, rwDst)
 							}
 						case bs.gscore != nil:
-							lc.la(bs.rank, bs.nExpert, logits, bs.rsel, bs.rtop, plane)
+							lc.la(bs.rank, bs.nExpert, logits, selDst, bs.rtop, plane)
 						case selB != nil:
-							lc.la(bs.rank, bs.nExpert, logits, bs.rsel, bs.rtop, selB)
+							lc.la(bs.rank, bs.nExpert, logits, selDst, bs.rtop, selB)
 						default:
-							lc.la(bs.rank, bs.nExpert, logits, bs.rsel, bs.rtop)
+							lc.la(bs.rank, bs.nExpert, logits, selDst, bs.rtop)
 						}
 						if err == nil && !fusedRoute && weights {
 							// One thread: k is 2 to 8 and this is three short loops.
@@ -8160,6 +9070,17 @@ func (g *devTier) layersSession(s backend.Session) {
 						return false
 					}
 					route(l, true)
+					// The next hybrid block's router over this block's row, queued
+					// before the wait so its selection comes home with this one's:
+					// a prediction, which only moves sheets (predictAdmit).
+					var predNx *layer
+					if g.splitPredict() > 0 && l.stream != nil && l.stream.hybrid && li+1 < hi {
+						if nx := g.layers[li+1]; nx != nil && nx.stream != nil && nx.stream.hybrid &&
+							nx.stream.cached() && nx.router != nil {
+							route(nx, false)
+							predNx = nx
+						}
+					}
 					// The suspension, for a streamed bank: the selection comes home, k
 					// sheets of gate/up/down are uploaded at their compact offsets, and the
 					// submission resumes indexing 0..k-1, because the bank it reads is the
@@ -8181,27 +9102,87 @@ func (g *devTier) layersSession(s backend.Session) {
 								l.stream.sel[i] = uint32((li*31 + i*7) % p.NExpert)
 							}
 						} else if err == nil {
+							// Admissions queued by the blocks before go out
+							// while the card runs this one up to its router.
+							if len(g.adm) > 0 {
+								err = g.flushAdmits(s)
+							}
 							tw := time.Now()
-							err = s.Sync()
+							if err == nil {
+								err = s.Sync()
+							}
 							g.TStreamWait += time.Since(tw)
 						}
 						if err == nil && !g.StreamFixedSel {
 							err = s.Read(bs.rsel, u32b(l.stream.sel))
 						}
+						// Sheets sent while the card ran up to this router
+						// (flushAdmits) have landed or are about to: in use from
+						// this block on, a predicted one for this very block.
+						if err == nil && len(g.admPub) > 0 {
+							err = g.publishAdmits(s)
+						}
+						if err == nil && predNx != nil {
+							predNx.stream.pred = growU32(predNx.stream.pred, len(predNx.stream.sel))
+							if err = s.Read(bs.rselPred, u32b(predNx.stream.pred)); err == nil {
+								predNx.stream.havePred = true
+								predNx.stream.predictAdmit(g, predNx, p.NExpert, g.splitPredict())
+							}
+						}
 						if err == nil && !g.StreamFixedSel {
 							l.stream.score(g, li)
 						}
 						hybrid = l.stream.hybrid && !g.StreamFixedSel
-						if err == nil && hybrid {
+						// Every selection the card routes is the session's
+						// count, a hybrid block's or a streamed one's.
+						if !g.StreamFixedSel {
+							l.stream.count(g.hostFns[sid][li].uses)
+						}
+						// The split: a hybrid block with a cache runs the experts the
+						// cache holds on the card and the rest on the host, at once.
+						split = hybrid && l.stream.cached()
+						if err == nil && split {
+							if l.down != l.stream.bank {
+								l.stream.forget()
+								l.stream.bank = l.down
+							}
+							split = l.stream.split(g) > 0
+						}
+						if err == nil && split {
+							if latent {
+								g.k3LatentIn(lc, bs, l, 1, mvrun)
+								err = s.Sync()
+							}
+							if err == nil {
+								err = l.stream.splitIn(s, ein, bs.rw, p.ExpWidth(), bs.nUsed)
+							}
+							if err == nil {
+								err = s.WriteAt(bs.rwHit, 0, f32b(l.stream.dw))
+							}
+						}
+						if err == nil && hybrid && !split {
 							// Hybrid: the experts' input and the routing weights come
 							// home, the host runs the selected experts, and their sum
 							// goes back where the combine would have written it.
 							if latent {
 								g.k3LatentIn(lc, bs, l, 1, mvrun)
+								err = l.stream.runHost(sid, g, s, ein, bs.rw, eout, p.ExpWidth(), bs.nUsed)
+								if err == nil && l.stream.cached() {
+									// No hit: the cache still learns from the selection.
+									err = l.stream.admit(g, s, l, p.NExpert, g.splitAdmit())
+								}
+							} else {
+								// The input and weights come home now; the host runs
+								// the experts once the shared expert is queued.
+								err = l.stream.hybridIn(s, ein, bs.rw, p.ExpWidth(), bs.nUsed)
+								late, lateDst = true, eout
 							}
-							err = l.stream.runHost(sid, g, s, ein, bs.rw, eout, p.ExpWidth(), bs.nUsed)
 						}
-						if err == nil && !hybrid && (g.StreamProbe || g.StreamPrefetch) && li+1 < hi {
+						// A hybrid block runs the probe too when asked (its recall
+						// is the measure a predicted upload is priced on), and
+						// never the host-page prefetch, which its warm pages need
+						// not.
+						if err == nil && (g.StreamProbe || !hybrid && g.StreamPrefetch) && li+1 < hi {
 							// The cross-layer probe: the next block's router over this
 							// block's normed row, ranked by that block's own launches.
 							// It clobbers rsel and rtop, which nothing below reads on a
@@ -8214,7 +9195,7 @@ func (g *devTier) layersSession(s backend.Session) {
 									nx.stream.pred = growU32(nx.stream.pred, len(nx.stream.sel))
 									err = s.Read(bs.rsel, u32b(nx.stream.pred))
 									nx.stream.havePred = err == nil
-									if err == nil && g.StreamPrefetch {
+									if err == nil && g.StreamPrefetch && !hybrid {
 										nx.stream.prefetch(g)
 									}
 								}
@@ -8239,16 +9220,16 @@ func (g *devTier) layersSession(s backend.Session) {
 							g.StreamFills++
 						}
 					}
-					if hybrid && latent {
+					if hybrid && !split && latent {
 						// The routed sum is already in eout.
 						g.k3LatentOut(lc, bs, l, 1, mvrun)
 					}
-					if !hybrid {
+					if !hybrid || split {
 						// gate and up read the one normed vector, so they are
 						// indexed on the weight side only. bs.a/bs.ax still hold
 						// its quantization from the launch above -- or, at
 						// Kimi-K3's latent, its projection's.
-						if latent {
+						if latent && !split {
 							g.k3LatentIn(lc, bs, l, 1, mvrun)
 						}
 						ffnW := bs.nUsed * bs.nFFNExp
@@ -8265,6 +9246,9 @@ func (g *devTier) layersSession(s backend.Session) {
 							g.MoEFused++
 						}
 						rw := bs.rw
+						if split {
+							rw = bs.rwHit
+						}
 						if p.DenseMoE {
 							// Each routed weight times its expert's own factor.
 							lc.la(bs.ewScale, bs.nUsed, bs.rw, bs.rsel, l.expScale, bs.rwS)
@@ -8324,11 +9308,28 @@ func (g *devTier) layersSession(s backend.Session) {
 								edown = bs.edownB
 							}
 						}
-						lc.la(bs.combine, p.ExpWidth(), edown, rw, eout)
+						if !split {
+							lc.la(bs.combine, p.ExpWidth(), edown, rw, eout)
+						} else {
+							// The card's hits sum into esplit while the host runs
+							// the misses; the two sums are added in that order.
+							lc.la(bs.combine, p.ExpWidth(), edown, rw, bs.esplit)
+							late, lateAdd, lateDst = true, true, bs.hsum
+							if latent {
+								// The latent's out projection reads the sum: no
+								// shared expert runs between.
+								finishLate()
+							}
+						}
 						if latent {
 							g.k3LatentOut(lc, bs, l, 1, mvrun)
 						}
 					}
+				}
+				shared := bs.shAdd != nil && !p.DenseMoE &&
+					(l.shGate != nil || ungatedFFN(p)) && l.shUp != nil && l.shDown != nil
+				if !shared {
+					finishLate()
 				}
 				if p.DenseMoE {
 					// The experts' post-norm, then the dense MLP's normed output
@@ -8340,14 +9341,13 @@ func (g *devTier) layersSession(s backend.Session) {
 				}
 				// The always-on expert is added after the routed sum, not into it: the
 				// routed weights may be renormalised by their own sum (see engine/model/moe.go).
-				if bs.shAdd != nil && !p.DenseMoE &&
-					(l.shGate != nil || ungatedFFN(p)) && l.shUp != nil && l.shDown != nil {
+				if shared {
 					if l.shRouter != nil {
 						lc.la(bs.shRouterK, kernels.SharedRouterThreads(R), l.shRouter, bs.h, bs.shlogit)
 					}
 					// Re-quantize h: quantX overwrote bs.a/bs.ax with the expert
 					// activations.
-					lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+					lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
 					switch {
 					case ungatedFFN(p):
 						// Ungated (Nemotron 3): up and the activation alone.
@@ -8370,6 +9370,9 @@ func (g *devTier) layersSession(s backend.Session) {
 					}
 					lc.la(bs.shQuant, kernels.QuantizeThreads(R*bs.nShExp/32), bs.shact, bs.a, bs.ax)
 					mvrun(l.mvsd, l.shDown, bs.shout)
+					// The host's experts run now, the shared expert queued
+					// ahead of them on the card.
+					finishLate()
 					// An ungated shared expert is a plain add: no logit makes sigma()
 					// exactly one, so the multiply goes rather than being neutralised.
 					if l.shRouter != nil {
@@ -8390,6 +9393,7 @@ func (g *devTier) layersSession(s backend.Session) {
 					}
 				}
 				gIn, uIn := bs.g, bs.u
+				guDone, gu2 := false, false
 				if l.clampB != nil && !ungated {
 					// Gemma 4's clipped linears: gate and up each read their own
 					// clamped copy of the normed rows, and the activation their
@@ -8400,106 +9404,150 @@ func (g *devTier) layersSession(s backend.Session) {
 						out, cl backend.Buf
 					}{{l.mvg, l.gate, bs.g, bs.gClamp}, {l.mvu, l.up, bs.u, bs.uClamp}} {
 						lc.la(bs.clampK[8+2*s], R*p.NEmbd, bs.h, l.clampB, bs.cin)
-						lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.cin, bs.a, bs.ax)
+						lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.cin, bs.a, bs.ax)
 						fsrc = bs.cin
 						mvrun(pr.m, pr.r, pr.out)
 						lc.la(bs.clampK[9+2*s], R*p.NFFN, pr.out, l.clampB, pr.cl)
 					}
 					gIn, uIn = bs.gClamp, bs.uClamp
+				} else if g2in {
+					// The norm, gate and up in one launch: up's weight, the
+					// residual and the norm weight, the product's row, then the
+					// gate's weight (Gate2 with ActIn's norm).
+					wu, wg := l.up, l.gate
+					if gateUp2Swapped {
+						wu, wg = wg, wu
+					}
+					lamv(l.mvu, l.mvu.gate2In, l.mvu.rows*l.mvu.split, wu.qs, wu.d, wu.sc, bs.x2, l.nFFN, bs.act,
+						wg.qs, wg.d, wg.sc)
+					g.Gate2InRuns++
+					g.ActInLaunches++
+					gu2 = true
 				} else if ffnIn {
 					mvIn(l.mvg, l.mvg.kernIn, l.gate, bs.g, bs.x2, l.nFFN, nil)
+				} else if guOK := (g.GateUpFuse || g.ffnFormOf(l) == FFNGU) && l.gu != nil && l.guDown != nil && R == 1 && rag == nil && !voltaOnly && !ungated &&
+					l.nSubFFN == nil && l.nPostFFN == nil && !resScaled && !skip["add"] && !skip["actmul"] && !skip["quantf"] &&
+					!g.TableSplit && l.mvd.k == nffn && l.k3 == nil && l.q4e == nil && !l.nonCausal && !l.sparse; guOK {
+					// Gate and up in one launch over one operand, and down
+					// forming act(gate)*up as it quantizes, with the residual
+					// add (fuseGateUp). Every row keeps its own reduction.
+					if err == nil {
+						err = lc.launch(l.gu.kern, l.gu.blocks, l.gu.w, bs.a, bs.ax,
+							l.gate.qs, l.gate.d, l.gate.sc, bs.g, l.up.qs, l.up.d, l.up.sc, bs.u)
+					}
+					if gateUpSwapped {
+						mvIn(l.mvd, l.guDown, l.down, bs.x, bs.u, bs.g, bs.x2)
+					} else {
+						mvIn(l.mvd, l.guDown, l.down, bs.x, bs.g, bs.u, bs.x2)
+					}
+					g.GateUpFused++
+					ffnFused = true
+					guDone = true
+				} else if gu2 = g.ffnFormOf(l) != FFNTwo && g.gateUp2On(l, R, rag != nil, voltaOnly, ungated, skip["actmul"]); gu2 {
+					// Gate and up in one launch: up's weight, the operand, the
+					// product's row, then the gate's weight (Gate2).
+					wu, wg := l.up, l.gate
+					if gateUp2Swapped {
+						wu, wg = wg, wu
+					}
+					lamv(l.mvu, l.mvu.gate2, l.mvu.rows*l.mvu.split, wu.qs, wu.d, wu.sc, bs.a, bs.ax, bs.act,
+						wg.qs, wg.d, wg.sc)
+					g.GateUp2Runs++
 				} else if !ungated {
 					mvrun(l.mvg, l.gate, bs.g)
 					// Gemma 3n's sparse lead: the gate's gaussian top-k.
 					gIn = g.emitGauss(lc, bs, l, R)
 				}
-				gated := false
-				switch {
-				case ffnIn && l.mvu.gatedIn != nil:
-					mvIn(l.mvu, l.mvu.gatedIn, l.up, bs.act, bs.x2, l.nFFN, gIn)
-					gated = true
-				case ffnIn:
-					mvIn(l.mvu, l.mvu.kernIn, l.up, bs.u, bs.x2, l.nFFN, nil)
-				default:
-					// BitNet normalises the product before down, so up does not
-					// form it in its own store.
-					gated = !ungated && l.clampB == nil && l.nSubFFN == nil && !skip["actmul"] && mvgate(l.mvu, l.up, bs.act, gIn)
-					if !gated && l.clampB == nil {
-						mvrun(l.mvu, l.up, bs.u)
-					}
-				}
-				// The down projection building its own operand (fuseActIn):
-				// quantizing act(gate)*up where up wrote it (downIn), or
-				// forming it from gate and up as it quantizes (downAct).
-				downOK := R == 1 && rag == nil && g.actInOn() && !voltaOnly && l.clampB == nil && l.nPostFFN == nil && l.nSubFFN == nil &&
-					!resScaled && !skip["add"] && !skip["quantf"] && !skip["actmul"] && l.k3 == nil && l.q4e == nil && !l.nonCausal &&
-					!(g.TableSplit && l.mvd.alt != nil) && l.mvd.k == nffn
-				downIn := downOK && gated && l.mvd.resIn != nil
-				downAct := downOK && ffnIn && !gated && l.mvd.resActIn != nil
-				// The activation writes the down projection's operand where it
-				// can: binary16 for a binary16 GEMM, int8 for the rest.
-				var actConv backend.Kernel
-				quantDoneF := downAct
-				if !skip["actmul"] && !gated && !ungated && l.clampB == nil && !downAct {
-					if voltaOnly {
-						if ak, conv, n := g.actF16For(bs, l.mvd, R); ak != nil {
-							lc.la(ak, n, gIn, uIn, g.f16Buf)
-							actConv = conv
-							g.ActF16Fused++
+				if !guDone {
+					gated := gu2
+					switch {
+					case gu2:
+					case ffnIn && l.mvu.gatedIn != nil:
+						mvIn(l.mvu, l.mvu.gatedIn, l.up, bs.act, bs.x2, l.nFFN, gIn)
+						gated = true
+					case ffnIn:
+						mvIn(l.mvu, l.mvu.kernIn, l.up, bs.u, bs.x2, l.nFFN, nil)
+					default:
+						// BitNet normalises the product before down, so up does not
+						// form it in its own store.
+						gated = !ungated && l.clampB == nil && l.nSubFFN == nil && !skip["actmul"] && mvgate(l.mvu, l.up, bs.act, gIn)
+						if !gated && l.clampB == nil {
+							mvrun(l.mvu, l.up, bs.u)
 						}
-					} else if bs.quantAct != nil && !skip["quantf"] && !g.NoOperandFuse && l.nSubFFN == nil {
-						lc.la(bs.quantAct, kernels.QuantizeThreads(R*p.NFFN/32), gIn, uIn, bs.act, bs.a, bs.ax)
+					}
+					// The down projection building its own operand (fuseActIn):
+					// quantizing act(gate)*up where up wrote it (downIn), or
+					// forming it from gate and up as it quantizes (downAct).
+					downOK := R == 1 && rag == nil && g.actInOn() && !voltaOnly && l.clampB == nil && l.nPostFFN == nil && l.nSubFFN == nil &&
+						!resScaled && !skip["add"] && !skip["quantf"] && !skip["actmul"] && l.k3 == nil && l.q4e == nil && !l.nonCausal &&
+						!(g.TableSplit && l.mvd.alt != nil) && l.mvd.k == nffn
+					downIn := downOK && gated && l.mvd.resIn != nil
+					downAct := downOK && ffnIn && !gated && l.mvd.resActIn != nil
+					// The activation writes the down projection's operand where it
+					// can: binary16 for a binary16 GEMM, int8 for the rest.
+					var actConv backend.Kernel
+					quantDoneF := downAct
+					if !skip["actmul"] && !gated && !ungated && l.clampB == nil && !downAct {
+						if voltaOnly {
+							if ak, conv, n := g.actF16For(bs, l.mvd, R); ak != nil {
+								lc.la(ak, n, gIn, uIn, g.f16Buf)
+								actConv = conv
+								g.ActF16Fused++
+							}
+						} else if bs.quantAct != nil && !skip["quantf"] && !g.NoOperandFuse && l.nSubFFN == nil {
+							lc.la(bs.quantAct, kernels.QuantizeThreads(R*p.NFFN/32), gIn, uIn, bs.act, bs.a, bs.ax)
+							fsrc = bs.act
+							quantDoneF = true
+							g.QuantActs++
+						}
+					}
+					if !skip["actmul"] && !gated && actConv == nil && !quantDoneF {
+						if ungated && l.xielu != nil {
+							// Apertus: the block's four numbers ride as a buffer.
+							lc.la(actK, R*nffn, bs.u, l.xielu, bs.act)
+						} else if ungated {
+							// One operand: the gate does not exist.
+							lc.la(actK, R*nffn, bs.u, bs.act)
+						} else {
+							lc.la(actK, R*nffn, gIn, uIn, bs.act)
+						}
+					}
+					if voltaOnly {
 						fsrc = bs.act
-						quantDoneF = true
-						g.QuantActs++
+						g.QuantSkipped++
+						if actConv != nil {
+							actMemoK, actMemoSrc = actConv, bs.act
+						}
+					} else if l.clampB != nil && !quantDoneF {
+						lc.la(bs.clampK[12], R*p.NFFN, bs.act, l.clampB, bs.cin)
+						lc.la(bs.quantF, kernels.QuantizeThreads(R*p.NFFN/32), bs.cin, bs.a, bs.ax)
+						fsrc = bs.cin
 					}
-				}
-				if !skip["actmul"] && !gated && actConv == nil && !quantDoneF {
-					if ungated && l.xielu != nil {
-						// Apertus: the block's four numbers ride as a buffer.
-						lc.la(actK, R*nffn, bs.u, l.xielu, bs.act)
-					} else if ungated {
-						// One operand: the gate does not exist.
-						lc.la(actK, R*nffn, bs.u, bs.act)
+					if downIn || downAct {
+						g.ActInSaved++
+					} else if l.nSubFFN != nil {
+						// BitNet: the norm over act(gate)*up and the quantize down
+						// reads, one launch a row.
+						laRows(bs.subQF, bs.act, l.nSubFFN, bs.sub, bs.a, bs.ax)
+						fsrc = bs.sub
+					} else if !voltaOnly && l.clampB == nil && !skip["quantf"] && !quantDoneF {
+						lc.la(bs.quantF, kernels.QuantizeThreads(R*nffn/32), bs.act, bs.a, bs.ax)
+					}
+					if downIn {
+						mvIn(l.mvd, l.mvd.resIn, l.down, bs.x, bs.act, nil, bs.x2)
+						ffnFused = true
+					} else if downAct {
+						// pIn is the gate's row and the norm-weight slot carries up's.
+						mvIn(l.mvd, l.mvd.resActIn, l.down, bs.x, gIn, uIn, bs.x2)
+						ffnFused = true
+					} else if l.clampB == nil && l.nPostFFN == nil && !resScaled && !skip["add"] && l.k3 == nil && l.q4e == nil && mvres(l.mvd, l.down, bs.x, bs.x2) {
+						ffnFused = true
 					} else {
-						lc.la(actK, R*nffn, gIn, uIn, bs.act)
-					}
-				}
-				if voltaOnly {
-					fsrc = bs.act
-					g.QuantSkipped++
-					if actConv != nil {
-						actMemoK, actMemoSrc = actConv, bs.act
-					}
-				} else if l.clampB != nil && !quantDoneF {
-					lc.la(bs.clampK[12], R*p.NFFN, bs.act, l.clampB, bs.cin)
-					lc.la(bs.quantF, kernels.QuantizeThreads(R*p.NFFN/32), bs.cin, bs.a, bs.ax)
-					fsrc = bs.cin
-				}
-				if downIn || downAct {
-					g.ActInSaved++
-				} else if l.nSubFFN != nil {
-					// BitNet: the norm over act(gate)*up and the quantize down
-					// reads, one launch a row.
-					laRows(bs.subQF, bs.act, l.nSubFFN, bs.sub, bs.a, bs.ax)
-					fsrc = bs.sub
-				} else if !voltaOnly && l.clampB == nil && !skip["quantf"] && !quantDoneF {
-					lc.la(bs.quantF, kernels.QuantizeThreads(R*nffn/32), bs.act, bs.a, bs.ax)
-				}
-				if downIn {
-					mvIn(l.mvd, l.mvd.resIn, l.down, bs.x, bs.act, nil, bs.x2)
-					ffnFused = true
-				} else if downAct {
-					// pIn is the gate's row and the norm-weight slot carries up's.
-					mvIn(l.mvd, l.mvd.resActIn, l.down, bs.x, gIn, uIn, bs.x2)
-					ffnFused = true
-				} else if l.clampB == nil && l.nPostFFN == nil && !resScaled && !skip["add"] && l.k3 == nil && l.q4e == nil && mvres(l.mvd, l.down, bs.x, bs.x2) {
-					ffnFused = true
-				} else {
-					mvrun(l.mvd, l.down, bs.mvOut)
-					if l.clampB != nil {
-						lc.la(bs.clampK[13], R*p.NEmbd, bs.mvOut, l.clampB, bs.cout)
-						ffnOut = bs.cout
+						mvrun(l.mvd, l.down, bs.mvOut)
+						if l.clampB != nil {
+							lc.la(bs.clampK[13], R*p.NEmbd, bs.mvOut, l.clampB, bs.cout)
+							ffnOut = bs.cout
+						}
 					}
 				}
 			}
@@ -8518,7 +9566,11 @@ func (g *devTier) layersSession(s backend.Session) {
 			} else if l.k3 != nil {
 				g.k3PostFFN(lc, bs, R, fout)
 			} else if !skip["add"] && !ffnFused {
-				addRes(bs.x2, fout, bs.x)
+				if nk, conv := g.foldAddNorm(bs, l, li, hi, R, voltaOnly, scaled, persist, fout, skip); nk != nil {
+					pendX, pendY, pendNorm, pendConv = bs.x2, fout, nk, conv
+				} else {
+					addRes(bs.x2, fout, bs.x)
+				}
 			}
 			// BERT's output norm, over x + mlp, out of place and back.
 			if l.nResid != nil && !skip["norm"] {
@@ -8532,11 +9584,11 @@ func (g *devTier) layersSession(s backend.Session) {
 				// gated into the rest (altup.go).
 				g.emitAltCorrect(lc, bs, l, R, mvrun, norm)
 			} else if l.pleGate != nil && bs.pleIn != nil {
-				lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.x, bs.a, bs.ax)
+				lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.x, bs.a, bs.ax)
 				mvrun(l.mvpg, l.pleGate, bs.pleG)
 				lc.la(bs.pleSlice, R*p.PLEDim, bs.pleIn, l.pleOff, bs.pleS)
 				lc.la(bs.pleAct, R*p.PLEDim, bs.pleG, bs.pleS, bs.pleA)
-				lc.la(bs.pleQuant, kernels.QuantizeThreads(R*p.PLEDim/32), bs.pleA, bs.a, bs.ax)
+				lc.la(bs.pleQuant, kernels.QuantizeThreads(R*pad32(p.PLEDim)/32), bs.pleA, bs.a, bs.ax)
 				mvrun(l.mvpp, l.pleProj, bs.pleO)
 				lc.la(bs.normPart, R*bs.parts, bs.pleO, bs.part)
 				lc.la(bs.normApply, R*p.NEmbd, bs.pleO, l.nPLE, bs.part, bs.h)
@@ -8550,6 +9602,9 @@ func (g *devTier) layersSession(s backend.Session) {
 				lc.la(bs.scaleX, R*p.NEmbd, bs.h, bs.one, bs.x)
 			}
 		}
+		if pendX != nil {
+			addRes(pendX, pendY, bs.x)
+		}
 		if head != nil && (rag != nil || allRows) {
 			// The output norm, the projection of the rows that want logits
 			// (they lead) and a per-row argmax over them: their tokens and
@@ -8557,7 +9612,7 @@ func (g *devTier) layersSession(s backend.Session) {
 			// (nn.Head.RowLogits on Layers) takes the same tail.
 			hr := g.bs.head
 			norm(bs.x, hNorm, g.bs.hNormB)
-			lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+			lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
 			one, oneOK := mv{}, false
 			if ragHead == 1 {
 				one, oneOK = g.headOneMV(R) // compiled by prepRagged
@@ -8668,7 +9723,7 @@ func (g *devTier) layersSession(s backend.Session) {
 				}
 				lc.la(bs.normApply, p.NEmbd, bs.x, hNorm, bs.part, bs.h)
 			}
-			lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+			lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
 			// HeadMatvecRepeat is the same idempotent-repeat probe on the head
 			// matvec, pricing it by repetition.
 			pickOnly := pick && g.pickMV != nil && bs.headCap == nil && R == 1
@@ -8845,6 +9900,7 @@ func (g *devTier) layersSession(s backend.Session) {
 		if pk.prefill {
 			pk.pf.prefillWrites(w)
 		}
+		pk.ragWrites(w)
 		if pk.st != nil {
 			pk.st.writes(w)
 		}
@@ -9743,9 +10799,19 @@ func (g *devTier) prepBatch(width int) bool {
 				// only the selection.
 				mg := bb.mg
 				// A hybrid block routes the rows on the device and runs their
-				// experts on the host (emitGroupedMoE): the routing scratch is
-				// all it needs, and no grouped expert kernel.
-				if mg != nil && l.stream != nil && l.stream.hybrid {
+				// experts on the host, or, with an expert cache, the cached ones
+				// on the card through the grouped kernels over the cache
+				// (emitGroupedMoE, streamBank.splitRows): built here for every
+				// hybrid block, since a cache may be sized after placement. A
+				// kernel the shape refuses leaves that block's rows on the host.
+				hybrid := mg != nil && l.stream != nil && l.stream.hybrid
+				if hybrid {
+					if mg.volta && !kernels.IsFloat(m.q) {
+						bias, nsrc := moeVoltaArgs(l, m, mg)
+						g.voltaGroupedMV(*m, mg.nExp, mg.p, mg.unit, bias, nsrc)
+					} else if !mg.volta && !kernels.IsFloat(m.q) {
+						g.groupedMV(*m, mg.nExp, mg.p)
+					}
 					continue
 				}
 				if mg == nil || l.stream != nil {
@@ -9833,22 +10899,71 @@ func (g *devTier) actWinFor(ntok int) int {
 // int8 GEMM where Config.PreferGemmInt8 asks for it (int8Gemm, sm_80 on), the
 // staged binary16 GEMM on the m16n8 instruction where the device has it
 // (f16Gemm, sm_75 on), then intBatchMV's forms.
+// pad32 is n rounded up to the activation quantizer's 32-element block: the
+// width a ragged activation is quantized at, its tail zero.
+func pad32(n int) int { return (n + 31) / 32 * 32 }
+
+// quantizeRows is the quantizer of rows activations n wide: Quantize over
+// them where n is a whole number of blocks, QuantizePadded with a zero tail
+// where it is not (launch QuantizeThreads(rows*pad32(n)/32)). The window is
+// clamped to the padded row, as the host's ragged quantizer clamps it.
+func quantizeRows(rows, n, win int) (*ir.Kernel, error) {
+	if n%32 == 0 {
+		return kernels.Quantize(rows*n, win)
+	}
+	return kernels.QuantizePadded(rows, n, pad32(n), kernels.ClampWindow(win, pad32(n)))
+}
+
+// ePad is the width a block's residual-reading matrices quantize their
+// activation at: NEmbd, or the padded width of a ragged tower
+// (nn.LayerPlan.KPad).
+func ePad(p *nn.LayerPlan) int {
+	if p.KPad > 0 {
+		return p.KPad
+	}
+	return p.NEmbd
+}
+
+// qPad is ePad for the attention's output, qdim wide: padded where the
+// output is the tower's own width.
+func qPad(p *nn.LayerPlan, qdim int) int {
+	if p.KPad > 0 && qdim == p.NEmbd {
+		return p.KPad
+	}
+	return qdim
+}
+
+// attendsIn reports whether a block of [lo, hi) on this device attends: not
+// a linear block's recurrence.
+func (g *devTier) attendsIn(lo, hi int) bool {
+	for li := lo; li < hi; li++ {
+		if l := g.layers[li]; l != nil && !l.linear {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *devTier) batchMV(m mv, ntok, tok int) (mv, bool) {
 	// A build reached from inside a submission takes g.mu (subLock).
 	defer g.subUnlock(g.subLock())
 	if g.PreferTiles {
-		if bm, ok := g.tileMV(m, ntok); ok {
+		if bm, ok := g.tileMV(m, ntok); ok && padOK(m, bm) {
 			return bm, true
 		}
 	}
-	if bm, ok := g.int8Gemm(m, ntok); ok {
+	if bm, ok := g.int8Gemm(m, ntok); ok && padOK(m, bm) {
 		return bm, true
 	}
-	if bm, ok := g.f16Gemm(m, ntok); ok {
+	if bm, ok := g.f16Gemm(m, ntok); ok && padOK(m, bm) {
 		return bm, true
 	}
 	return g.intBatchMV(m, ntok, tok)
 }
+
+// padOK reports whether batched twin bm may serve m: not one that reads the
+// float activation when m's is the padded int8 rows (mv.pad).
+func padOK(m, bm mv) bool { return !m.pad || bm.act == nil }
 
 // intBatchMV is batchMV without the m16n8 GEMM: the integer matrix
 // instruction wherever the device has one (MatVecMMA is faster than the dp4a
@@ -9862,7 +10977,7 @@ func (g *devTier) intBatchMV(m mv, ntok, tok int) (mv, bool) {
 	// A float weight has no tensor-core kernel. Asking would fail, and a
 	// failure here switches MMA off for every other matvec (mmaOff).
 	if mt, nt, ok := g.mmaTile(m.rows, ntok); ok && !kernels.IsFloat(m.q) {
-		kk := kernKey{m.q, m.k, m.rows, -(ntok*100 + mt*10 + nt), m.bias != nil, 1, false, false, 0}
+		kk := kernKey{m.q, m.k, m.rows, -(ntok*100 + mt*10 + nt), m.bias != nil, 1, false, false, 0, false}
 		c, cached := g.kerns[kk]
 		if !cached {
 			ker, err := kernels.MatVecMMA(kernels.MatVecShape{Center: g.center,
@@ -9885,10 +11000,10 @@ func (g *devTier) intBatchMV(m mv, ntok, tok int) (mv, bool) {
 				threads: (m.rows / (16 * mt)) * (ntok / (8 * nt)) * 32}, true
 		}
 	}
-	if bm, ok := g.tileMV(m, ntok); ok {
+	if bm, ok := g.tileMV(m, ntok); ok && padOK(m, bm) {
 		return bm, true
 	}
-	if bm, ok := g.voltaMV(m, ntok); ok {
+	if bm, ok := g.voltaMV(m, ntok); ok && padOK(m, bm) {
 		return bm, true
 	}
 	return g.batchMVDot4(m, ntok, tok)
@@ -10408,6 +11523,10 @@ func (g *devTier) emitLinear(sid uint64, s backend.Session, bs *blockScratch, l 
 	mvrun func(mv, *resident, backend.Buf),
 	mvrunAct func(mv, *resident, backend.Buf, backend.Buf, backend.Buf, backend.Buf)) {
 	r := bs.rec
+	if l.centred {
+		g.emitCentred(bs, l, li, R, p, errp, lc, mvrun)
+		return
+	}
 	// The real row count (bs.dRows) matters here where attention would mask:
 	// a zero padding column shifted into the state stays there. layersOnce
 	// stages it with the other per-call writes, outside emit, through the
@@ -10453,7 +11572,7 @@ func (g *devTier) emitLinear(sid uint64, s backend.Session, bs *blockScratch, l 
 		lc.la(bs.normPart, R*bs.parts, in, bs.part)
 		lc.la(bs.normApply, R*p.NEmbd, in, l.nAttn, bs.part, bs.h)
 	}
-	lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.h, bs.a, bs.ax)
+	lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
 
 	if r.SSD {
 		g.emitSSD(sid, bs, l, li, R, rag, p, errp, lc, mvrun, pool, par, seqs)
@@ -10479,11 +11598,11 @@ func (g *devTier) emitLinear(sid uint64, s backend.Session, bs *blockScratch, l 
 			mvrun(l.mvSG, l.ssmGate, bs.dZ)
 		} else {
 			mvrun(l.mvGA, l.ssmGA, bs.dLowRank)
-			lc.la(bs.quantLR, kernels.QuantizeThreads(R*r.KDim/32), bs.dLowRank, bs.dLRa, bs.dLRax)
+			lc.la(bs.quantLR, kernels.QuantizeThreads(R*pad32(r.KDim)/32), bs.dLowRank, bs.dLRa, bs.dLRax)
 			mvrunAct(l.mvGB, l.ssmGB, bs.dZ, bs.dLRa, bs.dLRax, bs.dLowRank)
 		}
 		mvrun(l.mvFA, l.ssmFA, bs.dLowRank)
-		lc.la(bs.quantLR, kernels.QuantizeThreads(R*r.KDim/32), bs.dLowRank, bs.dLRa, bs.dLRax)
+		lc.la(bs.quantLR, kernels.QuantizeThreads(R*pad32(r.KDim)/32), bs.dLowRank, bs.dLRa, bs.dLRax)
 		mvrunAct(l.mvFB, l.ssmFB, bs.dAlpha, bs.dLRa, bs.dLRax, bs.dLowRank)
 		// ssmBA is b_proj alone here: beta's logits, one per value head, with
 		// no alpha stream in it to deinterleave.
@@ -10640,7 +11759,7 @@ func (g *devTier) emitLinear(sid uint64, s backend.Session, bs *blockScratch, l 
 	} else {
 		lc.la(bs.outActMul, R*inner, bs.dZ, bs.dOutN, bs.dAct)
 	}
-	lc.la(bs.quantD, kernels.QuantizeThreads(R*inner/32), gated, bs.a, bs.ax)
+	lc.la(bs.quantD, kernels.QuantizeThreads(R*pad32(inner)/32), gated, bs.a, bs.ax)
 	mvrun(l.mvSO, l.ssmOut, bs.mvOut)
 
 	// The flip is after the launches, so a captured graph replays the pointers
@@ -10740,12 +11859,42 @@ func (g *devTier) emitSSD(sid uint64, bs *blockScratch, l *layer, li, R int, rag
 			*errp = lc.launch(bs.ssdNorm, ng, nwid, bs.dOutN, l.ssmNorm, bs.dAct)
 		}
 	}
-	lc.la(bs.quantD, kernels.QuantizeThreads(R*inner/32), act, bs.a, bs.ax)
+	lc.la(bs.quantD, kernels.QuantizeThreads(R*pad32(inner)/32), act, bs.a, bs.ax)
 	mvrun(l.mvSO, l.ssmOut, out)
 	if errp == nil || *errp == nil {
 		g.stepFlip(sid, l)
 		g.recSteps++
 	}
+}
+
+// emitCentred issues one LFM2 encoder convolution block (d1-omni's trunk):
+// the pre-norm and its quantization, x, B and C, B*x through the centred
+// convolution over the call's rows -- each tap inside the row's window,
+// bs.vwinAll -- C times that, and out_proj into bs.mvOut. No state: the call
+// is the whole sequence.
+func (g *devTier) emitCentred(bs *blockScratch, l *layer, li, R int, p *nn.LayerPlan, errp *error,
+	lc *launcher, mvrun func(mv, *resident, backend.Buf)) {
+	r := bs.rec
+	// The windows cover this call's rows: a windowed block's submission is
+	// refused otherwise (layersOnce), and the padded rows past them read the
+	// whole call's window, whose output nothing copies out.
+	if bs.convCentred == nil || bs.vwinAll == nil {
+		if *errp == nil {
+			*errp = fmt.Errorf("tier: block %d convolves inside row windows and the device holds none", li)
+		}
+		return
+	}
+	lc.la(bs.normPart, R*bs.parts, bs.x, bs.part)
+	lc.la(bs.normApply, R*p.NEmbd, bs.x, l.nAttn, bs.part, bs.h)
+	lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.h, bs.a, bs.ax)
+	mvrun(l.mvq, l.wq, bs.dMixed)
+	mvrun(l.mvSG, l.ssmGate, bs.scB)
+	mvrun(l.mvBA, l.ssmBA, bs.scC)
+	lc.la(bs.scMul, R*r.Chans, bs.scB, bs.dMixed, bs.scBx)
+	lc.la(bs.convCentred, R*r.Chans, bs.scBx, l.ssmConv1d, bs.vwinAll, bs.dConv)
+	lc.la(bs.scMul, R*r.Chans, bs.scC, bs.dConv, bs.scY)
+	lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.scY, bs.a, bs.ax)
+	mvrun(l.mvSO, l.ssmOut, bs.mvOut)
 }
 
 // emitShortConv issues one LFM2 short-convolution block, from the quantized
@@ -10782,7 +11931,7 @@ func (g *devTier) emitShortConv(sid uint64, bs *blockScratch, l *layer, li, R in
 		}
 	}
 	lc.la(bs.scMul, R*r.Chans, bs.scC, bs.dConv, bs.scY)
-	lc.la(bs.quantE, kernels.QuantizeThreads(R*p.NEmbd/32), bs.scY, bs.a, bs.ax)
+	lc.la(bs.quantE, kernels.QuantizeThreads(R*ePad(p)/32), bs.scY, bs.a, bs.ax)
 	mvrun(l.mvSO, l.ssmOut, bs.mvOut)
 	if errp == nil || *errp == nil {
 		g.stepFlip(sid, l)
@@ -10832,7 +11981,7 @@ func (g *devTier) emitMamba1(sid uint64, bs *blockScratch, l *layer, li, R int, 
 	// x through its bias and SiLU, into dMixed (dead past the convolution),
 	// and quantized for x_proj's three matvecs.
 	lc.la(bs.m1Bias, R*r.Chans, bs.dConv, l.ssmCB, bs.dMixed)
-	lc.la(bs.quantD, kernels.QuantizeThreads(R*inner/32), bs.dMixed, bs.a, bs.ax)
+	lc.la(bs.quantD, kernels.QuantizeThreads(R*pad32(inner)/32), bs.dMixed, bs.a, bs.ax)
 	mvrun(l.mvFA, l.ssmFA, bs.dLowRank)
 	mvrun(l.mvGA, l.ssmGA, bs.m1B)
 	mvrun(l.mvGB, l.ssmGB, bs.m1C)
@@ -10853,7 +12002,7 @@ func (g *devTier) emitMamba1(sid uint64, bs *blockScratch, l *layer, li, R int, 
 		low, bv, cv = bs.m1LowN, bs.m1BN, bs.m1CN
 	}
 	// dt_proj reads the bottleneck's own quantization.
-	lc.la(bs.m1Quant, kernels.QuantizeThreads(R*r.Rank/32), low, bs.dLRa, bs.dLRax)
+	lc.la(bs.m1Quant, kernels.QuantizeThreads(R*pad32(r.Rank)/32), low, bs.dLRa, bs.dLRax)
 	mvrunAct(l.mvFB, l.ssmFB, bs.dBRaw, bs.dLRa, bs.dLRax, low)
 	if rag {
 		lc.la(rk.delta, runs*rk.perRun, inS, bs.dMixed, bv, cv, bs.dBRaw, l.ssmDt, l.ssmA, l.ssmD,
@@ -10881,7 +12030,7 @@ func (g *devTier) emitMamba1(sid uint64, bs *blockScratch, l *layer, li, R int, 
 		lc.la(cp, seqs*r.StateLen, g.recNext, pool.s[0], bs.dRows)
 	}
 	lc.la(bs.outActMul, R*inner, bs.dZ, bs.dOut, bs.dAct)
-	lc.la(bs.quantD, kernels.QuantizeThreads(R*inner/32), bs.dAct, bs.a, bs.ax)
+	lc.la(bs.quantD, kernels.QuantizeThreads(R*pad32(inner)/32), bs.dAct, bs.a, bs.ax)
 	mvrun(l.mvSO, l.ssmOut, bs.mvOut)
 	if errp == nil || *errp == nil {
 		g.stepFlip(sid, l)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jitllm/jitllm/engine/nn"
 	"github.com/jitllm/jitllm/engine/sched"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -43,12 +44,9 @@ func TestDecodeDoesNotAllocate(t *testing.T) {
 	if v := os.Getenv("JITLLM_ALLOC_MODELS"); v != "" {
 		names = append(names, strings.Split(v, ",")...)
 	}
-	// The backends, by kind unless JITLLM_STEP_DEVICES names the devices: a
+	// The backends, by kind unless JITLLM_TEST_DEVICES names the devices: a
 	// box whose default index is not the card under test pins them there.
-	specs := []string{"cuda", "vulkan", "metal"}
-	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
-		specs = strings.Split(v, ",")
-	}
+	specs := testdevices.Specs("cuda", "vulkan", "metal")
 	// Every block resident whatever the host has free: the gate measures a
 	// resident model's decode, and the default page budget is eight tenths of
 	// MemAvailable when the model opens. With other jobs holding the laptop's
@@ -657,6 +655,11 @@ func TestOffCardDecodeDoesNotAllocate(t *testing.T) {
 						t.Fatalf("experts %s: %d hybrid block-steps, %d fills -- the path under test never ran",
 							where, s1.HybridRuns-s0.HybridRuns, s1.StreamFills-s0.StreamFills)
 					}
+					// A packed bank's hybrid blocks keep an expert cache on the
+					// card (tier.Config.NoHybridCache), so the split ran too.
+					if where == "host" && !strings.HasPrefix(name, "synth") && s1.SplitRuns == s0.SplitRuns {
+						t.Fatalf("experts host: no split block-step -- the card's expert cache never ran")
+					}
 				})
 			}
 		})
@@ -678,10 +681,7 @@ func TestStepAllocsUnderABudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	spec := "vulkan"
-	if v := os.Getenv("JITLLM_STEP_DEVICES"); v != "" {
-		spec = strings.Split(v, ",")[0]
-	}
+	spec := testdevices.One("vulkan")
 	for _, mib := range []uint64{112, 128} {
 		t.Run(fmt.Sprint(mib, "MiB"), func(t *testing.T) {
 			g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(spec), tier.WithBudget(mib << 20)},

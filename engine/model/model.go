@@ -974,6 +974,12 @@ type tensor struct {
 	data []byte
 	rows int // ne1, output features
 	k    int // ne0, input features
+	// kp is the width the weight was packed at when its k is not a whole
+	// number of quantization blocks (a tower 144 wide): the converter pads
+	// it with zero columns to kp, and every product quantizes its k-wide
+	// activation as kp with a zero tail (nn's ragged quantizer on the host,
+	// kernels.QuantizePadded on a device). Zero where k is the packed width.
+	kp int
 	// packed is this weight in the device layout, set for a packed container
 	// type; nil for a verbatim one.
 	packed *nn.Packed
@@ -1175,8 +1181,12 @@ type expert struct{ gate, up, down tensor }
 
 // Model is a loaded transformer.
 type Model struct {
-	Cfg   *Config
-	Vocab *tok.Vocab
+	// kpadViolation is a gate's violation of a ragged tower on a device: its
+	// plans state no padded width (nn.LayerPlan.KPad), so the device
+	// quantizes the rows at their own width under weights packed wider.
+	kpadViolation bool
+	Cfg           *Config
+	Vocab         *tok.Vocab
 
 	// pager serialises decode when the container evicts; see pagelock.go.
 	pager sync.Mutex
@@ -1240,8 +1250,12 @@ type Model struct {
 	// the plan (planRuns).
 	expIONs  int64
 	expReads int64
-	expBytes int64
-	expCalls int64
+	// hostExperts is set once a device has run a block's routed experts on
+	// the host from inside its submission (hybrid experts): from then on a
+	// short prompt takes the decode path (forwardRowsFor).
+	hostExperts atomic.Bool
+	expBytes    int64
+	expCalls    int64
 	// hostStepRows is the rows StepRuns has run as host steps across
 	// sessions (stepHost); HostStepRows reports it.
 	hostStepRows int64
@@ -1274,6 +1288,10 @@ type Model struct {
 	// clef is a Clef decision model's joint schema head, loaded by the first
 	// Decider (decideclef.go) under bind; nil on every other model.
 	clef *clefHead
+	// kev is Kev's pointer head (decidekev.go), read once.
+	kev *kevHead
+	// kevDev is Kev's head as a device reads it (decidekev.go).
+	kevDev *nn.KevHead
 	// clefDev is that head as a device reads it (decideclefdev.go), built
 	// the first time a device runs it.
 	clefDev *nn.ClefHead
@@ -1308,6 +1326,8 @@ type Model struct {
 	// states counts the sessions built, so AddJITOptions can refuse to be late.
 	// Sessions are built concurrently (a server's requests), so it is atomic.
 	states atomic.Int64
+	// live is the open States, which a prefill asks whether another decodes.
+	live live
 	// enc is the BERT-family encoder graph, and nil for every decoder. A model
 	// with one has no layers, no output and no State: see encoder.go.
 	enc *encoder
@@ -1317,6 +1337,8 @@ type Model struct {
 	// tower is the vision tower, nil for a container with no vision section.
 	// It shares this model's container, budget and pager.
 	tower *Tower
+	// audio is the container's audio tower (audio.go), nil without one.
+	audio *audioTower
 	// imgCache is the vision segment's output rows by picture (imagekey.go),
 	// shared by every State of the model.
 	imgCache imageCache
@@ -1647,6 +1669,16 @@ func openContainer(path string, options ...Option) (*Model, error) {
 		}
 		m.tower = tw
 		m.imgCache.budget = defaultImageCache
+		if m.audio, err = buildAudio(c, m); err != nil {
+			c.Close()
+			return nil, err
+		}
+		// The audio blocks take their places in the block space after the
+		// vision blocks, as the container pages them; their weights are the
+		// tower's own (audioPageIn).
+		if m.audio != nil {
+			m.layers = append(m.layers, make([]layer, len(m.audio.blocks))...)
+		}
 		if tw.mn != nil && tw.mn.hard != nil {
 			m.hardEmbd = tw.mn.hardRows(m.Cfg.EmbdScale)
 		}
@@ -1942,8 +1974,13 @@ func (m *Model) pageIn(li int) error {
 	if m.container == nil || li >= len(m.layers) || li >= m.container.NPages() {
 		return nil
 	}
-	// An encoder's blocks are its own structs (encoder.go, modernbert.go).
-	if m.enc != nil {
+	// An encoder's blocks are its own structs (encoder.go, modernbert.go);
+	// a tower's after them (d1-omni's) are layers like any model's, and an
+	// audio tower's its own (audio.go).
+	if m.audio != nil && li >= m.audioFirst() {
+		return m.audioPageIn(li - m.audioFirst())
+	}
+	if m.enc != nil && li < m.encBlocks() {
 		return m.encBlockPageIn(li)
 	}
 	// The block's own weights, not its experts: moe() ensures those after the
@@ -3696,12 +3733,20 @@ func buildMTP(c *jlm.File, m *Model,
 		} else if hn != nil {
 			w.headNorm = hn
 		}
+		// Qwen3.8-Flash-Next's block reads the trunk's residual, every stream,
+		// each normed against its own row of hnorm, and its head is the block's
+		// own mix (q4eLayer.head), not a norm.
+		hw, hn := cfg.NEmbd, cfg.NEmbd
+		if cfg.Q4E() {
+			hw, hn = cfg.ResidW(), len(w.headNorm)
+		}
 		for _, v := range []struct {
-			name string
-			n    int
-		}{{"enorm", len(w.enorm)}, {"hnorm", len(w.hnorm)}, {"shared_head_norm", len(w.headNorm)}} {
-			if v.n != cfg.NEmbd {
-				return fmt.Errorf("model: prediction block %d %s is %d wide, want %d", i, v.name, v.n, cfg.NEmbd)
+			name    string
+			n, want int
+		}{{"enorm", len(w.enorm), cfg.NEmbd}, {"hnorm", len(w.hnorm), hw},
+			{"shared_head_norm", len(w.headNorm), hn}} {
+			if v.n != v.want {
+				return fmt.Errorf("model: prediction block %d %s is %d wide, want %d", i, v.name, v.n, v.want)
 			}
 		}
 		// The block's own head and embedding exist only where they differed
@@ -4085,7 +4130,7 @@ func (m *Model) newJIT() *nn.JIT {
 	if m.tower != nil {
 		add(quant.F32)
 	}
-	opts := m.jit
+	opts := append(m.jit[:len(m.jit):len(m.jit)], nn.WithServingSplit(!m.opt.noServingSplit))
 	if m.Cfg.TokenAct {
 		// One window over the widest row: each row's blocks share its scale.
 		opts = append(append([]nn.Option(nil), opts...), nn.WithActWindow((maxK+31)/32*32))

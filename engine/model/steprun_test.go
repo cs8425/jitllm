@@ -23,7 +23,7 @@ import (
 // runs the violation: each chunk laid out at mirrored positions must part from
 // the session alone by more than the bound.
 //
-// A dense model and a hybrid, on every backend named in JITLLM_STEP_DEVICES
+// A dense model and a hybrid, on every device named in JITLLM_TEST_DEVICES
 // (default "cuda:0,vulkan:0,metal").
 func TestStepRunsAdmitsAPromptBesideDecoding(t *testing.T) {
 	for _, c := range []struct {

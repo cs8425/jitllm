@@ -6,6 +6,8 @@ A read-only study of the kernel emitters: what repeats, how much could be shared
 
 The refactor should preserve every specialised kernel. Its acceptance criterion is **identical emitted output for each configuration**, including instruction order, physical registers, IR operation order, parameter order, and launch metadata. Optimisations that change those outputs belong in subsequent, separately measured changes.
 
+**What the golden gate does not govern.** The byte-identical gate guards an emitter refactor of one configuration, old against new, and nothing else. Generated kernels may and should differ per model and per hardware wherever that is faster: a different fusion, schedule, reduction order or tile per device is not a regression. Those forms are held to the reference (the oracle, transformers or llama.cpp) within a measured error band -- NMSE or the f32 reduction-order band, with a deliberate violation that must fail -- and the faster form is chosen per device by timing. Requiring a kernel to be bit-identical across hardware or across fused and unfused forms is an invented constraint (RULE 11e).
+
 Studied checkout: `91e2ad656ebddf9ad0d5645e3f5544c8045f0bbc`. No files changed; no builds, tests, or benchmarks run.
 
 ## 1. Inventory

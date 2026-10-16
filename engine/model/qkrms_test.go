@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -43,7 +44,7 @@ func TestWideQKNormOnDevice(t *testing.T) {
 	ids := m.Vocab.Encode("The capital of France is Paris, and the capital of", true)
 	var arms [2][][]float32
 	for i, rms := range []bool{false, true} {
-		gpu, err := tier.OpenWith(tier.WithDevices("cuda:0"), tier.WithDeviceTune(tier.TuneOff),
+		gpu, err := tier.OpenWith(tier.WithDevices(testdevices.Like(t, "cuda:0")), tier.WithDeviceTune(tier.TuneOff),
 			tier.WithConfig(func(c *tier.Config) { c.NoQKRms = !rms }))
 		if err != nil || gpu == nil {
 			t.Skipf("no cuda device (%v)", err)

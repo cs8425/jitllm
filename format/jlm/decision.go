@@ -8,6 +8,10 @@ import "fmt"
 // read out and calibrated, which the reference hardcodes per model and the
 // container therefore states.
 
+// A kind's code is written into every container, so codes never move: a new
+// kind takes a number of its own, stated, past the iota run that ends at
+// DecisionVllmD3 (7). Taken: 8 nimble, 9 pplx-decider, 10 kev.
+
 // DecisionKind is a decision model's readout: which prompt shape and which
 // scores the answer is read from. Zero is not a decision model.
 type DecisionKind uint8
@@ -34,13 +38,36 @@ const (
 	// question in one pass (Cloudflare/clef-flash; decisionroles.go has its
 	// tensors).
 	DecisionClef
+	// DecisionD1Omni is d1-omni's readout (LiquidAI/d1-omni-600M): an LFM2
+	// encoder over one question's prompt (ArchLFM2Enc), the question type's
+	// row added to every row and Config.DecisionBlocks head blocks -- Laya's
+	// head -- and a scorer at each option's <|mask|>, a noul read as [false,
+	// true]. Images or a voice clip enter as a prefix of embedding rows.
+	DecisionD1Omni
+	// DecisionOpenJev reads the next-token logits of one letter per option
+	// (A..Z then a..z, each one token) at the prompt's last row, a noul
+	// shown true first (openjev/openjev).
+	DecisionOpenJev // 6
+	// DecisionVllmD3 is lev's codes (A..Z then AA..ZZ, each one token) read
+	// at the prompt's last row over a qwen35 whose attention is not causal
+	// (vllm-sr/d3), one prompt per question; its confidence is one minus the
+	// normalised entropy, and it reads a null state and null instructions.
+	DecisionVllmD3 // 7
+	// DecisionKev is Kev's pointer head (jaredpalmer/kev): cls.output over
+	// the normed final hidden state, the prompt's last row's first half
+	// dotted with each option's <|box_end|> row's second half.
+	DecisionKev DecisionKind = 10
 )
 
 var decisionNames = map[DecisionKind]string{
-	DecisionLev:    "lev",
-	DecisionLFM2D1: "lfm2-d1",
-	DecisionLaya:   "laya",
-	DecisionClef:   "clef",
+	DecisionLev:     "lev",
+	DecisionLFM2D1:  "lfm2-d1",
+	DecisionLaya:    "laya",
+	DecisionClef:    "clef",
+	DecisionD1Omni:  "lfm2-d1-omni",
+	DecisionOpenJev: "openjev",
+	DecisionVllmD3:  "vllm-d3",
+	DecisionKev:     "kev",
 }
 
 // String is the name llama.cpp writes as <arch>.decision.type.

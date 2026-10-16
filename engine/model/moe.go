@@ -286,9 +286,14 @@ func (s *State) moeFFN(l *layer, ord []int32, h, out []float32, dw []float32) (b
 	// One SwiGLU over every expert. The slack between rows and moePad is
 	// zero and the activation maps zero to zero, so it stays zero.
 	n := m * s.moePad
-	if l.ungatedExp {
+	// A gated bank's SwiGLU goes into the down projections' quantize region
+	// (MatVecPackedGatherAct): one pool region fewer a call, the same kernel
+	// and bits. Not while tracing, which reads the activation between.
+	fuseAct := !l.ungatedExp && s.m.tracer == nil
+	switch {
+	case l.ungatedExp:
 		s.actAll(s.moeGate[:n], c.Act)
-	} else {
+	case !fuseAct:
 		s.actmulAll(s.moeGate[:n], s.moeUp[:n], c.Act)
 	}
 	s.traceExperts(ord, "moe_act", s.moeGate, s.moePad, rows)
@@ -317,7 +322,15 @@ func (s *State) moeFFN(l *layer, ord []int32, h, out []float32, dw []float32) (b
 		for j := 0; j < m; j++ {
 			os = append(os, s.moeDown[j*ew:(j+1)*ew])
 		}
-		ok = s.jit.MatVecPackedGather(os, d0.typ, ps, s.moeGate, s.moePad, ew, rows)
+		if fuseAct {
+			ok = s.jit.MatVecPackedGatherAct(os, d0.typ, ps, s.moeGate, s.moeUp, c.Act, s.moePad, ew, rows)
+		} else {
+			ok = s.jit.MatVecPackedGather(os, d0.typ, ps, s.moeGate, s.moePad, ew, rows)
+		}
+	}
+	if !ok && fuseAct {
+		// Declined before it touched an activation: the SwiGLU on its own.
+		s.actmulAll(s.moeGate[:n], s.moeUp[:n], c.Act)
 	}
 	if !ok {
 		// The per-expert down, for a non-uniform or unpacked bank;
@@ -793,6 +806,12 @@ func (s *State) hostExpertsRowsFor(li int) func(sel []uint32, w, in, out []float
 	}
 }
 
+// hostRowsByRow is the most rows a chunk's host experts run a row at a time
+// (hostExperts per row) rather than expert-major: a short prompt's rows share
+// few experts, so the expert-major pass reads about the same bytes in a
+// region or more per expert.
+const hostRowsByRow = 8
+
 // hostExpertsRows is moeBatch's expert-major pass with the device's
 // selections and weights: each expert the chunk chose is read once and run
 // over its rows as one batch (moeBatchExpert), summed into out in ascending
@@ -802,6 +821,19 @@ func (s *State) hostExpertsRows(li int, sel []uint32, w, in, out []float32, rows
 	l := &s.m.layers[li]
 	if k != c.NExpertUsed {
 		return fmt.Errorf("model: block %d: %d routed experts a row, the model routes %d", li, k, c.NExpertUsed)
+	}
+	if rows <= hostRowsByRow {
+		// A few rows read nearly every expert they choose once each anyway,
+		// and the decode path runs a row's selection as a handful of grouped
+		// regions where the expert-major pass runs regions per expert.
+		D := c.ExpWidth()
+		for i := 0; i < rows; i++ {
+			if err := s.hostExperts(li, sel[i*(k+1):i*(k+1)+k], w[i*k:(i+1)*k],
+				in[i*D:(i+1)*D], out[i*D:(i+1)*D]); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	s.hostOnly = true
 	defer func() { s.hostOnly = false }()
@@ -851,6 +883,8 @@ func (s *State) hostExperts(li int, sel []uint32, w, in, out []float32) error {
 	if l.ungatedExp {
 		return fmt.Errorf("model: block %d: ungated experts do not run split across tiers", li)
 	}
+	s.hostCalls++
+	s.m.hostExperts.Store(true)
 	k := len(sel)
 	s.hyOrd = slices.Grow(s.hyOrd[:0], k)[:k]
 	s.hyW = slices.Grow(s.hyW[:0], k)[:k]

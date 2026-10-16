@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/cpu"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
@@ -85,7 +86,7 @@ func hotKernelFaults(ks []backend.KernelResources) (faults []string, checked int
 // with opts and returns what each kernel it compiled cost the card.
 func runForRegisters(t *testing.T, m *Model, opts ...tier.Option) []backend.KernelResources {
 	t.Helper()
-	g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices("cuda:0"), tier.WithDeviceTune(tier.TuneOff)}, opts...)...)
+	g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(testdevices.Like(t, "cuda:0")), tier.WithDeviceTune(tier.TuneOff)}, opts...)...)
 	if err != nil || g == nil {
 		noDevice(t, "CUDA device", err)
 	}

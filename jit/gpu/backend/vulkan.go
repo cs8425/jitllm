@@ -4,6 +4,7 @@ import (
 	"unsafe"
 
 	"fmt"
+	"strconv"
 	"sync"
 
 	"github.com/jitllm/jitllm/jit/gpu/ir"
@@ -48,11 +49,38 @@ func OpenVulkan(sel string) (Device, error) { return OpenVulkanWith(sel, Opts{})
 
 // OpenVulkanWith is OpenVulkan with this device's open choices.
 func OpenVulkanWith(sel string, o Opts) (Device, error) {
+	ask := sel
+	if ask == "" {
+		ask = o.Vulkan.Device
+	}
+	ord := -1 // the default pick
+	if ask != "" {
+		ord = -2 // a name, until it parses as an index
+		if n, err := strconv.Atoi(ask); err == nil && n >= 0 {
+			ord = n
+		}
+	}
+	got, err := admit("spirv", ord, o.Enumerating)
+	if err != nil {
+		return nil, err
+	}
+	if ord == -1 && got >= 0 {
+		// A restriction resolved the default pick to the device it allows.
+		sel = strconv.Itoa(got)
+	}
 	c, err := vulkan.OpenDeviceWith(sel, o.Vulkan)
 	if err != nil {
 		return nil, err
 	}
-	if c.Software() && sel == "" && o.Vulkan.Device == "" {
+	if ord == -2 {
+		// A name: the index it matched is known only now, so a refusal here
+		// has opened the device for the length of the check.
+		if _, err := admit("spirv", c.Index(), o.Enumerating); err != nil {
+			c.Close()
+			return nil, err
+		}
+	}
+	if c.Software() && ask == "" {
 		name := c.Name()
 		c.Close()
 		// The suggestion is the index, not the name: Name() carries the
@@ -68,7 +96,16 @@ func OpenVulkanWith(sel string, o Opts) (Device, error) {
 // VulkanDevices enumerates the Vulkan devices on this host without opening one,
 // which is what a caller choosing where to put blocks needs before it pays for
 // a logical device per candidate. It is the counterpart of CUDACount.
-func VulkanDevices() ([]vulkan.Info, error) { return vulkan.List() }
+//
+// Under a Restriction that holds no Vulkan device it enumerates nothing: the
+// NVIDIA driver attaches a graphics context to card 0 for the length of an
+// enumeration, which a process confined to another card must not make.
+func VulkanDevices() ([]vulkan.Info, error) {
+	if _, err := admit("spirv", -1, true); err != nil {
+		return nil, err
+	}
+	return vulkan.List()
+}
 
 func (v *vkDev) Name() string { return v.c.Name() }
 

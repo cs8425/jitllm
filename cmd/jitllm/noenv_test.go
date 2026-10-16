@@ -49,6 +49,10 @@ func TestOnlyTheCommandReadsTheEnvironment(t *testing.T) {
 		// JITLLM_MODELS, read by the test suites' model finder. Only _test.go
 		// files import it, so no engine build reads that name.
 		"internal/testmodels/testmodels.go": true,
+		// JITLLM_TEST_DEVICES, the test binaries' device selection. Only
+		// _test.go files and internal/testlock import it
+		// (internal/testdevices' guard).
+		"internal/testdevices/testdevices.go": true,
 	}
 
 	var bad []string

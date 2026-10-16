@@ -3,6 +3,7 @@ package model
 import (
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
@@ -29,7 +30,7 @@ func TestMoEFusedEpiloguesOnDevice(t *testing.T) {
 			defer m.Close()
 			ids := m.Vocab.Encode("The capital of France is Paris, and the capital of", true)
 			run := func(fuse bool) ([][]float32, tier.Stats) {
-				opts := []tier.Option{tier.WithDevices("cuda:0"), tier.WithDeviceTune(tier.TuneOff),
+				opts := []tier.Option{tier.WithDevices(testdevices.Like(t, "cuda:0")), tier.WithDeviceTune(tier.TuneOff),
 					tier.WithSplit(4), tier.WithConfig(func(c *tier.Config) {
 						c.ForceIndexedGroup = true
 						c.NoMoEFuse = !fuse

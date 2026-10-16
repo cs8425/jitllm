@@ -30,6 +30,9 @@ type File struct {
 	Path string
 	H    *Header
 	FP   Fingerprint
+	// ver is the version the container was opened at: Version, or an older
+	// one a migration reads (migrate.go).
+	ver uint32
 
 	// mu is the one lock over residency: two States decoding on a container
 	// that evicts would otherwise race in claim(). It guards pages, filled,
@@ -41,6 +44,10 @@ type File struct {
 	// noHuge and nodeMask are this File's Placement; see SetPlacement.
 	noHuge   bool
 	nodeMask []uint64
+	// nodes is a one-node mask for each of Placement.Nodes when they spread
+	// the memory: expert page x is bound whole to nodes[x%len(nodes)]
+	// (claim), the rest interleaved.
+	nodes [][]uint64
 	// pins[b] is how many leases hold block b resident. A pinned page is never
 	// a victim; see Hold.
 	pins []int
@@ -147,7 +154,11 @@ type File struct {
 // Open reads and validates a container's metadata. No page is read.
 //
 // Every offset in the file is checked before it slices anything (RULE 9).
-func Open(path string) (*File, error) {
+func Open(path string) (*File, error) { return openAt(path, Version) }
+
+// openAt is Open for a container of version want: the current one, or an
+// older one a migration reads (migrate.go).
+func openAt(path string, want uint32) (*File, error) {
 	fh, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -174,13 +185,14 @@ func Open(path string) (*File, error) {
 		closeDirect(direct)
 		return nil, fmt.Errorf("jlm: reading the header of %s: %w", path, err)
 	}
-	h, err := decodeHeader(hb, size)
+	h, err := decodeHeader(hb, size, want)
 	if err != nil {
 		fh.Close()
 		closeDirect(direct)
 		return nil, err
 	}
 	f.H = h
+	f.ver = want
 
 	// One read for everything between the header and the dense region: the KV
 	// block, the tensor table and the fingerprint are contiguous by construction
@@ -200,7 +212,7 @@ func Open(path string) (*File, error) {
 			return nil, fmt.Errorf("jlm: reading the metadata of %s: %w", path, err)
 		}
 	}
-	if f.cfg, err = decodeConfig(f.meta[h.CfgOff : h.CfgOff+h.CfgLen]); err != nil {
+	if f.cfg, err = decodeConfigAt(f.meta[h.CfgOff:h.CfgOff+h.CfgLen], want); err != nil {
 		fh.Close()
 		closeDirect(direct)
 		return nil, err

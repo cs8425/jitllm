@@ -77,7 +77,12 @@ func ResetProfile() {
 // State is one generation session: the KV cache plus the scratch buffers the
 // forward pass reuses. One State is one conversation; it is not safe to share.
 type State struct {
-	m *Model
+	// bidirAll makes a mixed prompt's every row one bidirectional run
+	// (bidirRuns): a non-causal decoder's prompt with pictures in it.
+	bidirAll bool
+	// rlBases and rlEnds are relocateRows' per-sequence spans.
+	rlBases, rlEnds []int
+	m               *Model
 	// pending is the move between devices PrepareMove started and no Commit
 	// or Cancel has ended (moveblocks.go).
 	pending *PendingMove
@@ -131,6 +136,9 @@ type State struct {
 	fuseOff   bool
 	fused     bool
 	FusedRuns int64
+	// ServedOnE counts the times a prefill was placed on the E-cores' pool beside a
+	// decoding session (serving.go): what a gate reads to know the split ran.
+	ServedOnE int64
 	// grp is groupOf's call, reused; groupOff keeps a fused run's matvecs
 	// one region each (SetMatVecGroups); Grouped counts the group calls.
 	grp      nn.MVGroup
@@ -171,6 +179,9 @@ type State struct {
 	// its life (PrefillRows): what a benchmark checks to show a prompt was
 	// computed, not restored.
 	promptRows int
+	// forwardPrompts counts the prompts run a token at a time through the
+	// decode path (WithPrefillForwardRows).
+	forwardPrompts int
 	// interrupt, when set, is asked before every prefill chunk
 	// (SetPrefillInterrupt).
 	interrupt func() bool
@@ -240,6 +251,9 @@ type State struct {
 	// device's own submission waits on hostExperts, when offering a matvec to
 	// that device would wait on the session it is inside of.
 	hostOnly bool
+	// hostCalls counts the device's calls into hostExperts, so a token can
+	// tell whether its submission suspended for the host's experts.
+	hostCalls int
 	// autoStreamed counts the blocks the last placement streamed because no
 	// card could hold them resident (nn.AutoStreamer).
 	autoStreamed int
@@ -406,6 +420,14 @@ type State struct {
 	tailPos []int
 	// rtTook, rtStart and rtSeen are rowsTake's scratch, kept from step to step.
 	rtTook, rtStart []int
+	// retireRow is Retire's one row, handed to the device without a slice
+	// made each time; rrBases, rrEnds and rrFlat are relocateRows' and
+	// flatSlots', and rrSD the device relocateRows reserves on.
+	retireRow       [1]int
+	rrBases, rrEnds []int
+	rrFlat          []int
+	rrSD            nn.SeqKVDevice
+	rrFits          func() bool
 	rtSeen          []bool
 	// relocate hands the device's highest block to the host when its history
 	// cannot grow, rather than letting the token fail. See SetRelocate.
@@ -539,7 +561,10 @@ type State struct {
 	ldSpill nn.Spiller
 	ldStep  nn.SessionStepper
 	ldRows  nn.RowsDevice
-	ldNamed nn.NamedDevice
+	// roomHome counts batch steps whose device had no room for them, so the
+	// blocks came home before the step (relocateRows, forwardRows).
+	roomHome int
+	ldNamed  nn.NamedDevice
 	// The lists a step this State leads reuses (step.go): Step's runs, the
 	// rows' sessions and positions, the wanted rows' logits and the result.
 	stepRuns   []Run
@@ -582,7 +607,11 @@ type State struct {
 	// HostPicked says the last prefill did. A decision readout sets them.
 	HostPick     []int32
 	HostPickVals []float32
-	HostPicked   bool
+	// pickView and pickTmp are pickOnHost's view of a slot's rows and their
+	// projections, kept here so a warm pick allocates nothing.
+	pickView   nn.Packed
+	pickTmp    [8]float32
+	HostPicked bool
 	// cs is the rotary table for the current position: NRot floats, filled once
 	// per token and read by every head and by the device blocks.
 	cs []float32
@@ -598,7 +627,17 @@ type State struct {
 	// a tail of its rows has the head write every row (stepRowsDevice), the
 	// tail then copied out; rowsTok is where a greedy one's tokens land.
 	rowsLog, rowsHid []float32
-	rowsTok          []int32
+	// rowsHeads counts a hyper-connected model's verifications whose head
+	// ran on the device (rowsHead).
+	rowsHeads int
+	rowsTok   []int32
+	// rowsPos is a stream model's speculation step's positions and slots
+	// (stepRowsStreams).
+	rowsPos []int
+	// q4In is a Qwen3.8-Flash-Next prediction block's draft rows, every
+	// stream, row-major: laid into the residual in place of the embedding's
+	// copies (q4eExpandAt). nil on every other State.
+	q4In []float32
 
 	// emb is set for the length of one Embedder.Embed on a decoder embedding
 	// model: prefill then pools the final residual instead of projecting it
@@ -628,6 +667,10 @@ type State struct {
 	// first. Nil in every session but a gate's: it is how a comparison sees
 	// every position of a prompt rather than only the last row's logits.
 	rowTap func(base int, rows []float32)
+
+	// ranAt is when this State last started a decode token, in nanoseconds
+	// past servingEpoch plus one (0: never); see serving.go.
+	ranAt atomic.Int64
 }
 
 // NewState allocates a session able to hold maxSeq positions.
@@ -669,6 +712,7 @@ func (m *Model) newStateRange(nseq, maxSeq, lo, hi int) *State {
 		fuseOff: m.opt.noFuse, groupOff: m.opt.noGroups, lookOff: m.opt.noLook,
 		residFold: m.opt.residFold}
 	s.holdHostRuns()
+	m.live.add(s)
 	// A State over a prediction block projects through that block's head.
 	if lo < len(m.layers) {
 		if w := m.layers[lo].mtp; w != nil {
@@ -929,6 +973,7 @@ func (s *State) dev() nn.LayerDevice {
 // State must be closed before its Model (`defer m.Close()` then
 // `defer st.Close()` gives that order).
 func (s *State) Close() error {
+	s.m.live.remove(s)
 	// A move prepared and never committed gives its target's copies back.
 	if s.pending != nil {
 		s.pending.Cancel()
@@ -1213,7 +1258,18 @@ func (s *State) SetDeviceLayers(d nn.Device, max int) error {
 			if !s.migrateKV(li, s.pos, true) || !s.migrateRec(li, true) {
 				// Resident weights with no history would attend over an empty
 				// cache. Give the block straight back, and every placed block
-				// after it, exactly as the grow path does.
+				// after it, exactly as the grow path does -- saying why, or a
+				// placement that took nothing reads as one never offered.
+				why := "the device refused it"
+				if e, ok := s.ld.(nn.ErrReporter); ok && e.Err() != "" {
+					why = e.Err()
+				}
+				if s.kv.layers[li].anyShared() {
+					why = "its pages are shared with another sequence"
+				}
+				for range placed[i:] {
+					s.noteDecline(fmt.Sprintf("block %d's history (%d positions) did not move to the device: %s", li, s.pos, why))
+				}
 				for _, lj := range placed[i:] {
 					s.ld.ReleaseLayers(lj, lj+1)
 					s.unmarkOnDev(lj)
@@ -1611,6 +1667,7 @@ func (s *State) ensureLayer(li int) func(*nn.LayerWeights) error {
 		// read/upload pipeline).
 		w.Ensure, w.EnsureExperts = dst.Ensure, dst.EnsureExperts
 		w.PrefetchExperts, w.HostExperts, w.HostExpertsRows = dst.PrefetchExperts, dst.HostExperts, dst.HostExpertsRows
+		w.ExpertUses = dst.ExpertUses
 		*dst = w
 		return nil
 	}
@@ -1634,6 +1691,7 @@ func (s *State) ensureSelected(li int) func(*nn.LayerWeights, []uint32) error {
 		// Carry every callback over; see ensureLayer.
 		w.Ensure, w.EnsureExperts = dst.Ensure, dst.EnsureExperts
 		w.PrefetchExperts, w.HostExperts = dst.PrefetchExperts, dst.HostExperts
+		w.ExpertUses = dst.ExpertUses
 		*dst = w
 		return nil
 	}
@@ -1758,7 +1816,7 @@ func (s *State) offerRange(lo, hi int) {
 		if bh, ok := ld.(nn.BlockHolder); ok && !named && bh.HoldsBlock(li) {
 			w := nn.LayerWeights{Ensure: s.ensureLayer(li), EnsureExperts: s.ensureSelected(li),
 				PrefetchExperts: s.prefetchSelected(li), HostExperts: s.hostExpertsFor(li),
-				HostExpertsRows: s.hostExpertsRowsFor(li)}
+				HostExpertsRows: s.hostExpertsRowsFor(li), ExpertUses: s.hot.layer(li)}
 			plan := *s.planFor(li)
 			if adm.PrepLayer(li, &plan, &w) {
 				s.markOnDev(li)
@@ -1900,6 +1958,7 @@ func (s *State) blockWeights(li int) (nn.LayerWeights, error) {
 	w.Ensure, w.EnsureExperts = s.ensureLayer(li), s.ensureSelected(li)
 	w.PrefetchExperts = s.prefetchSelected(li)
 	w.HostExperts, w.HostExpertsRows = s.hostExpertsFor(li), s.hostExpertsRowsFor(li)
+	w.ExpertUses = s.hot.layer(li)
 	if c.MoE() {
 		// The expert banks are fetched by the tier through Ensure once it
 		// admits the block: pageIn does not read them (the host fetches
@@ -2025,6 +2084,17 @@ func (s *State) planFor(li int) *nn.LayerPlan {
 	}
 	s.k3Plan(li, &plan)
 	s.q4ePlan(li, &plan)
+	if c.NonCausal {
+		// A bidirectional decoder (EmbeddingGemma): its blocks are non-causal
+		// blocks, as an encoder's are -- the sequence one call, every row over
+		// the call's rows, a sliding layer inside each row's symmetric window
+		// (nn.RowWindowDevice; embedstate.go's embedTell). The row windows
+		// are the window, so the causal one (SWAWindow) is off: with both, a
+		// 600-row sequence read NaN past the causal window's 512 rows.
+		plan.NonCausal = true
+		plan.Windowed = c.SWA(li)
+		plan.SWAWindow = 0
+	}
 	return &plan
 }
 
@@ -2521,8 +2591,14 @@ func (m *Model) bankWeight(t tensor) nn.Weight {
 		Packed: &nn.Packed{Sheet: sheet, Sheets: sheets}}
 }
 
+// wt is t for a device: K is the width it was packed at, which is k but for
+// a ragged tower's matrices (tensor.kp; nn.LayerPlan.KPad).
 func wt(t tensor) nn.Weight {
-	return nn.Weight{T: t.typ, Data: t.data, Rows: t.rows, K: t.k, Packed: t.packed}
+	k := t.k
+	if t.kp != 0 {
+		k = t.kp
+	}
+	return nn.Weight{T: t.typ, Data: t.data, Rows: t.rows, K: k, Packed: t.packed}
 }
 
 // SetHeadOnDevice chooses whether the output norm and the vocabulary projection
@@ -2941,6 +3017,7 @@ func (s *State) PrewarmGPU(n int) <-chan struct{} {
 				w.Ensure, w.EnsureExperts = s.ensureLayer(li), s.ensureSelected(li)
 				w.PrefetchExperts, w.HostExperts = s.prefetchSelected(li), s.hostExpertsFor(li)
 				w.HostExpertsRows = s.hostExpertsRowsFor(li)
+				w.ExpertUses = s.hot.layer(li)
 			}
 			s.ldCand.PrewarmLayer(li, &s.plan, &w)
 		}
@@ -3034,6 +3111,10 @@ func (s *State) Accelerated() []quant.Type { return s.jit.Types() }
 
 // Workers is how many worker threads the fast tier uses.
 func (s *State) Workers() int { return s.jit.Workers() }
+
+// MixtureAffine is how many of this State's host mixture regions ran on the
+// NUMA nodes holding their experts (nn.JIT.MixtureAffine).
+func (s *State) MixtureAffine() int64 { return s.jit.MixtureAffine() }
 
 // Shapes is how many shape-specialized kernels were generated for this model.
 func (s *State) Shapes() int { return s.jit.Shapes() }
@@ -3219,7 +3300,11 @@ func (s *State) Reset() {
 			}
 		}
 		if rr, ok := s.ld.(nn.RecRowsDevice); !ok || !rr.ResetRecRows(s.allRows) {
-			s.retireErr = fmt.Errorf("model: the recurrent state on the device could not be reset")
+			why := ""
+			if er, ok := s.ld.(nn.ErrReporter); ok && er.Err() != "" {
+				why = ": " + er.Err()
+			}
+			s.retireErr = fmt.Errorf("model: the recurrent state on the device could not be reset%s", why)
 		}
 	}
 	s.kv.reset()
@@ -3241,7 +3326,8 @@ func (s *State) Retire(i int) {
 	if s.recurrent() {
 		s.ResetRecurrent(i)
 		if s.devLinear() {
-			if rr, ok := s.ld.(nn.RecRowsDevice); !ok || !rr.ResetRecRows([]int{i}) {
+			s.retireRow[0] = i
+			if rr, ok := s.ld.(nn.RecRowsDevice); !ok || !rr.ResetRecRows(s.retireRow[:]) {
 				s.retireErr = fmt.Errorf("model: row %d's recurrent state on the device could not be reset", i)
 			}
 		}
@@ -3409,6 +3495,7 @@ func (s *State) ForwardSample(token int32, smp *Sampler) (int32, error) {
 // fill is a closure because the device-failure path calls it again to restart
 // the token on the host (Layers may have written part of s.x).
 func (s *State) forward(fill func() error) ([]float32, error) {
+	s.touch()
 	// Brackets one decode step for the host tuners, which time real tokens.
 	// Not when the device ran the whole token: no CPU matvec ran, and a
 	// settled answer would be cached under the CPU's key for later runs.
@@ -3435,9 +3522,17 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 	// the pool spinning through a blocking read").
 	if pc := s.m.container; pc != nil {
 		in0, _ := pc.Faults()
+		calls0 := s.hostCalls
 		defer func() {
 			in1, _ := pc.Faults()
 			s.jit.SetSpinning(in1 == in0)
+			// A token whose device suspended for the host's experts waited on
+			// the card between those calls: the workers spin across it.
+			if in1 == in0 && s.hostCalls != calls0 {
+				if d := s.m.opt.hybridSpinFor(); d > 0 {
+					s.jit.SetSpinFor(d)
+				}
+			}
 		}()
 	}
 
@@ -4086,7 +4181,9 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 	done := false
 	if s.head != nil && !folded {
 		s.unfuse()
-		defer s.rows.hiddenOf(s.head)()
+		if !c.Q4E() { // its hidden state is the residual, taken in q4eCollapse
+			defer s.rows.hiddenOf(s.head)()
+		}
 		if s.ld.Layers(s.gpuLayers, s.gpuLayers, s.pos, 1, s.resid(), s.cs[:c.RopeW()], s.swaTable(c.NRotSWA), s.head) {
 			done = true
 		} else if !s.devFallback {
@@ -4100,7 +4197,7 @@ func (s *State) forward(fill func() error) ([]float32, error) {
 		if err := s.mv(s.logits, *s.outW, s.h); err != nil {
 			return nil, err
 		}
-		if s.rows != nil {
+		if s.rows != nil && !c.Q4E() {
 			copy(s.rows.hidden, s.h)
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 )
 
@@ -20,17 +21,18 @@ func TestCUDAOrdinalZeroIsWhatOpenReturns(t *testing.T) {
 		t.Skip("no CUDA device here:", err)
 	}
 
-	d, err := backend.OpenCUDA(0)
+	ord := testdevices.Ordinal(t, "cuda", 0)
+	d, err := backend.OpenCUDA(ord)
 	if err != nil {
-		t.Fatalf("OpenCUDA(0) on a box with %d device(s): %v", n, err)
+		t.Fatalf("OpenCUDA(%d) on a box with %d device(s): %v", ord, n, err)
 	}
 	name, api := d.Name(), d.API()
 	o, ok := d.(backend.OrdinalDevice)
 	if !ok {
 		t.Fatal("the CUDA device does not report its Ordinal")
 	}
-	if o.Ordinal() != 0 {
-		t.Errorf("OpenCUDA(0) opened ordinal %d", o.Ordinal())
+	if o.Ordinal() != ord {
+		t.Errorf("OpenCUDA(%d) opened ordinal %d", ord, o.Ordinal())
 	}
 	free, total, err := d.Mem()
 	if err != nil || total == 0 {
@@ -43,7 +45,7 @@ func TestCUDAOrdinalZeroIsWhatOpenReturns(t *testing.T) {
 	}
 	// The name must identify a card, not a capability: two cards share a
 	// PTX target.
-	if !strings.HasPrefix(name, "#0 ") {
+	if !strings.HasPrefix(name, "#"+strconv.Itoa(ord)+" ") {
 		t.Errorf("Name %q does not lead with its ordinal", name)
 	}
 	if !strings.Contains(name, "(sm_") {
@@ -72,6 +74,7 @@ func TestCUDAOrdinalZeroIsWhatOpenReturns(t *testing.T) {
 // it opens nothing. A fallback to device 0 here would place blocks on a card
 // the caller did not ask for, and every number downstream would look fine.
 func TestCUDAOrdinalOutOfRange(t *testing.T) {
+	testdevices.SkipSelected(t, "it opens an ordinal past the box's last card, which no selection holds")
 	gpuLock(t)
 	n, err := backend.CUDACount()
 	if err != nil {

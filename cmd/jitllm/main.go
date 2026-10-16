@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -135,6 +136,8 @@ func main() {
 		err = tokenizeCmd(os.Args[2:])
 	case "convert":
 		err = convertCmd(os.Args[2:])
+	case "upgrade":
+		err = upgradeCmd(os.Args[2:])
 	case "library":
 		err = libraryCmd(os.Args[2:])
 	case "embed":
@@ -165,7 +168,8 @@ func usage() {
   jitllm speed [-devices SPEC] [-p N] [-n N] [-r N] <model.jlm>   llama-bench's pp/tg, warmed
   jitllm batch [-devices SPEC] [-batch N] [-n N] <model.jlm> <prompt...>
   jitllm verify [flags] <model.jlm>
-  jitllm convert [-o DIR] [-chat-template FILE] <model.gguf|model-dir|URL|NAME> [mmproj.gguf|URL] [out.jlm]
+  jitllm upgrade <model.jlm>...   bring containers from an older jitllm to this build's version, in place
+  jitllm convert [-o DIR] [-chat-template FILE] [-head mtp.gguf] <model.gguf|model-dir|URL|NAME> [mmproj.gguf|URL] [out.jlm]
   jitllm library [-refs]   the models convert fetches by NAME
   jitllm asm <Q4_0|Q8_0|Q4_K>[x4]
 
@@ -460,6 +464,9 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 		return err
 	}
 	defer m.Close()
+	if err := preloadWait(m); err != nil {
+		return err
+	}
 	goheap.OffHeap(maxmem)
 	c := m.Cfg
 	fmt.Fprintf(os.Stderr, "%s L=%d d=%d heads=%d/%d head_dim=%d ffn=%d vocab=%d\n",
@@ -477,7 +484,14 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	}
 	// The host budget is settled before the devices open: a device whose
 	// memory is the host's is carved out of it (tier.WithHostBudget).
-	dev, closeDev, devName, err := openDevices(devSpec, vram, maxmem, m.StreamGroups())
+	// A speculating session's verification is a ragged step of a few rows:
+	// its scratch is reserved at placement, or a card the blocks filled
+	// refuses it and the rows run padded to the prompt width.
+	stepRows := 0
+	if specOpts != nil {
+		stepRows = model.SpecRows()
+	}
+	dev, closeDev, devName, err := openDevices(devSpec, vram, maxmem, m.StreamGroups(), stepRows)
 	if err != nil {
 		return err
 	}
@@ -597,7 +611,14 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 			return fmt.Errorf("the prompt is %d positions and fills the model's context of %d", len(ids)+extra, m.Cfg.NCtx)
 		}
 	}
-	st := m.NewState(len(ids) + extra + n + 1)
+	// JITLLM_WARMUP_PROMPT gives the warm-ups (JITLLM_WARMUP, below) a text
+	// of their own, so what they leave in the caches is not the measured
+	// prompt's; the session is sized for the longer of the two.
+	var wids []int32
+	if wp := os.Getenv("JITLLM_WARMUP_PROMPT"); wp != "" {
+		wids = m.Vocab.Encode(wp, true)
+	}
+	st := m.NewState(max(len(ids)+extra, len(wids)) + n + 1)
 	defer st.Close()
 	var kvStore *model.FileStore
 	// The KV store is attached before the device is chosen. The namespace
@@ -752,6 +773,36 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 		defer sp.Close()
 	}
 
+	// JITLLM_WARMUP=k runs the prompt and -n greedy tokens k times on this
+	// State, untimed, and resets it before the run that is measured: the
+	// expert caches fill and the tuners settle as a server's would. The
+	// device's counters printed at the end include the warm-ups.
+	if k, _ := strconv.Atoi(os.Getenv("JITLLM_WARMUP")); k > 0 && sp == nil && imgPath == "" && kvCacheDir == "" {
+		t0 := time.Now()
+		if wids == nil {
+			wids = ids
+		}
+		for i := 0; i < k; i++ {
+			lg, err := st.Prefill(wids)
+			if err != nil {
+				return withDeviceErr(err, dev)
+			}
+			tok := int32(0)
+			for j := range lg {
+				if lg[j] > lg[tok] {
+					tok = int32(j)
+				}
+			}
+			for j := 1; j < n; j++ {
+				if tok, err = st.ForwardGreedy(tok); err != nil {
+					return withDeviceErr(err, dev)
+				}
+			}
+			st.Reset()
+		}
+		fmt.Fprintf(os.Stderr, "warm-up  %d untimed run(s) of the prompt and %d tokens in %.1fs, then reset\n",
+			k, n, time.Since(t0).Seconds())
+	}
 	start := time.Now()
 	// Batched: the prompt is processed PrefillChunk tokens at a time, so the
 	// weights are read once per chunk instead of once per token. Prefill falls
@@ -787,6 +838,15 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	// So the profile below describes DECODE, not the prompt that preceded it.
 	model.ResetProfile()
 
+	ignoreEOS := os.Getenv("JITLLM_IGNORE_EOS") == "1"
+	var forced []int32
+	for _, f := range strings.FieldsFunc(os.Getenv("JITLLM_FORCE_IDS"), func(r rune) bool { return r == ',' || r == ' ' }) {
+		v, err := strconv.ParseInt(f, 10, 32)
+		if err != nil {
+			return fmt.Errorf("JITLLM_FORCE_IDS: %q is not a token id", f)
+		}
+		forced = append(forced, int32(v))
+	}
 	top := 0
 	if v := os.Getenv("JITLLM_TOP"); v != "" {
 		top, _ = strconv.Atoi(v)
@@ -884,6 +944,12 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 		if next < 0 {
 			next = sm.Sample(logits)
 		}
+		// JITLLM_FORCE_IDS decodes the given token ids in place of the
+		// sampled ones (teacher forcing), so two arms of an A/B whose
+		// rounding differs still decode the same text.
+		if i < len(forced) {
+			next = forced[i]
+		}
 		sm.Observe(next)
 		if top > 0 {
 			// The margin at each step is the thing to look at when jitllm and
@@ -895,7 +961,9 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 			}
 			fmt.Fprintln(os.Stderr)
 		}
-		if m.Vocab.IsEOG(next) {
+		// JITLLM_IGNORE_EOS=1 decodes all -n tokens past an end of
+		// generation, as a fixed-length benchmark does.
+		if m.Vocab.IsEOG(next) && !ignoreEOS {
 			break
 		}
 		out = append(out, next)
@@ -1006,6 +1074,21 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 			}
 			if ds.HybridRuns > 0 {
 				fmt.Fprintf(os.Stderr, "hybrid experts: %d block-step(s) on the host, %.2f s\n", ds.HybridRuns, sec(ds.THybrid))
+				if g, ok := dev.(*tier.GPU); ok {
+					if at, tw := g.CacheCoverage(); len(at) > 0 {
+						q := func(v []float64) string {
+							w := append([]float64(nil), v...)
+							slices.Sort(w)
+							return fmt.Sprintf("%.0f/%.0f/%.0f%%", 100*w[0], 100*w[len(w)/2], 100*w[len(w)-1])
+						}
+						fmt.Fprintf(os.Stderr, "cache coverage: the hottest experts a cache holds carry %s of a block's selections (min/median/max over %d blocks); twice the slots %s\n",
+							q(at), len(at), q(tw))
+					}
+				}
+				if ds.SplitRuns > 0 || ds.SplitAdmits > 0 || ds.TLateWrite > 0 {
+					fmt.Fprintf(os.Stderr, "split experts: %d block-step(s) split, %d expert(s) run on the card, host %.2f s, %d taken into the caches in %.2f s; host sums written back in %.2f s\n",
+						ds.SplitRuns, ds.SplitHits, sec(ds.TSplitHost), ds.SplitAdmits, sec(ds.TAdmit), sec(ds.TLateWrite))
+				}
 			}
 			if ds.StreamPrefetched > 0 {
 				fmt.Fprintf(os.Stderr, "cross-layer prefetch: %d expert(s) read ahead, %.2f s joining them\n",
@@ -1093,6 +1176,9 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	// The prompt is the text ids plus whatever an image spliced in (marker
 	// tokens and one embedding per projected patch group).
 	ptok := len(ids) + extra
+	if n := st.MixtureAffine(); n > 0 {
+		fmt.Fprintf(os.Stderr, "numa     %d host mixture region(s) ran on the nodes holding their experts\n", n)
+	}
 	fmt.Fprintf(os.Stderr, "\nprompt %d tok in %v (%s)   decode %d tok in %v (%s)\n",
 		ptok, prefill.Round(time.Millisecond), rateOf(ptok, prefill),
 		len(out), decode.Round(time.Millisecond), rateOf(len(out), decode))
@@ -1577,6 +1663,20 @@ func tokenizerOption(path string) ([]tok.Option, func(), error) {
 // loadOpts turns the tokenizer options into load options and adds the page
 // budget, which has to be known at Open because it decides how many block pages
 // the container may hold. Zero means "ask the process".
+// preloadWait holds the run until the background preload has read every page
+// when JITLLM_PRELOAD_WAIT=1: a warm measurement whose model fits the budget
+// then faults nothing in, as an engine that copies its weights to RAM before
+// its first token does. Unset, the prompt starts beside the reads.
+func preloadWait(m *model.Model) error {
+	if os.Getenv("JITLLM_PRELOAD_WAIT") != "1" {
+		return nil
+	}
+	t0 := time.Now()
+	err := m.WaitPreload()
+	fmt.Fprintf(os.Stderr, "preload   waited %.1fs for every page\n", time.Since(t0).Seconds())
+	return err
+}
+
 func loadOpts(t []tok.Option, budget uint64) []model.Option {
 	o := make([]model.Option, 0, len(t)+2)
 	for _, x := range t {
@@ -1609,6 +1709,11 @@ func loadOpts(t []tok.Option, budget uint64) []model.Option {
 	// JITLLM_FUSE=0 runs decode one pool region per op (model.WithBlockFusion).
 	if os.Getenv("JITLLM_FUSE") == "0" {
 		o = append(o, model.WithBlockFusion(false))
+	}
+	// JITLLM_SERVING_SPLIT=0 keeps a prefill beside a decoding session on the
+	// P and E cores (model.WithServingSplit).
+	if os.Getenv("JITLLM_SERVING_SPLIT") == "0" {
+		o = append(o, model.WithServingSplit(false))
 	}
 	// JITLLM_FUSE_GROUPS=0 keeps a fused run's matvecs a phase each
 	// (model.WithMatVecGroups).
@@ -1665,6 +1770,20 @@ func modelOptions() []model.Option {
 	var o []model.Option
 	if os.Getenv("JITLLM_PROFILE") != "" {
 		o = append(o, model.WithProfile(true))
+	}
+	// JITLLM_PREFILL_FORWARD=n runs a prompt of up to n tokens a token at a
+	// time (model.WithPrefillForwardRows).
+	if v := os.Getenv("JITLLM_PREFILL_FORWARD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			o = append(o, model.WithPrefillForwardRows(n))
+		}
+	}
+	// JITLLM_HYBRID_SPIN_US sets how long the workers spin between a
+	// device's host expert calls (model.WithHybridSpin); 0 keeps the pool's.
+	if v := os.Getenv("JITLLM_HYBRID_SPIN_US"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			o = append(o, model.WithHybridSpin(time.Duration(n)*time.Microsecond))
+		}
 	}
 	if os.Getenv("JITLLM_NO_HEAD_PLACE") != "" {
 		o = append(o, model.WithHeadPlacement(false))

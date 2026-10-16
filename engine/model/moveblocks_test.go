@@ -2,25 +2,22 @@ package model
 
 import (
 	"math"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/jitllm/jitllm/engine/nn"
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/internal/testmodels"
 	"github.com/jitllm/jitllm/jit/gpu/tier"
 )
 
 // moveDevices is the two devices of one tier the device-to-device gates move
-// blocks between: JITLLM_MOVE_DEVICES, or the laptop's one card under two
-// backends.
-func moveDevices() (string, string) {
-	spec := os.Getenv("JITLLM_MOVE_DEVICES")
-	if spec == "" {
-		spec = "cuda:0,vulkan:1"
-	}
-	a, b, _ := strings.Cut(spec, ",")
-	return a, b
+// blocks between: the first two of JITLLM_TEST_DEVICES, or the laptop's one
+// card under two backends.
+func moveDevices(t *testing.T) (string, string) {
+	t.Helper()
+	d := testdevices.Take(t, 2, "cuda:0,vulkan:1")
+	return d[0], d[1]
 }
 
 // TestBlocksMoveBetweenDevices moves every block of a sequence from one device
@@ -58,12 +55,13 @@ const (
 )
 
 func blocksMoveBetweenDevices(t *testing.T, path string, arm int, opts ...Option) {
-	a, b := moveDevices()
+	a, b := moveDevices(t)
 	g, err := tier.OpenWith(tier.WithDevices(a+","+b), tier.WithDeviceTune(tier.TuneOff))
 	if err != nil || g == nil {
 		noDevice(t, a+","+b, err)
 	}
 	defer g.Close()
+	distinctCards(t, g)
 	m, err := Open(path, append(opts, WithPlacement(Placement{Rest: &Place{On: a}, Head: &Place{On: a}}))...)
 	if err != nil {
 		t.Fatal(err)
