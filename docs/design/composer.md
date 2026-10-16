@@ -282,6 +282,15 @@ candidates, not a tuner.
 | hidden-channel MLP partition | the FFN site, with a partition count S on the intermediate | band contract (down's sum is reassociated); Bounds: 4*H*S bytes of partials against the 4*F intermediate removed | at decode it fails its traffic budget (dep-block.md, "k-slice chaining": 256 KiB of partials against 32 KiB on the 1B) and is refused statically; at prefill widths and across devices the arithmetic differs, so it stays a candidate there |
 | producer/consumer tile alignment | a `matvec` whose output tiles a following `matvec` reduces over | a parameter of a region's candidates (gate/up row tile = down's split chunk), timed jointly with the split | scheduling alone lost: the persistent block 11% and the dependency-counter block 14-18% on the V100 (GK "A persistent decode block", "The dependency-counter block"), because every matvec reads its whole input; alignment has to remove traffic or a launch to be worth a trial |
 
+**A block split across devices** (attention on one card, the FFN or some
+experts on another) is a placement candidate of the same kind: the planner may
+cost it and try it, and it is never a manual mode. Its region is the block's
+two sublayers with the residual between them as a crossing; the cost it must
+beat is two device crossings per block per token (the residual out after
+attention and back after the FFN) plus the synchronisation on each, against
+the block running whole on either card. The KV stays with the attention
+sublayer's card and moves with it, as a relocation does today.
+
 Joint fusion and partitioning are one search, not two passes: a partition is a
 parameter of a fused region's candidates, so the trial times the complete
 region in each form, and a partition that loses alone is still timed under the
