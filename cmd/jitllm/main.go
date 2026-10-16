@@ -483,7 +483,14 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	}
 	// The host budget is settled before the devices open: a device whose
 	// memory is the host's is carved out of it (tier.WithHostBudget).
-	dev, closeDev, devName, err := openDevices(devSpec, vram, maxmem, m.StreamGroups())
+	// A speculating session's verification is a ragged step of a few rows:
+	// its scratch is reserved at placement, or a card the blocks filled
+	// refuses it and the rows run padded to the prompt width.
+	stepRows := 0
+	if specOpts != nil {
+		stepRows = model.SpecRows()
+	}
+	dev, closeDev, devName, err := openDevices(devSpec, vram, maxmem, m.StreamGroups(), stepRows)
 	if err != nil {
 		return err
 	}
