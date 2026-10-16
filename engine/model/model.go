@@ -1288,6 +1288,10 @@ type Model struct {
 	// clef is a Clef decision model's joint schema head, loaded by the first
 	// Decider (decideclef.go) under bind; nil on every other model.
 	clef *clefHead
+	// kev is Kev's pointer head (decidekev.go), read once.
+	kev *kevHead
+	// kevDev is Kev's head as a device reads it (decidekev.go).
+	kevDev *nn.KevHead
 	// clefDev is that head as a device reads it (decideclefdev.go), built
 	// the first time a device runs it.
 	clefDev *nn.ClefHead

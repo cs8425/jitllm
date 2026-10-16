@@ -294,7 +294,7 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 // puts a batch of one into the batch session, turns it off with the rest.
 func (d *Decider) batchAlone() bool {
 	return d.kind != jlm.DecisionLaya && d.kind != jlm.DecisionClef && d.st != nil &&
-		(d.st.GPULayers() > 0 || d.nonCausal()) && d.violation != "device-batch" && d.violation != "batch-alone"
+		(d.st.GPULayers() > 0 || d.nonCausal() || d.kind == jlm.DecisionKev) && d.violation != "device-batch" && d.violation != "batch-alone"
 }
 
 // layaPackRows is the most rows a packed encoder pass holds: a device's

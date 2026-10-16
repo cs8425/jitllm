@@ -78,11 +78,21 @@ const levRatings = 9
 // Decider asks a decision model questions. It holds one State and is one
 // request at a time; build one per concurrent caller.
 type Decider struct {
-	m    *Model
-	cfg  *jlm.Config
-	kind jlm.DecisionKind
-	st   *State
-	tpl  *jinja.Template
+	// kev is Kev's head scratch (decidekev.go).
+	kev *kevRun
+	// dotOut is dot's output word.
+	dotOut [1]float32
+	// kevDevRuns counts the questions Kev's head answered on a device.
+	kevDevRuns int
+	// kevDevWhy is why a device last declined Kev's head.
+	kevDevWhy string
+	// kevRuns counts Kev's forwards, for the gates.
+	kevRuns int
+	m       *Model
+	cfg     *jlm.Config
+	kind    jlm.DecisionKind
+	st      *State
+	tpl     *jinja.Template
 
 	// lev: the single-token codes A..Z, AA..ZZ, in order, and their ids.
 	labels     []int32
@@ -202,7 +212,7 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 			return nil, fmt.Errorf("model: lev needs at least %d single-token codes, the vocabulary has %d", levRatings, len(d.labels))
 		}
 		d.maxOptions = len(d.labels)
-	case jlm.DecisionLFM2D1:
+	case jlm.DecisionLFM2D1, jlm.DecisionKev:
 	case jlm.DecisionOpenJev:
 		// One letter per option, each of which must be one token
 		// (server-decision.cpp).
@@ -235,6 +245,12 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 		return nil, fmt.Errorf("model: decision readout %v has no implementation", kind)
 	}
 	d.st = m.NewState(maxSeq)
+	if kind == jlm.DecisionKev {
+		if err := d.kevInit(); err != nil {
+			d.st.Close()
+			return nil, err
+		}
+	}
 	return d, nil
 }
 
@@ -453,6 +469,9 @@ func (d *Decider) run(state jinja.Value, q *DecisionQuestion, v int) ([]float32,
 		}
 		out := d.variantScores(v, len(p.opts))
 		return out, d.clefForward(p, out)
+	}
+	if d.kind == jlm.DecisionKev {
+		return d.kevForward(state, q, v)
 	}
 	if d.kind == jlm.DecisionLaya {
 		ids, markers, err := d.layaSequence(state, q)
@@ -724,6 +743,17 @@ func (d *Decider) render(state jinja.Value, q *DecisionQuestion, opts []Decision
 	}
 	in := jinja.NewDict()
 	dict := in.AsDict()
+	if d.kind == jlm.DecisionKev {
+		// Kev's template takes text alone (server-decision.cpp render).
+		state, ins = kevText(state), kevText(q.Instructions)
+		for _, o := range list {
+			od := o.AsDict()
+			od.Set("key", kevText(od.Data["key"]))
+			if desc := od.Data["description"]; !desc.IsNone() {
+				od.Set("description", kevText(desc))
+			}
+		}
+	}
 	dict.Set("id", jinja.NewString(q.ID))
 	dict.Set("type", jinja.NewString(q.Type.String()))
 	dict.Set("instructions", ins)
@@ -1030,12 +1060,12 @@ func (d *Decider) growAnswer(n int) {
 // dot is x . w over len(x) on the generated f32 matvec, w a one-row weight.
 func (d *Decider) dot(x, w []float32) (float32, error) {
 	j := d.jit()
-	var out [1]float32
+	// The Decider's own word: a local one escapes through the call.
 	b := unsafe.Slice((*byte)(unsafe.Pointer(&w[0])), 4*len(w))
-	if !j.MatVecHost(out[:], quant.F32, b, x, 1, len(x)) {
+	if !j.MatVecHost(d.dotOut[:], quant.F32, b, x, 1, len(x)) {
 		return 0, fmt.Errorf("model: no generated f32 matvec of width %d on this host", len(x))
 	}
-	return out[0], nil
+	return d.dotOut[0], nil
 }
 
 // jit is the code generator the Decider's model runs on.

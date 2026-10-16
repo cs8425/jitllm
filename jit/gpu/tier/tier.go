@@ -1877,9 +1877,13 @@ type devShared struct {
 	// how many requests it has answered.
 	dh        dhState
 	ClefHeads int64
-	convN     int
-	ragSeg    map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
-	argmaxK   backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
+	// kh is Kev's pointer head on this device (kevhead.go) on dh's kernels,
+	// and KevHeads how many questions it has answered.
+	kh       khState
+	KevHeads int64
+	convN    int
+	ragSeg   map[segShapeKey]segLaunch // a few-sequence step's q/k/v; see groupQKV
+	argmaxK  backend.Kernel            // kernels.Argmax over the head's rows; see PrepHead
 	// samplePenK and sampleKs are the device sampler's kernels: the penalty
 	// over the head's rows and, per k, the two top-k passes (sample.go).
 	samplePenK backend.Kernel
@@ -2588,6 +2592,7 @@ func (g *devTier) Close() {
 	// Every session's queue, before the device that owns them, once nothing
 	// runs on one.
 	g.quiesce()
+	g.khClose() // before dhClose: its programs launch dh's kernels
 	g.dhClose()
 	for _, ds := range g.sess {
 		ds.closeQueue()

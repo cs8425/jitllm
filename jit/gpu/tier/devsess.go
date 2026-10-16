@@ -165,6 +165,10 @@ type lane struct {
 	// exactWs are the prompt chunk widths built for a chunk's own width
 	// (layersFor), least recently used first (keepExact).
 	exactWs []int
+	// exactDropped is the exact widths given back for room (keepExact):
+	// one asked for again runs in a kept wider width rather than giving back
+	// another, so prompts of more lengths than the lane keeps settle.
+	exactDropped map[int]bool
 	// noRoom is the batched widths prepBatch built and then refused for the
 	// budget, by geometry set, with the budget as it stood (noRoomFor).
 	noRoom map[noRoomKey]budgetAt

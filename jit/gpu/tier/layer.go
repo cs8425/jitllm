@@ -6325,9 +6325,10 @@ func (g *devTier) layersCall(sid uint64, lo, hi, pos, n int, x, cs, csSWA []floa
 		// room for the next or the lane holds maxExactWidths (keepExact);
 		// a dropped width's kernels stay in the caches.
 		ww := 0
-		if !g.NoExactPrompt && w != bw && g.keepExact(w) {
-			ww = w
-			g.ExactPrompts++
+		if !g.NoExactPrompt && w != bw {
+			if ww = g.keepExact(w); ww != 0 {
+				g.ExactPrompts++
+			}
 		}
 		if ww == 0 {
 			ww = g.batchFor(w)

@@ -36,6 +36,20 @@ func readoutOf(t *testing.T, d *Decider, state jinja.Value, qs []DecisionQuestio
 			return out
 		}}
 	}
+	if d.kind == jlm.DecisionKev {
+		ids, mk, err := d.kevPrompt(state, &qs[0], 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return readoutPrompt{ids: ids, start: func() { d.kevBegin(mk) }, finish: func([]float32) []float32 {
+			d.kevEnd()
+			s, err := d.kevHead(ids, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return append([]float32(nil), s...)
+		}}
+	}
 	ids, groups, err := d.prompt(state, &qs[0], 0)
 	if err != nil {
 		t.Fatal(err)
