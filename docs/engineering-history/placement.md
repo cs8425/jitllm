@@ -3909,6 +3909,49 @@ hasher and named once (`kvCache.digest`), the probe list and the recurrent
 staging are kept, a copy-on-write takes the layer's spare, and a page the store
 already held hands the session's memory back to that spare.
 
+★★ **A WARM PROMPT THAT REUSED NOTHING PAID FOR THE CACHE, AND THE MEDIAN
+REQUEST IS ONE.** On jivman's run a d1 decision on the V100 restores a whole
+512-position chunk or nothing (a placed linear block keeps points at chunk ends
+and the prompt's end only), so most requests restore nothing; warm was 125 ms
+against cold's 120 at the median while its mean was lower. Timed per request
+(one process, cold and warm alternating), the extra was all fixed costs:
+
+- **The chunk keys were hashed from position 0, per chunk, per layer that
+  asked**: 3.3 ms a request. They are prefix hashes, now taken in one pass as
+  the running hash's sum at each boundary and kept for the sequence
+  (`kvCache.ck`): 0.06 ms. A chunk-aligned restore point is named by its chunk
+  key (`recPointKey`), and a probe on a chunk boundary asks that name alone, so
+  a probe that misses hashes nothing.
+- **Each copy synchronised the context.** A point's snapshot of every
+  recurrent block and a seat's zeroing were one `Copy` per buffer, each a
+  CUDA owner hop plus a context sync, each a command buffer and a wait on
+  Metal. They are one list now (`backend.CopyLister`): on Lev the zeroing in
+  `Reset` went from 2.1 ms to 1.0 a request, cold and warm alike; on the M4,
+  d1's zeroing from 7.8 ms to 0.4 and a point's snapshot from 3.7 to 0.5.
+- **A hybrid faulted its pages before asking for a point**, and a page on the
+  card is a table write: a request with no point mapped and dropped its whole
+  shared prefix. The highest point under the prompt is found first
+  (`kvCache.recFloor`), and with none no page is faulted.
+
+After them (V100, jivman's 60 requests, in-process): d1 cold 121.6 ms, warm
+122.7 at the median (a miss now costs about 1 ms: the point at the chunk end
+and the prompt's end, and the names published), the warm mean 7% under cold;
+Lev cold 404 ms, warm 302. On the M4 (Metal): d1 cold 1658 ms, warm 1662;
+Lev 5427 against 3530.
+
+**A restore too small to pay was priced, not built.** The smallest restore is
+one chunk (16 positions), and its fixed cost (the probes and a point's load)
+measured 0.3 ms on the V100 against 16 rows of d1's prefill at about 0.1 ms a
+row, and more on every other tier measured: no device here makes a one-chunk
+restore lose, so a threshold would be a branch no request takes.
+
+**A prompt that ended inside a chunk kept its point where no probe asked.**
+The probes are the chunk boundaries, the prompt's limit and the mark, and the
+mark is a State's: a chat's next turn in a new State never asked the position
+its last prompt ended on, and on a device `TestKVIsHeldOnce`'s chat arm
+restored nothing. The store now indexes those ends by the chunk before them
+(`SharedStore.noteEnd`), and `recFloor` asks them past each boundary.
+
 ★★ **AND `-kv-cache` CACHED NOTHING FOR ANY REALISTIC PROMPT UNTIL `sealTail`,
 AND ITS OWN MESSAGE EXPLAINED WHY IN A WAY THAT READ AS INTENT.** A page sealed
 only once the position passed it, so a chat turn stored nothing and two

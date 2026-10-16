@@ -131,8 +131,10 @@ func TestKVIsHeldOnce(t *testing.T) {
 		}
 		return dup
 	}
-	shared := NewSharedStore()
 	arms := func(t *testing.T, g *tier.GPU) {
+		// A store of the arm's own: one the host arm filled would hold the
+		// device arm's pages under the same names, and count as a copy.
+		shared := NewSharedStore()
 		t.Run("chat", func(t *testing.T) {
 			if dup := chat(t, g, func(st *State) error { return st.ShareKV(shared) }); dup != 0 {
 				t.Fatalf("%d page(s) of a chat's history held twice", dup)

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"sync/atomic"
@@ -450,6 +451,9 @@ type kvCache struct {
 	mapped int64
 	// chunked is how far aliasChunks has named this sequence's shared pages.
 	chunked int
+	// endsAt is State.endsAt, the prompt ends kept past a chunk boundary,
+	// set with recAt.
+	endsAt func(c int) [kvEndSeats]uint8
 	// ck is chunkKey's: the key of every whole kvChunk of seq so far, in
 	// order, computed in one pass over seq (fillChunkKeys) and cut back with
 	// it, as bh is for a page size.
@@ -1316,19 +1320,18 @@ func (s *kvPages) dropResident() {
 // 0 when there is none: asked at limit, at every kvChunk below it and at the
 // mark, the points a hybrid keeps.
 //
-// A sharing session asks, past each chunk boundary, the prompt ends the
-// store saw kept there (SharedStore.noteEnd): a point at a prompt's end
-// inside a chunk -- the place the next chat turn parts from -- is otherwise
-// on no boundary a probe names.
+// Past each chunk boundary it asks the prompt ends the store says were kept
+// there (State.noteEnd): a point at a prompt's end inside a chunk -- where
+// the next chat turn parts from -- is otherwise on no boundary a probe names.
 func (kc *kvCache) recFloor(limit int) int {
 	kc.probes = appendProbes(kc.probes, limit, kvChunk)
 	if m := kc.mark; m > 0 && m < limit && m%kvChunk != 0 {
 		kc.probes = insertProbe(kc.probes, m)
 	}
 	for _, f := range kc.probes {
-		if kc.share != nil && f%kvChunk == 0 {
-			for _, e := range kc.share.endsAfter(kc.chunkKey(f)) {
-				if g := f + int(e); e > 0 && g <= limit && g != f && kc.recAt(g) {
+		if f%kvChunk == 0 && kc.endsAt != nil {
+			for _, e := range kc.endsAt(f) {
+				if g := f + int(e); e > 0 && g <= limit && kc.recAt(g) {
 					return g
 				}
 			}
@@ -1613,6 +1616,12 @@ func (s *State) SealPrompt(lg []float32) error {
 	s.kv.tailStored += int64(s.kv.sealTail(s.pos))
 	s.aliasMark(s.kvSkipped, s.pos)
 	if s.kv.share != nil {
+		// A prompt ending inside a chunk names its page on the card by its
+		// fill, beside the restore point kept there: a chat's next turn
+		// parts from it exactly.
+		if s.pos%kvChunk != 0 {
+			s.kv.publishTail(s.pos, true)
+		}
 		s.kv.flushPublish() // the prompt's names on the card, in one call
 	}
 	s.sealRecurrentTail(s.pos)
@@ -1634,6 +1643,7 @@ func (s *State) restoreKey(key []int32, rows int, logits bool) (int, []float32, 
 	tokens := key
 	if s.kv.recurrent && s.kv.recAt == nil {
 		s.kv.recAt = s.recPointAt
+		s.kv.endsAt = s.endsAt
 	}
 	s.kv.mark = s.recMark
 	if staleKeyFault != nil {
@@ -2167,7 +2177,7 @@ func (kc *kvCache) retireTail(pos int) {
 	if kc.share == nil || kc.ns == "" || pos <= 0 {
 		return
 	}
-	kc.publishTail(pos)
+	kc.publishTail(pos, false)
 	for li := kc.lo; li < len(kc.layers); li++ {
 		s := &kc.layers[li]
 		if s.p == 0 || s.p%kvChunk != 0 {
@@ -2182,7 +2192,7 @@ func (kc *kvCache) retireTail(pos int) {
 
 // publishTail hands every layer's partial page at pos to the shared store
 // under the key of its fill (pageKeyFill). It returns the pages published.
-func (kc *kvCache) publishTail(pos int) int {
+func (kc *kvCache) publishTail(pos int, cardOnly bool) int {
 	n := 0
 	for li := kc.lo; li < len(kc.layers); li++ {
 		s := &kc.layers[li]
@@ -2196,6 +2206,9 @@ func (kc *kvCache) publishTail(pos int) int {
 				kc.queuePublish(li, cur, kc.pageKeyFill(li, cur, f))
 				n++
 			}
+			continue
+		}
+		if cardOnly {
 			continue
 		}
 		have := s.written - cur*s.p
@@ -2858,10 +2871,62 @@ func (s *State) sealRecurrentTail(pos int) {
 			return
 		}
 	}
-	if s.sealRecOnDevice(pos) && s.kv.share != nil && pos >= kvChunk && pos%kvChunk != 0 {
-		c := pos / kvChunk * kvChunk
-		s.kv.share.noteEnd(s.kv.chunkKey(c), pos-c)
+	if s.sealRecOnDevice(pos) {
+		s.noteEnd(pos)
 	}
+}
+
+// endsLayer is the store index the prompt ends past a chunk boundary go
+// under, past the logits' (logitsLayer).
+func (s *State) endsLayer() int { return 3*s.c.NLayer + 1 }
+
+// kvEndSeats is how many prompt ends one chunk boundary remembers.
+const kvEndSeats = 4
+
+// noteEnd tells the store a restore point was kept at pos, inside a chunk:
+// under the chunk boundary before it, the fills past that boundary points
+// were kept at, newest first, packed in one word. Through the store, so a
+// State that never saw the prompt -- a chat's next turn -- finds it
+// (kvCache.recFloor), whatever the store is.
+func (s *State) noteEnd(pos int) {
+	c := pos / kvChunk * kvChunk
+	if c == 0 || c == pos {
+		return
+	}
+	key := s.kv.chunkKey(c)
+	if key == "" {
+		return
+	}
+	e := s.endsAt(c)
+	fill, at := uint8(pos-c), kvEndSeats-1
+	for i, f := range e {
+		if f == fill {
+			at = i
+			break
+		}
+	}
+	copy(e[1:at+1], e[:at]) // to the front
+	e[0] = fill
+	s.endWord[0] = math.Float32frombits(uint32(e[0]) | uint32(e[1])<<8 | uint32(e[2])<<16 | uint32(e[3])<<24)
+	s.recRd.Reset(kvBytesOf(s.endWord[:]))
+	if err := s.kv.store.Set(key, s.endsLayer(), 0, &s.recRd); err != nil {
+		s.kv.failed++
+	}
+}
+
+// endsAt is what noteEnd told the store past chunk boundary c: no fill is 0.
+func (s *State) endsAt(c int) [kvEndSeats]uint8 {
+	var e [kvEndSeats]uint8
+	key := s.kv.chunkKey(c)
+	if key == "" {
+		return e
+	}
+	w := s.kv.writer(kvBytesOf(s.endWord[:]))
+	if s.kv.store.Get(key, s.endsLayer(), 0, w) != nil || w.n != len(w.b) {
+		return e
+	}
+	u := math.Float32bits(s.endWord[0])
+	return [kvEndSeats]uint8{uint8(u), uint8(u >> 8), uint8(u >> 16), uint8(u >> 24)}
 }
 
 // attnLayer is any layer with pages, so that pageKey has a page size to hash.

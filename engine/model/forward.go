@@ -674,6 +674,9 @@ type State struct {
 	recEv  int
 	recBuf []float32
 	recRd  bytes.Reader
+	// endWord is the one word noteEnd and endsAt move a boundary's prompt
+	// ends through.
+	endWord [1]float32
 	// recMark is where the cached prompt in flight parts from the one before
 	// it (markParting), a restore point beside the spaced ones; recLast is
 	// that one's key.

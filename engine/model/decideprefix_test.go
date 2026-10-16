@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"strings"
@@ -18,17 +19,56 @@ import (
 // board down to his row.
 func boardRequests(t testing.TB, n int) [][]byte {
 	t.Helper()
+	return boardRequestsH(n, boardRows)
+}
+
+// boardRows is a board's height: past one 512-position device chunk, so a
+// device restore lands on a chunk's point. shortRows keeps a prompt inside
+// one chunk, for a readout that attends both ways (one bidirectional run
+// is never cut into chunks).
+const boardRows, shortRows = 81, 33
+
+// boardRequestsH is boardRequests at h rows, Pac-Man on the sixth row from
+// the bottom.
+func boardRequestsH(n, h int) [][]byte {
 	var out [][]byte
 	for r := range n {
-		out = append(out, boardRequest(3+r, 75, '.')) // he walks right along row 75
+		out = append(out, boardRequestH(3+r, h-6, h, '.')) // he walks right along one row
 	}
 	return out
 }
 
-// boardRequest is one board with Pac-Man at (px, py), every open tile not
-// yet eaten drawn as fill: a pellet, or for the violation a ghost.
-func boardRequest(px, py int, fill byte) []byte {
-	const w, h = 19, 81
+// boardsFor is boardRequests for model m: the short boards for a decoder
+// that attends both ways, and for any other boards tall enough that what two
+// of them share passes a 512-position device chunk in m's tokens (a placed
+// recurrent block keeps its restore points at chunk ends): 81 rows are 950
+// of d1's tokens and fewer of a smaller vocabulary's.
+func boardsFor(t testing.TB, m *Model, n int) [][]byte {
+	t.Helper()
+	if bidirReadout(m) {
+		return boardRequestsH(n, shortRows)
+	}
+	h := boardRows
+	for ; h < 4*boardRows; h += 40 {
+		ids := m.Vocab.EncodeSpecial(string(boardRequestH(3, h-6, h, '.')), false)
+		if len(ids)*(h-6)/h >= 640 {
+			break
+		}
+	}
+	return boardRequestsH(n, h)
+}
+
+// bidirReadout is a decoder readout whose attention sees the whole prompt
+// (jlm.FlagNonCausal): no prefix of its prompt is a prefix's history, so the
+// cache never applies to it (Decider.forwardSpans).
+func bidirReadout(m *Model) bool {
+	return m.container.Config().Flags.Has(jlm.FlagNonCausal) && !m.IsEncoder()
+}
+
+// boardRequestH is one board of h rows with Pac-Man at (px, py), every open
+// tile not yet eaten drawn as fill: a pellet, or for the violation a ghost.
+func boardRequestH(px, py, h int, fill byte) []byte {
+	const w = 19
 	var rows []string
 	for y := range h {
 		var b strings.Builder
@@ -77,7 +117,6 @@ func parseRequest(t testing.TB, b []byte) (jinja.Value, []DecisionQuestion) {
 // The violation restores the first board's pages for a later board, and the
 // gate must see it (RULE 10).
 func TestDecisionReusesThePrefix(t *testing.T) {
-	reqs := boardRequests(t, 4)
 	for _, c := range decisionCases {
 		if !prefixReadout(c.kind) {
 			continue
@@ -86,6 +125,7 @@ func TestDecisionReusesThePrefix(t *testing.T) {
 			m := openDecision(t, c.gguf, c.kind, noTune)
 			defer m.Close()
 			m.SetKVF16(false)
+			reqs := boardsFor(t, m, 4)
 			t.Run("host", func(t *testing.T) { decisionPrefixGate(t, m, nil, "", 0, reqs, 0) })
 			for _, spec := range stepDevices() {
 				g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(spec),
@@ -169,14 +209,25 @@ func decisionPrefixGate(t *testing.T, m *Model, g *tier.GPU, spec string, n int,
 		}
 		// Restored by aliasing the store's pages: what the session reads of
 		// its history is held once, in the store, not copied into it.
+		if bidirReadout(m) {
+			continue // held to restoring nothing, below
+		}
 		if i > 0 && g == nil && warm.st.KVSharedBytes() == 0 {
 			t.Fatalf("request %d aliases no shared page", i)
 		}
 		if i > 0 && warm.PromptRestored() == r0 {
-			t.Fatalf("request %d restored nothing: its prompt shares the board above row 75 with the last", i)
+			t.Fatalf("request %d restored nothing: its prompt shares the board above Pac-Man's row with the last", i)
 		}
 	}
 	t.Logf("%d prompt positions restored over %d requests", warm.PromptRestored(), len(reqs))
+	if bidirReadout(m) {
+		// Its answers are the uncached ones, and nothing was restored: a
+		// prefix of a prompt that attends both ways is not its history.
+		if warm.PromptRestored() != 0 {
+			t.Fatalf("a readout that attends both ways restored %d positions", warm.PromptRestored())
+		}
+		return
+	}
 	if g != nil {
 		st := g.Stats()
 		mig, mapped := st.KVPositionsMigrated-st0.KVPositionsMigrated, st.KVPagesMapped-st0.KVPagesMapped
@@ -212,7 +263,7 @@ func decisionPrefixGate(t *testing.T, m *Model, g *tier.GPU, spec string, n int,
 	defer func() { staleKeyFault = nil }()
 	// The first prompts it names are a board of ghosts', which every later
 	// board then restores in place of its own.
-	state, qs := parseRequest(t, boardRequest(3, 75, 'B'))
+	state, qs := parseRequest(t, ghostsOf(reqs[0]))
 	if _, err := stale.Decide(state, qs, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +309,7 @@ func devicePrefixViolation(t *testing.T, m *Model, spec string, n int, reqs [][]
 	// and writes there, and the first again, which maps its own pages back:
 	// in place, they hold the ghosts' rows.
 	moved := false
-	for i, b := range [][]byte{reqs[0], boardRequest(3, 75, 'B'), reqs[0]} {
+	for i, b := range [][]byte{reqs[0], ghostsOf(reqs[0]), reqs[0]} {
 		state, qs := parseRequest(t, b)
 		a, err := d.Decide(state, qs, nil)
 		if err != nil {
@@ -308,7 +359,6 @@ func answersDiffer(a, b []DecisionAnswer, tol float64) string {
 // that restore their shared prefix, prefill the rest and seal the restore
 // points they pass makes zero engine heap allocations.
 func TestDecisionWithAPrefixDoesNotAllocate(t *testing.T) {
-	reqs := boardRequests(t, 3)
 	for _, c := range decisionCases {
 		if !prefixReadout(c.kind) {
 			continue
@@ -317,6 +367,7 @@ func TestDecisionWithAPrefixDoesNotAllocate(t *testing.T) {
 			m := openDecision(t, c.gguf, c.kind, noTune)
 			defer m.Close()
 			m.SetKVF16(false)
+			reqs := boardsFor(t, m, 3)
 			t.Run("host", func(t *testing.T) { prefixAllocs(t, m, nil, reqs) })
 			for _, spec := range stepDevices() {
 				g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(spec),
@@ -376,7 +427,10 @@ func prefixAllocs(t *testing.T, m *Model, g *tier.GPU, reqs [][]byte) {
 	}
 	r0, rd0 := d.PromptRestored(), m.PagerReads()
 	w := countAllocs(pass)
-	if d.PromptRestored() == r0 {
+	// A readout that attends both ways restores nothing (its prompts are
+	// held to that in TestDecisionReusesThePrefix): its window is the
+	// uncached path a Decider with a store takes for it.
+	if d.PromptRestored() == r0 && !bidirReadout(m) {
 		t.Fatal("the window restored nothing: it measured cold prompts")
 	}
 	allocVerdict(t, fmt.Sprintf("%d prompt(s), %d positions restored", len(ps), d.PromptRestored()-r0),
@@ -389,4 +443,12 @@ func prefixAllocs(t *testing.T, m *Model, g *tier.GPU, reqs [][]byte) {
 // prefix's history.
 func prefixReadout(k jlm.DecisionKind) bool {
 	return k != jlm.DecisionLaya && k != jlm.DecisionD1Omni && k != jlm.DecisionClef
+}
+
+// ghostsOf is the board of request b (Pac-Man at column 3) with a ghost on
+// every open tile not yet eaten: the same board up to Pac-Man's row, parting
+// from b there. Every row of a board starts with a wall.
+func ghostsOf(b []byte) []byte {
+	h := bytes.Count(b, []byte(`"#`))
+	return boardRequestH(3, h-6, h, 'B')
 }
