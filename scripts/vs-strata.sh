@@ -39,7 +39,9 @@ PROMPT="${STRATA_VS_PROMPT:-The capital of France is}"
 JITLLM_ENV="${JITLLM_ENV:-JITLLM_EXPERTS=host}"
 STRATA_ARGS="${STRATA_ARGS:---resident-budget-gib 100 --expert-cache auto --max-context 4096 --prefill auto}"
 STRATA_PROFILE="${STRATA_PROFILE:-$(dirname "$STRATA")/../data/expert-profile.bin}"
+# NODE=all runs both engines unpinned: both sockets, the 2-socket rows.
 PIN=(numactl --cpunodebind="$NODE" --membind="$NODE")
+[ "$NODE" = all ] && PIN=()
 LOG="${STRATA_VS_LOG:-vs-strata.$(date +%s).log}"
 
 # The prompt as ids, from jitllm's own tokenizer, so both engines read the
@@ -49,11 +51,16 @@ IDS="$("$JITLLM" tokenize "$JITLLM_PATH" "$PROMPT" 2>&1 | sed -n 's/^[0-9]* toke
 
 psi() { awk '/^some/{split($2,a,"="); print a[2]}' /proc/pressure/cpu 2>/dev/null || echo 0; }
 # How busy the CPUs are before a sample (corebusy.py): PSI cannot see a
-# tenant on a box with CPUs to spare (RULE 2), and every GPU must be empty.
-# Every CPU, not only the node's: a tenant elsewhere on the box still
-# shares the memory controllers and the PCIe root, and on cato other
-# sessions' gates ran on every core and on this run's GPU.
-CPUS="$(seq -s, 0 $(($(nproc --all) - 1)))"
+# tenant on a box with CPUs to spare (RULE 2), and the measured GPUs must be
+# empty. The CPUs checked are the node's the run is pinned to, or every CPU
+# when it is not pinned (NODE=all): a box that runs correctness gates on its
+# other cards and socket beside a measurement (gates on GPUs 2-7 under their
+# own locks) would otherwise never be quiet.
+if [ "$NODE" = all ]; then
+  CPUS="$(seq -s, 0 $(($(nproc --all) - 1)))"
+else
+  CPUS="$(cat /sys/devices/system/node/node$NODE/cpulist)"
+fi
 BUSYMAX="${STRATA_VS_BUSY:-10}"
 busy() { "$(dirname "$0")/corebusy.py" "$CPUS" 2>/dev/null || echo 0; }
 # Waits for the node to go quiet (STRATA_VS_WAIT seconds at most), so a
@@ -62,42 +69,63 @@ quiet() {
   local waited=0 b g
   while :; do
     b="$(busy)"
-    g="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1 | tr -d ' ')"
+    g="$(nvidia-smi -i "$GPU" --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1 | tr -d ' ')"
     awk -v b="$b" -v m="$BUSYMAX" -v g="${g:-0}" 'BEGIN{exit !(b <= m && g < 600)}' && return 0
     if [ "$waited" -ge "${STRATA_VS_WAIT:-0}" ]; then
-      echo "the box is ${b}% busy and a GPU holds ${g} MiB before a sample: refusing" >&2
+      echo "the node is ${b}% busy and a measured GPU holds ${g} MiB before a sample: refusing" >&2
       return 1
     fi
     sleep 30
     waited=$((waited + 30))
   done
 }
-gpuclk() { nvidia-smi -i "$GPU" --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | tr -d ' '; }
+gpuclk() { nvidia-smi -i "${GPU%%,*}" --query-gpu=clocks.sm,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | tr -d ' '; }
+# Several cards (GPU=0,1): jitllm places over every visible card and Strata
+# splits its layers over the same ones; the rows are X cards against X.
+JDEV=cuda:0
+case "$GPU" in *,*) JDEV=cuda ;; esac
+# STRATA_MTP=<dir> runs Strata at its best: its MTP drafter, window
+# STRATA_SPEC (4), accepted drafts allowed. jitllm runs no speculation.
+STRATA_SPECARGS="--spec 2 --suffix-draft 0"
+if [ -n "${STRATA_MTP:-}" ]; then
+  STRATA_SPECARGS="--mtp $STRATA_MTP --spec ${STRATA_SPEC:-4}"
+fi
 
 jitllm_run() {
-  env CUDA_VISIBLE_DEVICES="$GPU" $JITLLM_ENV "${PIN[@]}" "$JITLLM" run -devices cuda:0 -n "$N" "$JITLLM_PATH" "$PROMPT" \
+  env CUDA_VISIBLE_DEVICES="$GPU" $JITLLM_ENV "${PIN[@]}" "$JITLLM" run -devices "$JDEV" -n "$N" "$JITLLM_PATH" "$PROMPT" \
     2>>"$LOG" >/dev/null || return 1
   tail -n 40 "$LOG" | sed -n 's|.*decode [0-9]* tok in [^(]*(\([0-9.]*\) tok/s).*|\1|p' | tail -1
 }
 strata_run() {
   local out
   out="$("${PIN[@]}" "$STRATA" --pack "$STRATA_PACK" --native "$STRATA_SHARD1" --expert-profile "$STRATA_PROFILE" \
-    $STRATA_ARGS --tokens "$IDS" --max-new "$N" --gpu "$GPU" --spec 2 --suffix-draft 0 2>&1)" || { echo "$out" >>"$LOG"; return 1; }
+    $STRATA_ARGS --tokens "$IDS" --max-new "$N" --gpu "$GPU" $STRATA_SPECARGS 2>&1)" || { echo "$out" >>"$LOG"; return 1; }
   echo "$out" >>"$LOG"
   local acc
   acc="$(echo "$out" | sed -n 's|.*drafts accepted \([0-9]*\) of.*|\1|p' | tail -1)"
-  if [ "${acc:-1}" != "0" ]; then
+  if [ -z "${STRATA_MTP:-}" ] && [ "${acc:-1}" != "0" ]; then
     echo "Strata accepted ${acc:-?} drafts: this sample speculated" >&2
     return 1
   fi
   echo "$out" | sed -n 's|^decode .* -> *\([0-9.]*\) tok/s.*|\1|p' | tail -1
 }
+# The B arm of a jitllm A/B (STRATA_VS_AA with JITLLM_B or JITLLM_ENV_B):
+# another build or other settings, under the same gates and interleave.
+# JITLLM_B_UNPINNED=1 runs the B arm on every socket (the 2-socket arm).
+jitllm_run_b() {
+  local pin=("${PIN[@]}")
+  [ -n "${JITLLM_B_UNPINNED:-}" ] && PIN=()
+  JITLLM="${JITLLM_B:-$JITLLM}" JITLLM_ENV="${JITLLM_ENV_B:-$JITLLM_ENV}" jitllm_run
+  local rc=$?
+  PIN=("${pin[@]}")
+  return $rc
+}
 A=jitllm_run
 B=strata_run
 NAME_B=strata
 if [ -n "${STRATA_VS_AA:-}" ]; then
-  B=jitllm_run
-  NAME_B=jitllm
+  B=jitllm_run_b
+  NAME_B="jitllm${JITLLM_B:+ $(basename "$JITLLM_B")}${JITLLM_ENV_B:+ ($JITLLM_ENV_B)}"
 fi
 
 echo "jitllm $(basename "$JITLLM_PATH") ($JITLLM_ENV) vs $NAME_B on GPU $GPU, node $NODE: decode $N tokens after the prompt [$IDS], $ROUNDS ABBA rounds; log $LOG"

@@ -1741,3 +1741,37 @@ func (g *GPU) RopeRows(width int) ([]float32, error) {
 	}
 	return unsafe.Slice((*float32)(unsafe.Pointer(&raw[0])), width*bs.p.RopeW()), nil
 }
+
+// CacheCoverage is, for every block with an expert cache, the share of its
+// counted selections that its hottest slots' worth of experts carry, at the
+// cache's size and at twice it: how much each block's routing a cache of
+// that size can hold, and what a bigger one would add. A measurement for
+// sizing caches by block; nil without caches. Not on a token's path.
+func (g *GPU) CacheCoverage() (at, twice []float64) {
+	for _, d := range g.devs {
+		d.mu.Lock()
+		for _, l := range d.layers {
+			if l == nil || l.stream == nil || !l.stream.cached() || len(l.stream.heat) == 0 {
+				continue
+			}
+			h := append([]uint32(nil), l.stream.heat...)
+			slices.SortFunc(h, func(a, b uint32) int { return int(b) - int(a) })
+			var tot, c1, c2 float64
+			n := len(l.stream.owner)
+			for i, v := range h {
+				tot += float64(v)
+				if i < n {
+					c1 += float64(v)
+				}
+				if i < 2*n {
+					c2 += float64(v)
+				}
+			}
+			if tot > 0 {
+				at, twice = append(at, c1/tot), append(twice, c2/tot)
+			}
+		}
+		d.mu.Unlock()
+	}
+	return at, twice
+}

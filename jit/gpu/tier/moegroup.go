@@ -674,8 +674,12 @@ func (g *devTier) emitGroupedMoE(sid uint64, s backend.Session, lc *launcher, bs
 	}
 	// A hybrid block's experts run on the host, every valid row of the chunk
 	// (valid, not the padded width: a padding row's experts are host time for
-	// nothing): the routing above is all the device does of them.
-	if l.stream != nil && l.stream.hybrid {
+	// nothing): the routing above is all the device does of them. So do a
+	// streamed block's (its experts sent to the card a token at a time): its
+	// bank holds a token's selection or its cache, not a chunk's, and a
+	// refusal here came after the chunk's linear blocks had advanced, which a
+	// hybrid model cannot take back.
+	if l.stream != nil && (l.stream.hybrid || l.stream.host != nil) {
 		if valid <= 0 || valid > rows {
 			valid = rows
 		}

@@ -30,6 +30,16 @@ func (f *File) SetPlacement(p Placement) {
 	}
 	f.mu.Lock()
 	f.noHuge, f.nodeMask = p.NoHugePages, mask
+	f.nodes = nil
+	if mask != nil {
+		for _, n := range p.Nodes {
+			if n >= 0 {
+				m := make([]uint64, 1+n/64)
+				m[n/64] = 1 << uint(n%64)
+				f.nodes = append(f.nodes, m)
+			}
+		}
+	}
 	f.mu.Unlock()
 	placeMemory(f.dense, p.NoHugePages, mask)
 }
