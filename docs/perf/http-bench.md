@@ -219,3 +219,21 @@ rounds, the workload and the SLOs.
   the engine's behaviour, not something in the harness.
 - **Logprobs, n > 1 and presence/frequency penalties are refused (400)**,
   where other engines produce them. The harness asks for none of them.
+
+## Deployment settings search
+
+`dev/deploysearch` sweeps jitllmd serve flags (`-max-batch`, `-prompt-chunk`,
+`-step-cost`, `-fairness`, `-sessions`, `-mem-cache-max`, and any other flag
+given with `-knob FLAG=V1,V2` or as a bundle with `-combo`) on a named request
+mix (`mixed`, `long`, `decode`, or a `-mix-file` hb.Config). Each sample
+restarts the server, so every candidate is measured from a cold process, and
+rounds are interleaved over the candidates (A B C, then C B A) with the
+unchanged default as the control and an identical copy of it ("aa") as the
+self-control. It reports TTFT p99, inter-token p99, goodput under the mix's
+SLO and host plus device memory as ratios to the control, gated as RULE 2
+gates (6 rounds, IQR/median at most 0.10), and the Pareto set of medians.
+`-bin NAME=PATH` repeated compares builds (for example main against an
+integration branch): each build's default joins the sweep. It changes no
+default and prints "candidate" only for a gated win without a gated
+regression; that is a reason to repeat, not to change a default. A timing row
+on the shared GPU box runs under that card's lock, both arms on one card.
