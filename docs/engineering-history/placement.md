@@ -3949,8 +3949,19 @@ restore lose, so a threshold would be a branch no request takes.
 The probes are the chunk boundaries, the prompt's limit and the mark, and the
 mark is a State's: a chat's next turn in a new State never asked the position
 its last prompt ended on, and on a device `TestKVIsHeldOnce`'s chat arm
-restored nothing. The store now indexes those ends by the chunk before them
-(`SharedStore.noteEnd`), and `recFloor` asks them past each boundary.
+restored nothing. The fills past a chunk boundary where a point was kept are
+written through the store under the boundary's chunk key (`State.noteEnd`,
+any store, so a disk cache finds them too), `recFloor` asks them past each
+boundary, and on the card the prompt's page is named by its fill beside the
+point.
+
+The gate itself had two holes that hid this: the held-once gate shared one
+store between its host and device arms, so the host arm's pages answered the
+device arm's names; and an 81-row board was 950 of d1's tokens but fewer than
+a device chunk's shared prefix in openjev's, which then restored nothing on
+the card. The boards now grow per model until two of them share more than a
+chunk, and a readout that attends both ways (vllm-d3) is held to restoring
+nothing.
 
 ★★ **AND `-kv-cache` CACHED NOTHING FOR ANY REALISTIC PROMPT UNTIL `sealTail`,
 AND ITS OWN MESSAGE EXPLAINED WHY IN A WAY THAT READ AS INTENT.** A page sealed
