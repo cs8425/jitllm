@@ -171,8 +171,8 @@ func decisionPrefixGate(t *testing.T, m *Model, g *tier.GPU, spec string, n int,
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !on {
-				t.Fatal("the Decider did not take the shared store")
+			if on == bidirReadout(m) {
+				t.Fatalf("the Decider took the shared store: %v, for a readout that attends both ways: %v", on, bidirReadout(m))
 			}
 		}
 		return d
@@ -244,7 +244,7 @@ func decisionPrefixGate(t *testing.T, m *Model, g *tier.GPU, spec string, n int,
 	// Every block on the card: the card's own violation. A seam keeps the
 	// host's, which names the device's pages by the same stale keys.
 	if g != nil && n < 0 {
-		devicePrefixViolation(t, m, spec, n, reqs, want, tol)
+		devicePrefixViolation(t, m, g, spec, n)
 		return
 	}
 	// The violation: every board after the first restores the first board's
@@ -284,44 +284,87 @@ func decisionPrefixGate(t *testing.T, m *Model, g *tier.GPU, spec string, n int,
 	}
 }
 
-// devicePrefixViolation runs the board requests through the shared cache on
-// a tier whose writes land in a named page in place, and holds that its
-// answers move.
-func devicePrefixViolation(t *testing.T, m *Model, spec string, n int, reqs [][]byte, want [][]DecisionAnswer, tol float64) {
+// devicePrefixViolation holds that the card's copy-on-write is load-bearing:
+// on a tier whose writes land in a named page in place
+// (tier.Config.KVCowFault), a prompt that parts inside a page another
+// prompt's history shares must change that history. A ends inside a page; B
+// and D each continue it differently, restored at A's end and writing on
+// past it into the page they share; B again, one token on, restores B's
+// history and reads D's rows there. Its logits must move from a cold run's.
+// The prompts are ids rather than boards so the parting lands inside a page
+// on every device, whatever its page size and chunk.
+func devicePrefixViolation(t *testing.T, m *Model, g *tier.GPU, spec string, n int) {
 	gv, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(spec), tier.WithDeviceTune(tier.TuneOff),
 		tier.WithConfig(func(c *tier.Config) { c.KVCowFault = true })}, testTierOpts(t)...)...)
 	if err != nil || gv == nil {
 		t.Fatalf("%s: the violation's tier: %v", spec, err)
 	}
 	defer gv.Close()
-	d, err := m.NewDecider(4096)
-	if err != nil {
-		t.Fatal(err)
+	ids := func(from, step, k int) []int32 {
+		out := make([]int32, k)
+		for i := range out {
+			out[i] = int32((from + i*step) % m.Cfg.NVocab)
+		}
+		return out
 	}
-	defer d.Close()
-	if err := d.SetDevice(gv, n); err != nil {
-		t.Fatal(err)
+	a := ids(1000, 7, 500)
+	b := append(append([]int32(nil), a...), ids(2000, 3, 300)...)
+	d := append(append([]int32(nil), a...), ids(3000, 5, 300)...)
+	b2 := append(append([]int32(nil), b...), 42)
+	open := func(on *tier.GPU, store *SharedStore) *State {
+		st := m.NewState(4096)
+		if err := st.SetDeviceLayers(on, n); err != nil {
+			t.Fatal(err)
+		}
+		if store != nil {
+			if err := st.SetCacheKey("decide-prefix-cow"); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.ShareKV(store); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return st
 	}
-	if on, err := d.SetPromptCache(NewSharedStore(), "decide-prefix-cow"); err != nil || !on {
-		t.Fatalf("the violation's Decider did not take the store: %v", err)
-	}
-	// The first board, a board of ghosts that parts from it inside its pages
-	// and writes there, and the first again, which maps its own pages back:
-	// in place, they hold the ghosts' rows.
-	moved := false
-	for i, b := range [][]byte{reqs[0], ghostsOf(reqs[0]), reqs[0]} {
-		state, qs := parseRequest(t, b)
-		a, err := d.Decide(state, qs, nil)
+	// run is B2's largest logit difference from a cold run's on the same
+	// tier, after A, B and D went through one shared store, and the
+	// positions they restored.
+	run := func(on *tier.GPU) (float64, int) {
+		cold := open(on, nil)
+		want, err := cold.Prefill(b2)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if i == 2 && answersDiffer(a, want[0], tol) != "" {
-			moved = true
+		want = append([]float32(nil), want...)
+		cold.Close()
+		st := open(on, NewSharedStore())
+		defer st.Close()
+		var got []float32
+		restored := 0
+		for _, p := range [][]int32{a, b, d, b2} {
+			st.Reset()
+			lg, err := st.PrefillCached(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored += st.KVRestored()
+			got = lg
 		}
+		worst := 0.0
+		for i := range want {
+			worst = max(worst, math.Abs(float64(got[i]-want[i])))
+		}
+		return worst, restored
 	}
-	t.Logf("the violation (writes into shared pages in place) restored %d positions", d.PromptRestored())
-	if !moved {
-		t.Fatal("writing into a shared page in place moved no answer: the gate cannot see it")
+	ctl, rc := run(g)
+	worst, restored := run(gv)
+	t.Logf("the violation (writes into shared pages in place) restored %d positions, worst logit %.3g from cold; "+
+		"copied on a write, %d restored and %.3g", restored, worst, rc, ctl)
+	if restored == 0 || rc == 0 {
+		t.Fatal("the violation restored nothing: it wrote no shared page")
+	}
+	if worst <= 4*ctl || worst < 0.1 {
+		t.Fatal("writing into a shared page in place moved no logit past a copy's: the gate cannot see it")
 	}
 }
 
@@ -401,7 +444,7 @@ func prefixAllocs(t *testing.T, m *Model, g *tier.GPU, reqs [][]byte) {
 			t.Fatalf("%s took no block: %s", g.Name(), g.Err())
 		}
 	}
-	if on, err := d.SetPromptCache(NewSharedStore(), "decide-prefix-alloc"); err != nil || !on {
+	if on, err := d.SetPromptCache(NewSharedStore(), "decide-prefix-alloc"); err != nil || on == bidirReadout(m) {
 		t.Fatalf("the Decider did not take the shared store: %v", err)
 	}
 	var ps []decisionPrompt

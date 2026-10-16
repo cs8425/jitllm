@@ -264,13 +264,15 @@ func (m *Model) NewDecider(maxSeq int) (*Decider, error) {
 // those pages, its recurrent summaries restored beside them, and prefills only
 // the rest. A server hands every Decider and session of a model the same st.
 //
-// An encoder readout (Laya, d1-omni) attends both ways, so no row's history
-// is a prefix's; Clef keeps every row's final residual, which the cache does
-// not hold. Each runs as before, uncached, and SetPromptCache says so with
-// false. A block on a device shares its pages there (nn.KVShareDevice). A nil
-// st turns sharing off.
+// An encoder readout (Laya, d1-omni) and a decoder whose attention sees the
+// whole prompt (vllm-d3) attend both ways, so no row's history is a prefix's;
+// Clef keeps every row's final residual, which the cache does not hold. Each
+// runs as before, uncached, and SetPromptCache says so with false: a State
+// left naming its pages would publish them for nothing, and keep the names
+// queued. A block on a device shares its pages there (nn.KVShareDevice). A
+// nil st turns sharing off.
 func (d *Decider) SetPromptCache(st *SharedStore, ns string) (bool, error) {
-	if d.st == nil || d.kind == jlm.DecisionClef {
+	if d.st == nil || d.kind == jlm.DecisionClef || d.nonCausal() {
 		return false, nil
 	}
 	d.st.Reset()

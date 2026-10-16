@@ -100,6 +100,9 @@ var (
 	selError                         SEL
 	selCmdBuf                        SEL
 	selCmdBufUnret                   SEL
+	// selBlitEnc and selCopyBuf are a blit's, looked up once: sel copies
+	// its name into a C string each call, a heap object per copy.
+	selBlitEnc, selCopyBuf SEL
 	selComputeEnc                    SEL
 	selComputeEncType, selMemBarrier SEL
 	selRetain                        SEL
@@ -163,6 +166,8 @@ func load() error {
 	selError = sel("error")
 	selCmdBuf = sel("commandBuffer")
 	selCmdBufUnret = sel("commandBufferWithUnretainedReferences")
+	selBlitEnc = sel("blitCommandEncoder")
+	selCopyBuf = sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:")
 	selComputeEnc = sel("computeCommandEncoder")
 	selComputeEncType = sel("computeCommandEncoderWithDispatchType:")
 	selMemBarrier = sel("memoryBarrierWithScope:")
@@ -963,11 +968,11 @@ func (c *Ctx) Copy(dst *Buf, dstOff int, src *Buf, srcOff, n int) error {
 	if cb == 0 {
 		return fmt.Errorf("metal: commandBuffer returned nil")
 	}
-	enc := send0(cb, sel("blitCommandEncoder"))
+	enc := send0(cb, selBlitEnc)
 	if enc == 0 {
 		return fmt.Errorf("metal: blitCommandEncoder returned nil")
 	}
-	sendCopy(enc, sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"),
+	sendCopy(enc, selCopyBuf,
 		src.id, uint64(srcOff), dst.id, uint64(dstOff), uint64(n))
 	send0(enc, selEndEncoding)
 	send0(cb, selCommit)
@@ -997,7 +1002,7 @@ func (c *Ctx) CopyList(ops []CopyOp) error {
 	if cb == 0 {
 		return fmt.Errorf("metal: commandBuffer returned nil")
 	}
-	enc := send0(cb, sel("blitCommandEncoder"))
+	enc := send0(cb, selBlitEnc)
 	if enc == 0 {
 		return fmt.Errorf("metal: blitCommandEncoder returned nil")
 	}
@@ -1005,7 +1010,7 @@ func (c *Ctx) CopyList(ops []CopyOp) error {
 		if o.N == 0 {
 			continue
 		}
-		sendCopy(enc, sel("copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:"),
+		sendCopy(enc, selCopyBuf,
 			o.Src.id, uint64(o.SrcOff), o.Dst.id, uint64(o.DstOff), uint64(o.N))
 	}
 	send0(enc, selEndEncoding)
