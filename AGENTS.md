@@ -589,6 +589,14 @@ of the device, *"the naive fallback is still jitted on the chosen device"*.
   write, not a block to hand back to the host.
 - **Basic kernels are the floor, not the goal.** Every optimized kernel is
   still owed; where a basic one runs is the work list, not a design.
+- **A block's generated code may differ per device and per model** (stated by
+  the user). The JIT emits for the device in front of it: kernel form, tiling,
+  reduction order and fusion follow that device's capabilities (sm_70 against
+  sm_75 and up, subgroup width, shared memory) and the executed row width. The
+  bar is the gated error margin (RULE 11c's coherence band) and speed, never
+  bit-identity across devices or forms; "one kernel everywhere" is not a
+  constraint (RULE 11e). A lever that pays on one device and does nothing on
+  another is guarded by that capability, not removed.
 - **The Go arithmetic lives in `internal/oracle` and only tests may import
   it.** `TestNoProductionCodeImportsTheOracle` walks the module and fails on a
   production import, so an engine that needs Go compute does not get past the
