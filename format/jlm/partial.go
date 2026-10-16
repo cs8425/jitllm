@@ -271,6 +271,13 @@ func (f *File) claim(b int) error {
 	_, size := f.pageAt(b)
 	f.makeRoom(b, size)
 	f.pages[b] = f.take(size)
+	// An expert page whole on one node, the experts alternating over the
+	// nodes, so a host computing an expert where its page lives reads only
+	// local memory (nn's node-affine mixture regions).
+	if len(f.nodes) > 1 && f.expertPage(b) {
+		x := b - int(f.H.NBlocks) - int(f.H.NVisBlocks)
+		bindNode(f.pages[b], f.nodes[x%len(f.nodes)])
+	}
 	// Whatever the frame held, it is about to hold block b; see OnRecycle.
 	f.retire(f.pages[b])
 	f.resident += uint64(cap(f.pages[b]))

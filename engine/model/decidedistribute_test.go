@@ -31,6 +31,7 @@ func moveTier(t *testing.T) (*tier.GPU, string, string) {
 		noDevice(t, a+","+b, err)
 	}
 	t.Cleanup(func() { g.Close() })
+	distinctCards(t, g)
 	return g, a, b
 }
 
@@ -347,7 +348,7 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 						alone = append(alone, ans)
 						tokens = append(tokens, d.InputTokens())
 					}
-					if g != nil && !m.IsEncoder() && c.kind != jlm.DecisionClef {
+					if g != nil && !m.IsEncoder() && c.kind != jlm.DecisionClef && c.kind != jlm.DecisionKev {
 						// On a device each request runs alone (batchAlone): the
 						// same answers bit for bit, and no batch step.
 						got, err := d.DecideBatch(reqs)
@@ -393,8 +394,8 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 							t.Fatalf("request %d ran %d tokens in the batch and %d alone", i, r.InputTokens, tokens[i])
 						}
 					}
-					// A non-causal model's prompts run one at a time (runJobs).
-					if !m.IsEncoder() && c.kind != jlm.DecisionClef && !d.nonCausal() {
+					// A non-causal model's prompts run one at a time (runJobs), and Kev's each alone.
+					if !m.IsEncoder() && c.kind != jlm.DecisionClef && !d.nonCausal() && c.kind != jlm.DecisionKev {
 						st := d.BatchStats()
 						t.Logf("batch: %d steps, %d prompt rows, at most %d prompts in a step; %d of %d blocks on the device",
 							st.Steps, st.PromptRows, st.MaxSeqs, d.BatchDeviceBlocks(), decisionBlocks(m))
@@ -428,8 +429,8 @@ func TestDecisionBatchMatchesAlone(t *testing.T) {
 					if !(worst <= tol) {
 						t.Errorf("batched, the answers moved %.6f from each alone", worst)
 					}
-					if c.kind == jlm.DecisionClef {
-						// Clef answers a request in one pass of its own (its
+					if c.kind == jlm.DecisionClef || c.kind == jlm.DecisionKev {
+						// Clef and Kev answer a request in passes of their own (its
 						// head reads every row, which a batch session's rows do
 						// not give back). The violation: the State not reset
 						// between the batch's requests, so each runs after the

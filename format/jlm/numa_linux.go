@@ -8,6 +8,7 @@ import (
 )
 
 const (
+	mpolBind       = 2
 	mpolInterleave = 3
 	mpolMFMove     = 1 << 1
 )
@@ -49,5 +50,23 @@ func placeMemory(b []byte, noHuge bool, mask []uint64) {
 		return
 	}
 	syscall.Syscall6(syscall.SYS_MBIND, start, end-start, mpolInterleave,
+		uintptr(unsafe.Pointer(&mask[0])), uintptr(len(mask)*64+1), mpolMFMove)
+}
+
+// bindNode places b's whole pages on one node (MPOL_BIND), migrating any
+// already there: an expert page is read whole by the expert it holds, so it
+// lives where that expert is computed (File.claim). Best effort, as
+// placeMemory.
+func bindNode(b []byte, mask []uint64) {
+	if len(b) == 0 || len(mask) == 0 {
+		return
+	}
+	const page = 4096
+	start := (uintptr(unsafe.Pointer(&b[0])) + page - 1) &^ (page - 1)
+	end := (uintptr(unsafe.Pointer(&b[0])) + uintptr(len(b))) &^ (page - 1)
+	if end <= start {
+		return
+	}
+	syscall.Syscall6(syscall.SYS_MBIND, start, end-start, mpolBind,
 		uintptr(unsafe.Pointer(&mask[0])), uintptr(len(mask)*64+1), mpolMFMove)
 }

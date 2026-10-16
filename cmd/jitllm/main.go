@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1073,6 +1074,17 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 			}
 			if ds.HybridRuns > 0 {
 				fmt.Fprintf(os.Stderr, "hybrid experts: %d block-step(s) on the host, %.2f s\n", ds.HybridRuns, sec(ds.THybrid))
+				if g, ok := dev.(*tier.GPU); ok {
+					if at, tw := g.CacheCoverage(); len(at) > 0 {
+						q := func(v []float64) string {
+							w := append([]float64(nil), v...)
+							slices.Sort(w)
+							return fmt.Sprintf("%.0f/%.0f/%.0f%%", 100*w[0], 100*w[len(w)/2], 100*w[len(w)-1])
+						}
+						fmt.Fprintf(os.Stderr, "cache coverage: the hottest experts a cache holds carry %s of a block's selections (min/median/max over %d blocks); twice the slots %s\n",
+							q(at), len(at), q(tw))
+					}
+				}
 				if ds.SplitRuns > 0 || ds.SplitAdmits > 0 || ds.TLateWrite > 0 {
 					fmt.Fprintf(os.Stderr, "split experts: %d block-step(s) split, %d expert(s) run on the card, host %.2f s, %d taken into the caches in %.2f s; host sums written back in %.2f s\n",
 						ds.SplitRuns, ds.SplitHits, sec(ds.TSplitHost), ds.SplitAdmits, sec(ds.TAdmit), sec(ds.TLateWrite))
@@ -1164,6 +1176,9 @@ func run(path, prompt string, n, depth int, devSpec string, gpuLayers int, vram,
 	// The prompt is the text ids plus whatever an image spliced in (marker
 	// tokens and one embedding per projected patch group).
 	ptok := len(ids) + extra
+	if n := st.MixtureAffine(); n > 0 {
+		fmt.Fprintf(os.Stderr, "numa     %d host mixture region(s) ran on the nodes holding their experts\n", n)
+	}
 	fmt.Fprintf(os.Stderr, "\nprompt %d tok in %v (%s)   decode %d tok in %v (%s)\n",
 		ptok, prefill.Round(time.Millisecond), rateOf(ptok, prefill),
 		len(out), decode.Round(time.Millisecond), rateOf(len(out), decode))

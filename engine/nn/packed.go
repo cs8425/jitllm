@@ -585,6 +585,9 @@ type hotRegions struct {
 		qk                        cpu.QuantActKernels
 		t                         quant.Type
 		x                         []float32
+		up                        []float32
+		act                       ActKind
+		perm                      []int
 		xstride, k, nb, half, win int
 		fn                        func(worker, lo, hi int)
 	}

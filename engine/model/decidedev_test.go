@@ -36,7 +36,7 @@ import (
 // vllm-d3's 0.10: the ambiguous request's issue question is a near-tie
 // (0.50 against 0.50 on the host), where the device's reduction order reads
 // 0.085 off on the V100 and the laptop alike.
-var decisionDevTol = map[string]float64{"d1-3B": 0.03, "lev": 0.08, "laya": 0.01, "clef": 0.05, "clef-fixture": 0.002, "d1-omni": 0.01, "openjev": 0.005, "vllm-d3": 0.10}
+var decisionDevTol = map[string]float64{"d1-3B": 0.03, "lev": 0.08, "laya": 0.01, "clef": 0.05, "clef-fixture": 0.002, "d1-omni": 0.01, "openjev": 0.005, "vllm-d3": 0.10, "kev": 0.15}
 
 // decisionBlocks is how many blocks a Decider's readout runs: the decoder's,
 // or the encoder segment's (a decision head's blocks with it).
@@ -66,6 +66,12 @@ func decideOn(t *testing.T, m *Model, dev nn.Device, n int, ok func(placed int) 
 	gpu, _ := dev.(*tier.GPU)
 	if dev != nil {
 		if err := d.SetDevice(dev, n); err != nil {
+			// A strict placement a card has no room for is the card's size,
+			// not the engine's answer (pplx-decider's half and head on one
+			// 16 GB card).
+			if gpu != nil {
+				cardTooSmall(t, gpu.Err(), "%v", err)
+			}
 			t.Fatal(err)
 		}
 		if gpu != nil {
@@ -107,6 +113,10 @@ func decideOn(t *testing.T, m *Model, dev nn.Device, n int, ok func(placed int) 
 	// request at a time.
 	if d.kind == jlm.DecisionClef {
 		return out, placed, why, d.clefDevRuns
+	}
+	// Kev has no labels to pick: what the device took is its head.
+	if d.kind == jlm.DecisionKev {
+		return out, placed, why, d.kevDevRuns
 	}
 	return out, placed, why, d.picked
 }
@@ -160,6 +170,9 @@ type decisionDevViolation struct {
 var decisionDevViolations = map[string]decisionDevViolation{
 	// The norm's epsilon is read into the plan (LayerPlan.RMSEps).
 	"d1-3B": {"a norm epsilon of 1", func(m *Model) func() {
+		return cfgMut(m, func(c *Config) { c.RMSEps = 1 })
+	}},
+	"kev": {"a norm epsilon of 1", func(m *Model) func() {
 		return cfgMut(m, func(c *Config) { c.RMSEps = 1 })
 	}},
 	"vllm-d3": {"a norm epsilon of 1", func(m *Model) func() {
@@ -266,6 +279,12 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 							t.Logf("the head on %s against the host's head over the same rows: %.5f", spec, w)
 							if w > tol {
 								t.Errorf("the device's head answers %.5f from the host's over the same rows", w)
+							}
+						} else if c.kind == jlm.DecisionKev {
+							// The head ran on the device for every question
+							// (a decline is an error, not a host run).
+							if picked == 0 {
+								t.Fatalf("Kev's head never ran on %s", spec)
 							}
 						} else if !m.IsEncoder() {
 							// The labels' logits were picked on the device, and

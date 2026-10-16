@@ -57,7 +57,16 @@ type JIT struct {
 	ragStage     []float32
 	ragStride    int
 	ragViolation bool
-	hot          hotRegions // see hotRegions
+	// mord, mbyNode, mps and mouts are nodeOrder's and permuted's scratch,
+	// kept so a mixture call allocates nothing; mixAffine counts the
+	// node-affine mixture regions.
+	mord      []int
+	mbyNode   [][]int
+	mcur      []int
+	mps       []*Packed
+	mouts     [][]float32
+	mixAffine int64
+	hot       hotRegions // see hotRegions
 	// tier is the instruction-set tier this JIT was built for, recorded once
 	// at construction, and em is that tier's emitter table: every kernel this
 	// JIT emits comes from em, so a JIT never mixes tiers. Force a tier (a

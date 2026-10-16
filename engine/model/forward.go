@@ -1258,7 +1258,18 @@ func (s *State) SetDeviceLayers(d nn.Device, max int) error {
 			if !s.migrateKV(li, s.pos, true) || !s.migrateRec(li, true) {
 				// Resident weights with no history would attend over an empty
 				// cache. Give the block straight back, and every placed block
-				// after it, exactly as the grow path does.
+				// after it, exactly as the grow path does -- saying why, or a
+				// placement that took nothing reads as one never offered.
+				why := "the device refused it"
+				if e, ok := s.ld.(nn.ErrReporter); ok && e.Err() != "" {
+					why = e.Err()
+				}
+				if s.kv.layers[li].anyShared() {
+					why = "its pages are shared with another sequence"
+				}
+				for range placed[i:] {
+					s.noteDecline(fmt.Sprintf("block %d's history (%d positions) did not move to the device: %s", li, s.pos, why))
+				}
 				for _, lj := range placed[i:] {
 					s.ld.ReleaseLayers(lj, lj+1)
 					s.unmarkOnDev(lj)
@@ -1656,6 +1667,7 @@ func (s *State) ensureLayer(li int) func(*nn.LayerWeights) error {
 		// read/upload pipeline).
 		w.Ensure, w.EnsureExperts = dst.Ensure, dst.EnsureExperts
 		w.PrefetchExperts, w.HostExperts, w.HostExpertsRows = dst.PrefetchExperts, dst.HostExperts, dst.HostExpertsRows
+		w.ExpertUses = dst.ExpertUses
 		*dst = w
 		return nil
 	}
@@ -1679,6 +1691,7 @@ func (s *State) ensureSelected(li int) func(*nn.LayerWeights, []uint32) error {
 		// Carry every callback over; see ensureLayer.
 		w.Ensure, w.EnsureExperts = dst.Ensure, dst.EnsureExperts
 		w.PrefetchExperts, w.HostExperts = dst.PrefetchExperts, dst.HostExperts
+		w.ExpertUses = dst.ExpertUses
 		*dst = w
 		return nil
 	}
@@ -1803,7 +1816,7 @@ func (s *State) offerRange(lo, hi int) {
 		if bh, ok := ld.(nn.BlockHolder); ok && !named && bh.HoldsBlock(li) {
 			w := nn.LayerWeights{Ensure: s.ensureLayer(li), EnsureExperts: s.ensureSelected(li),
 				PrefetchExperts: s.prefetchSelected(li), HostExperts: s.hostExpertsFor(li),
-				HostExpertsRows: s.hostExpertsRowsFor(li)}
+				HostExpertsRows: s.hostExpertsRowsFor(li), ExpertUses: s.hot.layer(li)}
 			plan := *s.planFor(li)
 			if adm.PrepLayer(li, &plan, &w) {
 				s.markOnDev(li)
@@ -1945,6 +1958,7 @@ func (s *State) blockWeights(li int) (nn.LayerWeights, error) {
 	w.Ensure, w.EnsureExperts = s.ensureLayer(li), s.ensureSelected(li)
 	w.PrefetchExperts = s.prefetchSelected(li)
 	w.HostExperts, w.HostExpertsRows = s.hostExpertsFor(li), s.hostExpertsRowsFor(li)
+	w.ExpertUses = s.hot.layer(li)
 	if c.MoE() {
 		// The expert banks are fetched by the tier through Ensure once it
 		// admits the block: pageIn does not read them (the host fetches
@@ -3003,6 +3017,7 @@ func (s *State) PrewarmGPU(n int) <-chan struct{} {
 				w.Ensure, w.EnsureExperts = s.ensureLayer(li), s.ensureSelected(li)
 				w.PrefetchExperts, w.HostExperts = s.prefetchSelected(li), s.hostExpertsFor(li)
 				w.HostExpertsRows = s.hostExpertsRowsFor(li)
+				w.ExpertUses = s.hot.layer(li)
 			}
 			s.ldCand.PrewarmLayer(li, &s.plan, &w)
 		}
@@ -3096,6 +3111,10 @@ func (s *State) Accelerated() []quant.Type { return s.jit.Types() }
 
 // Workers is how many worker threads the fast tier uses.
 func (s *State) Workers() int { return s.jit.Workers() }
+
+// MixtureAffine is how many of this State's host mixture regions ran on the
+// NUMA nodes holding their experts (nn.JIT.MixtureAffine).
+func (s *State) MixtureAffine() int64 { return s.jit.MixtureAffine() }
 
 // Shapes is how many shape-specialized kernels were generated for this model.
 func (s *State) Shapes() int { return s.jit.Shapes() }

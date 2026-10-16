@@ -61,6 +61,7 @@ func blocksMoveBetweenDevices(t *testing.T, path string, arm int, opts ...Option
 		noDevice(t, a+","+b, err)
 	}
 	defer g.Close()
+	distinctCards(t, g)
 	m, err := Open(path, append(opts, WithPlacement(Placement{Rest: &Place{On: a}, Head: &Place{On: a}}))...)
 	if err != nil {
 		t.Fatal(err)
