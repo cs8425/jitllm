@@ -267,6 +267,22 @@ was or was not taken.
 - **Keys** names what makes a verdict stale. A verdict is cached under it and is
   evidence for that key only; a block relocated to another card takes that
   card's verdict or the reference recipe.
+- **The target is a guard dimension, not an if at a call site.** A recipe
+  that pays on one device and is inert on another says so in a `Pays` guard
+  over a `Target`: the device's capability (ISA tier, the MMA shape it offers,
+  subgroup width, shared memory), the executed row-width class (one-row
+  decode, a few rows such as a speculative verify or fewer routed pairs than
+  the bank has experts, a prompt chunk's GEMM width) and the layout facts of
+  the rows (a stream-major residual, which every row slice must take whole).
+  Examples: a deep-tile GEMM verdict that needs sm_75's m16n8 tiles is refused
+  on sm_70 by name; a few-row verify and a prompt chunk are different row
+  classes with different winning forms. Every persisted verdict carries the
+  target's key, so evidence at one class or on one card is never read at
+  another.
+- **Bit identity is per backend, never across devices.** A block's generated
+  code may differ per device and per model; the bar is the gated error margin
+  and the speed. An exact contract means exact against the reference recipe on
+  the same backend.
 
 The search is the existing one: `timeRecipes` over the matched region's
 candidates, interleaved, with the margin and IQR gates above. A rewrite adds
