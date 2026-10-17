@@ -268,7 +268,10 @@ func TestImageFetchLimits(t *testing.T) {
 		t.Fatalf("a request past its byte total: %v", err)
 	}
 
-	if _, err := (ImagePolicy{DecodeTimeout: time.Nanosecond}).ready().decodeImage(testPNG(t, 512, 512, color.White), ""); err == nil ||
+	// Large enough that the decode outlasts a coarse clock's tick: on Windows
+	// a 512x512 decode could read no time passed, and so "finished within" a
+	// nanosecond.
+	if _, err := (ImagePolicy{DecodeTimeout: time.Nanosecond}).ready().decodeImage(testPNG(t, 4096, 4096, color.White), ""); err == nil ||
 		!strings.Contains(err.Error(), "did not decode within") {
 		t.Fatalf("a decode past its deadline: %v", err)
 	}
