@@ -2084,7 +2084,7 @@ func (s *State) planFor(li int) *nn.LayerPlan {
 	}
 	s.k3Plan(li, &plan)
 	s.q4ePlan(li, &plan)
-	if c.NonCausal {
+	if c.NonCausal && s.m.IsEmbedding() {
 		// A bidirectional decoder (EmbeddingGemma): its blocks are non-causal
 		// blocks, as an encoder's are -- the sequence one call, every row over
 		// the call's rows, a sliding layer inside each row's symmetric window
@@ -2546,50 +2546,115 @@ func (m *Model) bankWeight(t tensor) nn.Weight {
 	if c == nil || t.e == nil || !c.ExpertPaged(t.e) {
 		return wt(t)
 	}
+	if t.packed == nil {
+		return m.gatheredBank(t)
+	}
+	// The bank's Weight is a function of the entry alone, so it is built once
+	// (its sheet closure and Packed with it) and every later call -- one per
+	// block per step on a device -- allocates nothing.
+	if w, ok := m.bankWts.Load(t.e); ok {
+		return w.(nn.Weight)
+	}
 	sheets := int(t.e.Dims[2])
 	nrow := t.rows / max(sheets, 1)
-	sheet := func(x int) (nn.Packed, func(), error) {
-		p := c.ExpertPage(t.e, x)
-		if p < 0 {
-			return nn.Packed{}, func() {}, fmt.Errorf("model: %v expert %d has no expert page", t.e.Role, x)
-		}
-		// The block's own page is held too: a device assembles a bank one
-		// expert page at a time, each fault can evict, and the block page holds
-		// the router and shared expert the same upload reads.
-		var lb jlm.Lease
-		if b := int(t.e.Block); b >= 0 && b < int(c.H.NBlocks) {
-			// Held only when in, as ensureExperts does: claiming the
-			// frame of a block whose base is on the card held its size of
-			// host budget empty for every sheet sent.
-			if l, ok := c.HoldFilled(b); ok {
-				lb = l
-			}
-		}
-		off, size := c.PageBounds(p)
-		l, err := c.Hold(p, []jlm.Range{{Off: off, N: size}})
-		if err != nil {
-			lb.Release()
-			return nn.Packed{}, func() {}, err
-		}
-		qs, d, sc := c.Sheet(t.e, x)
-		return nn.Packed{QS: qs, D: d, SC: sc, Stride: nrow}, func() { l.Release(); lb.Release() }, nil
-	}
-	if t.packed == nil {
-		var buf []byte
-		for x := 0; x < sheets; x++ {
-			p, release, err := sheet(x)
-			if err != nil {
-				release()
-				return wt(tensor{})
-			}
-			buf = append(buf, p.QS...)
-			release()
-		}
-		return nn.Weight{T: t.typ, Data: buf, Rows: t.rows, K: t.k}
-	}
-	return nn.Weight{T: t.typ, Data: splitBankData, Rows: t.rows, K: t.k,
-		Packed: &nn.Packed{Sheet: sheet, Sheets: sheets}}
+	w := nn.Weight{T: t.typ, Data: splitBankData, Rows: t.rows, K: t.k,
+		Packed: &nn.Packed{Sheet: func(x int) (nn.Packed, func(), error) { return m.sheetOf(t.e, x, nrow) }, Sheets: sheets}}
+	got, _ := m.bankWts.LoadOrStore(t.e, w)
+	return got.(nn.Weight)
 }
+
+// gatheredBank is a float bank, which the device reads row-major out of Data:
+// gathered into one buffer, since that path has no Sheet. Only the synthetic
+// fixtures have one.
+func (m *Model) gatheredBank(t tensor) nn.Weight {
+	sheets := int(t.e.Dims[2])
+	nrow := t.rows / max(sheets, 1)
+	var buf []byte
+	for x := 0; x < sheets; x++ {
+		p, release, err := m.sheetOf(t.e, x, nrow)
+		if err != nil {
+			release()
+			return wt(tensor{})
+		}
+		buf = append(buf, p.QS...)
+		release()
+	}
+	return nn.Weight{T: t.typ, Data: buf, Rows: t.rows, K: t.k}
+}
+
+// sheetHold is the pins an expert sheet holds until the device has copied it:
+// the expert's own page and the block's. The holds are recycled through
+// Model.holdFree, with their release func built once, so handing a sheet over
+// allocates nothing once the free list has filled.
+type sheetHold struct {
+	m       *Model
+	l, lb   jlm.Lease
+	live    bool // handed out and not yet put back: a second release is a no-op
+	release func()
+}
+
+func (h *sheetHold) put() {
+	m := h.m
+	m.holdMu.Lock()
+	live := h.live
+	h.live = false
+	m.holdMu.Unlock()
+	if !live {
+		return
+	}
+	h.l.Release()
+	h.lb.Release()
+	m.holdMu.Lock()
+	m.holdFree = append(m.holdFree, h)
+	m.holdMu.Unlock()
+}
+
+func (m *Model) newHold() *sheetHold {
+	m.holdMu.Lock()
+	defer m.holdMu.Unlock()
+	if n := len(m.holdFree); n > 0 {
+		h := m.holdFree[n-1]
+		m.holdFree = m.holdFree[:n-1]
+		h.live = true
+		return h
+	}
+	h := &sheetHold{m: m, live: true}
+	h.release = h.put
+	return h
+}
+
+// sheetOf is expert x of bank e: its planes, held in their page until the
+// returned release runs.
+func (m *Model) sheetOf(e *jlm.Entry, x, nrow int) (nn.Packed, func(), error) {
+	c := m.container
+	p := c.ExpertPage(e, x)
+	if p < 0 {
+		return nn.Packed{}, noRelease, fmt.Errorf("model: %v expert %d has no expert page", e.Role, x)
+	}
+	h := m.newHold()
+	// The block's own page is held too: a device assembles a bank one
+	// expert page at a time, each fault can evict, and the block page holds
+	// the router and shared expert the same upload reads.
+	if b := int(e.Block); b >= 0 && b < int(c.H.NBlocks) {
+		// Held only when in, as ensureExperts does: claiming the
+		// frame of a block whose base is on the card held its size of
+		// host budget empty for every sheet sent.
+		if l, ok := c.HoldFilled(b); ok {
+			h.lb = l
+		}
+	}
+	off, size := c.PageBounds(p)
+	l, err := c.Hold(p, []jlm.Range{{Off: off, N: size}})
+	if err != nil {
+		h.put()
+		return nn.Packed{}, noRelease, err
+	}
+	h.l = l
+	qs, d, sc := c.Sheet(e, x)
+	return nn.Packed{QS: qs, D: d, SC: sc, Stride: nrow}, h.release, nil
+}
+
+func noRelease() {}
 
 // wt is t for a device: K is the width it was packed at, which is k but for
 // a ragged tower's matrices (tensor.kp; nn.LayerPlan.KPad).

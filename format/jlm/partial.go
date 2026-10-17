@@ -2,7 +2,6 @@ package jlm
 
 import (
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -85,7 +84,10 @@ func (f *File) EnsureRanges(b int, rs []Range) error {
 	//
 	// The two locked halves are their own functions so every Lock has a
 	// deferred Unlock: a mutex left held hangs the next token with no error.
-	page, base, runs, err := f.planRuns(b, rs)
+	pl := f.getPlan()
+	defer f.putPlan(pl)
+	page, base, runs, err := f.planRuns(b, rs, pl.runs[:0])
+	pl.runs = runs[:0]
 	// Before the read: a copy of the frame's old bytes must be gone before
 	// its new ones can be handed out.
 	f.flushRecycled()
@@ -102,21 +104,7 @@ func (f *File) EnsureRanges(b int, rs []Range) error {
 	t0 := time.Now()
 	defer func() { atomic.AddInt64(&f.waitNs, int64(time.Since(t0))) }()
 
-	errs := make([]error, len(runs))
-	var wg sync.WaitGroup
-	for ri, r := range runs {
-		wg.Add(1)
-		go func(ri int, r run) {
-			defer wg.Done()
-			cl := uint64(r.lo) * f.chunkSize()
-			ch := uint64(r.hi) * f.chunkSize()
-			if ch > psize {
-				ch = psize
-			}
-			errs[ri] = f.readAt(page[cl:ch], int64(base+cl))
-		}(ri, r)
-	}
-	wg.Wait()
+	errs := f.readRuns(pl, page, base, psize, runs)
 	return f.markFilled(b, runs, errs)
 }
 
@@ -137,14 +125,16 @@ func (f *File) chunkSpan(r Range, base uint64, nc int) (lo, hi int) {
 
 // planRuns claims and pins block b's frame and returns the chunk runs the
 // caller must read. A non-empty result carries a pin that markFilled releases.
-func (f *File) planRuns(b int, rs []Range) (page []byte, base uint64, runs []run, err error) {
+//
+// runs is the caller's scratch, appended to and returned.
+func (f *File) planRuns(b int, rs []Range, runs []run) (page []byte, base uint64, _ []run, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if b < 0 || b >= len(f.pages) {
-		return nil, 0, nil, fmt.Errorf("jlm: block %d of %d", b, len(f.pages))
+		return nil, 0, runs[:0], fmt.Errorf("jlm: block %d of %d", b, len(f.pages))
 	}
 	if err := f.claim(b); err != nil {
-		return nil, 0, nil, err
+		return nil, 0, runs[:0], err
 	}
 	base, psize := f.pageAt(b)
 	have := f.filled[b]
@@ -166,7 +156,7 @@ func (f *File) planRuns(b int, rs []Range) (page []byte, base uint64, runs []run
 			continue
 		}
 		if r.Off < base || r.Off+r.N > base+psize {
-			return nil, 0, nil, fmt.Errorf("jlm: [%d,%d) is outside block %d's page",
+			return nil, 0, runs[:0], fmt.Errorf("jlm: [%d,%d) is outside block %d's page",
 				r.Off, r.Off+r.N, b)
 		}
 		if lo, hi := f.chunkSpan(r, base, nc); lo < hi {
@@ -175,7 +165,7 @@ func (f *File) planRuns(b int, rs []Range) (page []byte, base uint64, runs []run
 	}
 	f.spanBuf = sp[:0] // keep the grown array whatever this call found
 	if len(sp) == 0 {
-		return nil, 0, nil, nil
+		return nil, 0, runs[:0], nil
 	}
 	// Insertion sort, not sort.Slice: a plan is a couple of dozen nearly
 	// sorted spans (bank by bank, ascending expert), and sort.Slice's
@@ -215,7 +205,7 @@ func (f *File) planRuns(b int, rs []Range) (page []byte, base uint64, runs []run
 		}
 	}
 	if len(runs) == 0 {
-		return nil, 0, nil, nil
+		return nil, 0, runs[:0], nil
 	}
 	f.hold(b)
 	return f.pages[b], base, runs, nil
@@ -284,7 +274,7 @@ func (f *File) claim(b int) error {
 	if !f.expertPage(b) {
 		f.recent = b
 	}
-	f.filled[b] = make([]bool, f.chunksFor(b))
+	f.filled[b] = f.takeFilled(f.chunksFor(b))
 	return nil
 }
 

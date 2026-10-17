@@ -86,14 +86,24 @@ func (f *File) retire(b []byte) {
 func (f *File) flushRecycled() {
 	f.mu.Lock()
 	fn, bs := f.recycle, f.recycled
-	f.recycled = nil
+	f.recycled, f.recycledSpare = f.recycledSpare, nil
 	f.mu.Unlock()
-	if fn == nil {
+	if fn != nil {
+		for _, b := range bs {
+			fn(unsafe.Pointer(unsafe.SliceData(b)), uintptr(len(b)))
+		}
+	}
+	if cap(bs) == 0 {
 		return
 	}
-	for _, b := range bs {
-		fn(unsafe.Pointer(unsafe.SliceData(b)), uintptr(len(b)))
+	// The array goes back for the next retire: a paged decode recycles a frame
+	// per block per token, and a fresh array each time was an allocation each.
+	clear(bs)
+	f.mu.Lock()
+	if f.recycledSpare == nil {
+		f.recycledSpare = bs[:0]
 	}
+	f.mu.Unlock()
 }
 
 // release gives a buffer this File no longer holds back: a mapping is

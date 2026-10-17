@@ -1181,6 +1181,11 @@ type expert struct{ gate, up, down tensor }
 
 // Model is a loaded transformer.
 type Model struct {
+	// bankWts caches bankWeight's Weight per bank entry; holdFree is the
+	// recycled sheet holds (sheetOf).
+	bankWts  sync.Map
+	holdMu   sync.Mutex
+	holdFree []*sheetHold
 	// kpadViolation is a gate's violation of a ragged tower on a device: its
 	// plans state no padded width (nn.LayerPlan.KPad), so the device
 	// quantizes the rows at their own width under weights packed wider.
@@ -2204,25 +2209,33 @@ func (m *Model) ensureBlockSelected(li int, sel []uint32, base bool) error {
 	if m.container != nil && li < len(m.layers) && m.layers[li].expBank().e != nil &&
 		m.container.ExpertPaged(m.layers[li].expBank().e) {
 		bank := m.layers[li].expBank().e
-		pages := make([]int, len(sel))
-		for i, x := range sel {
-			if pages[i] = m.container.ExpertPage(bank, int(x)); pages[i] < 0 {
+		// Pages already filled need no read, and the common warm case is that
+		// all are: the goroutines and their bookkeeping are for the cold ones.
+		var cold []int
+		for _, x := range sel {
+			p := m.container.ExpertPage(bank, int(x))
+			if p < 0 {
 				return fmt.Errorf("model: block %d: expert %d has no expert page", li, x)
 			}
+			if !m.container.Filled(p) {
+				cold = append(cold, p)
+			}
 		}
-		var wg sync.WaitGroup
-		errs := make([]error, len(sel))
-		for i, p := range pages {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				errs[i] = m.container.EnsurePage(p)
-			}()
-		}
-		wg.Wait()
-		for _, err := range errs {
-			if err != nil {
-				return err
+		if len(cold) > 0 {
+			var wg sync.WaitGroup
+			errs := make([]error, len(cold))
+			for i, p := range cold {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					errs[i] = m.container.EnsurePage(p)
+				}()
+			}
+			wg.Wait()
+			for _, err := range errs {
+				if err != nil {
+					return err
+				}
 			}
 		}
 		if base {
