@@ -1779,12 +1779,19 @@ numbers are not gated):
 | 12 rounds | 4 | 19.9 | 25.5 | 1.294 [0.243] refused | 0.920 [0.204], 0.949 [0.115] refused |
 | 8 rounds | 1 | 18.2 | 36.0 | 1.564 [0.377] refused | 1.070 [0.366] refused |
 | 8 rounds | 1 | 17.1 | 28.0 | 1.610 [0.222] refused | 0.932 [0.786] refused |
+| 12 rounds | 1 | 15.0 | 23.7 | 1.501 [0.206] refused | 1.004 [0.100] |
 
 Every V100 ratio is on the side of the fix (three passes at c=4, 1.29-2.14, TTFT
-p50 0.23-0.70; two at c=1, 1.56-1.61; host plus device memory 0.81-0.82,
-because the store's fills are held once), and none passes the gate: the A/A
-copy of main moves as far as the fix does. That is the measurement, not a claim
-of a gain of any size. The laptop pair is the one that resolves.
+p50 0.23-0.70; three at c=1, 1.50-1.61; host plus device memory 0.81-0.82,
+because the store's fills are held once), and no throughput ratio passes the
+gate: the A/A copy of main moves as far as the fix does. The last c=1 pass, on
+a quieter box, did resolve one: TTFT p99 0.846 [0.054] with the A/A at 1.002
+[0.017]. That is the measurement, not a claim of a gain of any size. The laptop
+pair is the one that resolves throughput.
+
+On the V100 the fix did not make four streams scale: in the 12-round passes c=4
+read 1.33 times c=1 on main (19.9 against 15.0 tok/s) and 1.08 times after
+(25.5 against 23.7). The seal's card half is what is left.
 
 **What is left, and what was tried.**
 
