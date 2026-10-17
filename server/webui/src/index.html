@@ -2,17 +2,27 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>jitllm</title><link rel="stylesheet" href="app.css"></head>
 <body>
-<header><b>jitllm</b><span id="status" class="dim">connecting</span></header>
+<header><b>jitllm</b><span id="status" class="dim">connecting</span>
+  <form id="login" hidden><input id="key" type="password" placeholder="API key" autocomplete="off"><button>Use key</button></form></header>
 <main>
   <aside>
     <h2>Devices</h2><table id="devices"></table>
     <h2>Loaded models</h2><table id="loaded"></table>
+    <h2>Model files</h2><table id="files"></table>
+    <h2>Sampling</h2>
+    <label>Temperature <input id="temperature" inputmode="decimal" placeholder="greedy"></label>
+    <label>Top p <input id="top_p" inputmode="decimal" placeholder="off"></label>
+    <label>Max tokens <input id="max_tokens" inputmode="numeric" value="512"></label>
+    <label>Stop strings, one per line <textarea id="stop" rows="2"></textarea></label>
   </aside>
   <section>
-    <div id="log"></div>
-    <div class="bar"><select id="model"></select>
-      <textarea id="prompt" rows="2" placeholder="Message"></textarea>
-      <button id="send">Send</button><button id="stop">Stop</button></div>
+    <div id="log" aria-live="polite"></div>
+    <div id="attached" class="dim"></div>
+    <div class="bar"><select id="model" aria-label="Model"></select>
+      <textarea id="prompt" rows="2" placeholder="Message" aria-label="Message"></textarea>
+      <input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+      <button id="attach" title="Attach pictures">Image</button>
+      <button id="send">Send</button><button id="stop" disabled>Stop</button><button id="clear">New chat</button></div>
   </section>
 </main>
 <script src="app.js"></script></body></html>

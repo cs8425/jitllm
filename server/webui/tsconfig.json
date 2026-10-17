@@ -6,7 +6,9 @@
     "strict": true,
     "lib": ["es2022", "dom", "dom.iterable"],
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
 }
