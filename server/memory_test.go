@@ -48,15 +48,16 @@ func readLedger(e *Engine, lm *LoadedModel) ledger {
 // the two-socket Xeon -- the default context, the memory cache, the State pool
 // and a warm load, a host share of 190 GiB (eight tenths of that box's free
 // memory) -- to sixteen distinct 170-token prompts, four at a time, while the
-// host reports 2 GiB available: the NUMA node filling under the other servers.
+// host reports 512 MiB available: the NUMA node filling under the other servers.
 //
 // The memory cache may hold an eighth of what it holds plus what is
-// available, so at most 2 GiB/7; the State's score rows are sized by the keys
+// available, so at most 512 MiB/7; the State's score rows are sized by the keys
 // a prompt reaches. The ledger's total stays under the weights plus that
 // bound plus 320 MiB of heap.
 //
 // The violations: an eighth of the share alone lets the cache take every
-// prompt (~33 MB each, past the bound by the twelfth); the score rows sized at
+// prompt (about 6 MB each, the fills of a prompt's last page being held over one
+// copy; past the bound by the thirteenth); the score rows sized at
 // the context hold 89 MB per State.
 func TestAServerUnderLoadStaysUnderItsBound(t *testing.T) {
 	path := modelPath(t, serveModel)
@@ -64,7 +65,7 @@ func TestAServerUnderLoadStaysUnderItsBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const avail = 2 << 30
+	const avail = 512 << 20
 	e := New(Config{ModelDir: filepath.Dir(path), Probe: oneCardProbe, Version: "test",
 		HostBudget: 190 << 30, MaxBatchRows: 64, WarmLoads: true})
 	e.hostAvail = func() uint64 { return avail }
