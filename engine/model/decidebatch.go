@@ -257,7 +257,6 @@ func (d *Decider) runJobs(jobs []*batchJob) error {
 				return err
 			}
 			j.scores = append(j.scores[:0], s...)
-			d.input += len(j.ids)
 		}
 		return nil
 	}
