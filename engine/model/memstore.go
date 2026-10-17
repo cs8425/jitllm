@@ -2,6 +2,7 @@ package model
 
 import (
 	"container/heap"
+	"fmt"
 	"io"
 	"sync"
 
@@ -52,15 +53,25 @@ type kvStoreKey struct {
 }
 
 type memPage struct {
-	key    kvStoreKey
-	b      []byte
-	mapped bool
-	pass   uint64
-	at     int // its place in order; -1 while pinned
+	key kvStoreKey
+	// b is the page's bytes: all of back.b, or a prefix of it (SetFills).
+	b    []byte
+	back *memBack
+	pass uint64
+	at   int // its place in order; -1 while pinned
 	// pins is how many Pinned views hold the page: two parked sessions
 	// sharing a prefix pin its pages twice, and the first Release must not
 	// free them under the second.
 	pins int
+}
+
+// memBack is the memory under one or more pages. A page offered alone owns
+// its memory; the fills of one partial page (SetFills) are prefixes of one
+// copy, and the memory is charged once and given back with its last page.
+type memBack struct {
+	b      []byte
+	mapped bool
+	refs   int
 }
 
 // memOrder is a heap whose top is the next page to evict.
@@ -176,42 +187,142 @@ func (m *MemStore) Set(cacheId string, layer, index int, page io.Reader) error {
 }
 
 func (m *MemStore) set(cacheId string, layer, index int, page io.Reader, pin bool) error {
-	src, err := io.ReadAll(page)
+	back, err := readBack(page)
 	if err != nil {
 		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pass := m.tick(layer, index)
-	if !pin && m.limit > 0 && cost(len(src), true) > m.limit {
+	m.hold(back, []kvStoreKey{{cacheId, layer, index}}, []int{len(back.b)}, pin, nil)
+	return nil
+}
+
+// SetFills holds, for each i, the first lens[i] bytes of src under keys[i]
+// (one layer and page index), as separate pages that share one copy of src's
+// longest prefix: the fills of a partial page are byte prefixes of each other,
+// and offering each as a page of its own copied the same positions again for
+// every chunk boundary. lens must not exceed len(src). The bound and the
+// accounting are those of Set: the shared copy is charged once and freed with
+// its last page.
+func (m *MemStore) SetFills(layer, index int, src []byte, keys []string, lens []int) error {
+	return m.setFills(layer, index, src, keys, lens, false, nil)
+}
+
+func (m *MemStore) setFills(layer, index int, src []byte, keys []string, lens []int, pin bool, held func(kvStoreKey)) error {
+	if len(keys) != len(lens) {
+		return fmt.Errorf("model: SetFills was given %d keys and %d lengths", len(keys), len(lens))
+	}
+	m.mu.Lock()
+	limit := m.limit
+	m.mu.Unlock()
+	top := 0
+	for _, n := range lens {
+		if n < 0 || n > len(src) {
+			return fmt.Errorf("model: SetFills length %d is outside the %d bytes offered", n, len(src))
+		}
+		// Only a fill the bound admits sizes the copy: one too large for the
+		// limit is not held, and a copy long enough for it would be charged.
+		if pin || limit == 0 || cost(n, true) <= limit {
+			top = max(top, n)
+		}
+	}
+	if top == 0 {
 		return nil
 	}
-	b, mapped, err := kernels.MapOffHeap(len(src))
-	if err != nil || len(b) < len(src) {
-		b, mapped = make([]byte, len(src)), false
+	back := newBack(top)
+	copy(back.b, src[:top])
+	ks := make([]kvStoreKey, len(keys))
+	for i, k := range keys {
+		ks[i] = kvStoreKey{k, layer, index}
 	}
-	b = b[:len(src)]
-	copy(b, src)
-	k := kvStoreKey{cacheId, layer, index}
-	pins := 0
-	if old, ok := m.pages[k]; ok {
-		// A page offered again keeps the pins it had: the same name is the
-		// same bytes, and a parked session still needs them.
-		pins = old.pins
-		m.remove(old)
-	}
-	if pin {
-		pins++
-	}
-	p := &memPage{key: k, b: b, mapped: mapped, pass: pass, at: -1, pins: pins}
-	m.pages[k] = p
-	if pins == 0 {
-		heap.Push(&m.order, p)
-	}
-	m.bytes += cost(len(b), mapped)
-	m.sets++
-	m.trim()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hold(back, ks, lens, pin, held)
 	return nil
+}
+
+// readBack reads a page into memory of its own: straight into the mapping
+// when the reader knows its length, so the bytes are copied once and no
+// intermediate slice is left for the collector.
+func readBack(page io.Reader) (*memBack, error) {
+	if l, ok := page.(interface{ Len() int }); ok {
+		back := newBack(l.Len())
+		n, err := io.ReadFull(page, back.b)
+		if err == io.ErrUnexpectedEOF || err == io.EOF {
+			err = nil
+		}
+		if err != nil {
+			releaseBack(back)
+			return nil, err
+		}
+		back.b = back.b[:n]
+		return back, nil
+	}
+	src, err := io.ReadAll(page)
+	if err != nil {
+		return nil, err
+	}
+	back := newBack(len(src))
+	copy(back.b, src)
+	return back, nil
+}
+
+// newBack is memory for n bytes, off the Go heap where the platform maps it.
+func newBack(n int) *memBack {
+	b, mapped, err := kernels.MapOffHeap(n)
+	if err != nil || len(b) < n {
+		b, mapped = make([]byte, n), false
+	}
+	return &memBack{b: b[:n], mapped: mapped}
+}
+
+func releaseBack(b *memBack) {
+	if b.mapped {
+		kernels.UnmapOffHeap(b.b)
+	}
+}
+
+// hold installs back's prefixes lens[i] as pages keys[i], taking ownership of
+// back. m.mu held.
+func (m *MemStore) hold(back *memBack, keys []kvStoreKey, lens []int, pin bool, held func(kvStoreKey)) {
+	inserted := 0
+	for i, k := range keys {
+		pass := m.tick(k.layer, k.index)
+		if lens[i] > len(back.b) || !pin && m.limit > 0 && cost(lens[i], back.mapped) > m.limit {
+			continue // not admitted when the copy was sized, or by the bound now
+		}
+		pins := 0
+		if old, ok := m.pages[k]; ok {
+			// A page offered again keeps the pins it had: the same name is the
+			// same bytes, and a parked session still needs them.
+			pins = old.pins
+			m.remove(old)
+		}
+		if pin {
+			pins++
+		}
+		p := &memPage{key: k, b: back.b[:lens[i]], back: back, pass: pass, at: -1, pins: pins}
+		if back.refs == 0 {
+			m.bytes += cost(len(back.b), back.mapped)
+		}
+		back.refs++
+		m.pages[k] = p
+		if pins == 0 {
+			heap.Push(&m.order, p)
+		}
+		if held != nil {
+			held(k)
+		}
+		m.sets++
+		inserted++
+	}
+	if inserted == 0 {
+		releaseBack(back)
+		return
+	}
+	// After the last page is in: an eviction that took every page of back
+	// would otherwise free memory the next prefix is about to point into.
+	m.trim()
 }
 
 // Drop forgets every page held for cacheId.
@@ -244,15 +355,16 @@ func (m *MemStore) trim() {
 	}
 }
 
-// remove forgets one page and frees its memory. m.mu held.
+// remove forgets one page and frees its memory with the last page on it.
+// m.mu held.
 func (m *MemStore) remove(p *memPage) {
 	if p.pins == 0 {
 		heap.Remove(&m.order, p.at)
 	}
 	delete(m.pages, p.key)
-	m.bytes -= cost(len(p.b), p.mapped)
-	if p.mapped {
-		kernels.UnmapOffHeap(p.b)
+	if p.back.refs--; p.back.refs == 0 {
+		m.bytes -= cost(len(p.back.b), p.back.mapped)
+		releaseBack(p.back)
 	}
 }
 
@@ -298,6 +410,18 @@ func (p *PinnedStore) Set(cacheId string, layer, index int, page io.Reader) erro
 		p.keys = append(p.keys, kvStoreKey{cacheId, layer, index})
 	}
 	return nil
+}
+
+// SetFills is MemStore.SetFills with the pages held pinned, or, after
+// Release, as ordinary pages.
+func (p *PinnedStore) SetFills(layer, index int, src []byte, keys []string, lens []int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.m.setFills(layer, index, src, keys, lens, !p.done, func(k kvStoreKey) {
+		if !p.done {
+			p.keys = append(p.keys, k)
+		}
+	})
 }
 
 // Drop forgets every page held for cacheId.
