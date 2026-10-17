@@ -120,7 +120,12 @@ func TestTilePrefillMatchesTheHost(t *testing.T) {
 			// the tile switched off still prints the dp4a arm's numbers.
 			st := g.Stats()
 			if st.TileMV == 0 {
-				if strings.Contains(g.Name(), "[msl]") || strings.Contains(g.Name(), "[ptx]") {
+				// sm_70 and older have no m16n8 matrix instruction to lower the
+				// tiles on (sm_70's m8n8k4 is GemmVolta's, and runs ahead of
+				// them): the device is not asked, which is not a refusal.
+				preTile := strings.Contains(g.Name(), "(sm_70)") || strings.Contains(g.Name(), "(sm_6") ||
+					strings.Contains(g.Name(), "(sm_5") || strings.Contains(g.Name(), "(sm_3")
+				if (strings.Contains(g.Name(), "[msl]") || strings.Contains(g.Name(), "[ptx]")) && !preTile {
 					t.Fatalf("no GemmTile was built on %s (refused: %q): the dp4a twin answered", g.Name(), st.TileWhy)
 				}
 				t.Skipf("%s does not lower the collective tiles: %s", g.Name(), st.TileWhy)
