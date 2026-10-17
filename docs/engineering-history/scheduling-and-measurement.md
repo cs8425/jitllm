@@ -1797,9 +1797,7 @@ read 1.33 times c=1 on main (19.9 against 15.0 tok/s) and 1.08 times after
 
 - The seal's card half still runs on the loop: 90-140 ms a request at 8B on a
   quiet box, and under load seconds, during which no row steps. At c=4 on the
-  V100 the fix did not make four streams scale (25.5 tok/s against 28.0 at one
-  stream in separate passes): TTFT is still the seal and the prompt step in
-  turn. Reading the history home without a host copy of it per layer, or
+  V100 TTFT is still the seal and the prompt step in turn. Reading the history home without a host copy of it per layer, or
   reading it home only for the pages the store does not hold, is the next
   lever.
 - Sealing on a goroutine beside the other rows' steps (the row waits for its
