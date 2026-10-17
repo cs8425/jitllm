@@ -593,7 +593,14 @@ func (g *devTier) shrinkKVLayer(kp *kvPool, l *kvLayerPool) error {
 			}
 		}
 	}
-	n := max(live, l.floor, 1)
+	// A layer with history at home keeps one id free to stream it through.
+	// streamRoom ensured it; a compaction forced by another layer's growth
+	// took it back, and the next call found no page to stream through.
+	want := live
+	if kp.anyEvicted() {
+		want++
+	}
+	n := max(want, l.floor, 1)
 	if n >= l.n || len(l.fenced) > 0 {
 		return nil
 	}
@@ -847,4 +854,14 @@ func u32view(v []uint32) []byte {
 		return nil
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(&v[0])), 4*len(v))
+}
+
+// anyEvicted reports that some sequence has pages at home.
+func (kp *kvPool) anyEvicted() bool {
+	for _, e := range kp.evicted {
+		if e > 0 {
+			return true
+		}
+	}
+	return false
 }
