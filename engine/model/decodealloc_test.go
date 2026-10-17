@@ -422,8 +422,11 @@ type decodeWindow struct{ ksliced, affine int64 }
 // a page or recorded the launch sequence again.
 func allocVerdict(t *testing.T, what string, w windowAllocs, n int, reads int64, captures int) {
 	t.Helper()
-	t.Logf("%s: %d engine allocation(s) over %d; %d in the runtime's per-P caches (sync.Pool, sudogs, "+
-		"timers); %d page read(s)", what, w.engine, n, w.caches, reads)
+	// The failure below is on engine plus unattributed, so the line reports
+	// both: a run that fails must show the count that failed it.
+	t.Logf("%s: %d engine allocation(s) over %d, %d unattributed (tiny, no stack); %d in the runtime's "+
+		"per-P caches (sync.Pool, sudogs, timers); %d page read(s)", what, w.engine, n,
+		max(w.unattributed, 0), w.caches, reads)
 	if captures != 0 {
 		t.Fatalf("the window recorded the launch sequence %d time(s): it measured a re-capture, not a "+
 			"replayed token", captures)
@@ -691,6 +694,53 @@ func TestStepAllocsUnderABudget(t *testing.T) {
 			}
 			defer g.Close()
 			stepAllocs(t, m, g, stepAll)
+		})
+	}
+}
+
+// TestPagedDecodeDoesNotAllocate is TestDecodeDoesNotAllocate's host arm on a
+// model that does not fit: a page budget of a third of its blocks, so every
+// warm token evicts and re-reads pages. Paging is the design, not a mode, and
+// a paged token is held to the same zero as a resident one; the window must
+// have read pages, or it measured a resident decode.
+func TestPagedDecodeDoesNotAllocate(t *testing.T) {
+	for _, name := range []string{"Llama-3.2-1B-Instruct-Q4_K_M.gguf", "Qwen3-0.6B-Q8_0.gguf"} {
+		t.Run(name, func(t *testing.T) {
+			src := jlmOf(t, testmodels.Path(name))
+			probe, err := Open(src, noTune)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, nb := probe.PageSize(), uint64(probe.Cfg.NLayer)
+			probe.Close()
+			m, err := Open(src, noTune, WithPageBudget(page*max(nb/3, 2)), WithStreamTrial(false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			const warm, n = 32, 32
+			s := m.NewState(warm + n + 8)
+			defer s.Close()
+			for i := range warm {
+				if _, err := s.Forward(int32(5 + i)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r0 := m.container.Reads()
+			w := countAllocs(func() {
+				for i := range n {
+					if _, err := s.Forward(int32(3 + i)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			reads := m.container.Reads() - r0
+			if reads == 0 {
+				t.Fatal("the window read no page: the budget held the model, and this arm measured a resident decode")
+			}
+			// The reads are the point of this window, so allocVerdict is not
+			// handed them: it refuses a window that read.
+			allocVerdict(t, fmt.Sprintf("paged at %d of %d blocks, %d page read(s)", max(nb/3, 2), nb, reads), w, n, 0, 0)
 		})
 	}
 }
