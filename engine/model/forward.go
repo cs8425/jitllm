@@ -2084,7 +2084,7 @@ func (s *State) planFor(li int) *nn.LayerPlan {
 	}
 	s.k3Plan(li, &plan)
 	s.q4ePlan(li, &plan)
-	if c.NonCausal {
+	if c.NonCausal && s.m.IsEmbedding() {
 		// A bidirectional decoder (EmbeddingGemma): its blocks are non-causal
 		// blocks, as an encoder's are -- the sequence one call, every row over
 		// the call's rows, a sliding layer inside each row's symmetric window
