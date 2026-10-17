@@ -1925,6 +1925,7 @@ type devShared struct {
 	ragKerns   map[moeKernKey]backend.Kernel // a batched mixture's grouped matvecs (moegroup.go)
 	moeVolta   map[moeVoltaKey]moeVoltaMV    // their tensor-core twins; see voltaGroupedMV
 	ragK       map[ragKey]backend.Kernel     // a ragged step's matvecs; see ragMV
+	tailK      map[ragKey]*mvTail            // tileMV's second launches, one per shape
 	qkvK       map[string]*qkvSeg            // a prompt chunk's q/k/v grids; see qkvGemm
 	kshared    map[string]backend.Kernel     // scratch kernels by content; see compileShared
 	pcache     *persistCache                 // composed persistent kernels; see persist.go

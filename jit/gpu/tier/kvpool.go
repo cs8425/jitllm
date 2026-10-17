@@ -196,6 +196,7 @@ func (g *devTier) addKVLayer(kp *kvPool, li int, geom kvGeom, n int) error {
 	for id := n - 1; id >= 1; id-- {
 		l.free = append(l.free, uint32(id))
 	}
+	l.reserveFences()
 	need := kp.pageBytes(l)*uint64(n) + uint64(kp.tabWords)*4 + kvStageBytes(geom, kp.p)
 	if !g.kvCompact(need, nil) && !g.roomOrReclaim(need) {
 		return fmt.Errorf("%w: a layer's %d page(s) and table need %d bytes", ErrKVCapacity, n, need)
@@ -428,6 +429,7 @@ func (g *devTier) growKVLayer(kp *kvPool, l *kvLayerPool, want int) error {
 		g.charge(delta)
 		l.charged += delta
 		l.n = n
+		l.reserveFences()
 		g.KVGrows++
 		return nil
 	}
@@ -527,6 +529,13 @@ func (l *kvLayerPool) releasePages(s seqID) {
 	delete(l.owned, s)
 	delete(l.home, s)
 	delete(l.rel, s)
+}
+
+// reserveFences sizes the fence lists for every page of the layer, so
+// releasing pages never grows them on a warm path.
+func (l *kvLayerPool) reserveFences() {
+	l.fenced = slices.Grow(l.fenced, l.n-len(l.fenced))
+	l.fencedAt = slices.Grow(l.fencedAt, l.n-len(l.fencedAt))
 }
 
 // fenceIDs fences every id of ids that is a page on the card (0 is one at

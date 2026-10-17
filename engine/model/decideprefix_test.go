@@ -329,7 +329,7 @@ func devicePrefixViolation(t *testing.T, m *Model, g *tier.GPU, spec string, n i
 	// run is B2's largest logit difference from a cold run's on the same
 	// tier, after A, B and D went through one shared store, and the
 	// positions they restored.
-	run := func(on *tier.GPU) (float64, int) {
+	run := func(on *tier.GPU) (float64, int, []float32) {
 		cold := open(on, nil)
 		want, err := cold.Prefill(b2)
 		if err != nil {
@@ -354,16 +354,28 @@ func devicePrefixViolation(t *testing.T, m *Model, g *tier.GPU, spec string, n i
 		for i := range want {
 			worst = max(worst, math.Abs(float64(got[i]-want[i])))
 		}
-		return worst, restored
+		return worst, restored, got
 	}
-	ctl, rc := run(g)
-	worst, restored := run(gv)
+	ctl, rc, kept := run(g)
+	worst, restored, moved := run(gv)
+	apart := 0.0
+	for i := range kept {
+		apart = max(apart, math.Abs(float64(moved[i]-kept[i])))
+	}
 	t.Logf("the violation (writes into shared pages in place) restored %d positions, worst logit %.3g from cold; "+
-		"copied on a write, %d restored and %.3g", restored, worst, rc, ctl)
+		"copied on a write, %d restored and %.3g; the two arms part by %.3g", restored, worst, rc, ctl, apart)
 	if restored == 0 || rc == 0 {
 		t.Fatal("the violation restored nothing: it wrote no shared page")
 	}
-	if worst <= 4*ctl || worst < 0.1 {
+	// The bar is the logits' own scale, not an absolute one: a small model's
+	// logits are small. The violation must part from the copy-on-write arm,
+	// which is the same tier and the same kernels but for the fault.
+	scale := 0.0
+	for _, v := range kept {
+		scale = max(scale, math.Abs(float64(v)))
+	}
+	t.Logf("logit scale %.3g", scale)
+	if apart < 0.01*scale || worst <= ctl {
 		t.Fatal("writing into a shared page in place moved no logit past a copy's: the gate cannot see it")
 	}
 }
