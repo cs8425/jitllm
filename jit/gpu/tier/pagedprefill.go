@@ -101,6 +101,12 @@ const (
 	prefillMMA70                     // sm_70's m8n8k4, both products
 )
 
+// prefillRefusal is a staged form a device refused to compile at a row width.
+type prefillRefusal struct {
+	mode prefillMode
+	rows int
+}
+
 // accMMANT is PagedAttnAccMMA's query tiles a warp: 16 queries, the scores
 // kernel's query tile, which the softmax's (and so the accumulate's) must
 // divide.
@@ -264,6 +270,12 @@ func (g *devTier) initPagedPrefill(bs *blockScratch) error {
 			if rows%pf.qt != 0 || rows%pf.sq != 0 {
 				continue
 			}
+			// A form this device refused to compile at this width is not
+			// asked again: each scratch built after a placement (a prompt's
+			// exact width) would otherwise pay a doomed compile.
+			if _, no := g.prefillRefused[prefillRefusal{m, rows}]; no {
+				continue
+			}
 			var err error
 			if short > 0 {
 				v, err = g.prefillVariantAt(bs, pf, short, 0)
@@ -409,6 +421,10 @@ func (g *devTier) prefillVariantAt(bs *blockScratch, pf *pagedPrefill, chunk, sp
 		c, err := g.compileShared(k)
 		if err != nil {
 			v.close()
+			if g.prefillRefused == nil {
+				g.prefillRefused = map[prefillRefusal]struct{}{}
+			}
+			g.prefillRefused[prefillRefusal{pf.mode, bs.rows}] = struct{}{}
 			return nil, fmt.Errorf("paged prefill at %d keys: %w", chunk*max(1, splits), err)
 		}
 		*cs[i] = c
