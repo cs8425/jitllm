@@ -105,6 +105,15 @@ type File struct {
 	// buffers until f.mu is dropped: the callback is not run under the lock.
 	recycle  func(p unsafe.Pointer, n uintptr)
 	recycled [][]byte
+	// recycledSpare is the array flushRecycled handed back, kept for the next
+	// retire so a page-in does not grow a fresh one. Guarded by mu.
+	recycledSpare [][]byte
+	// freeFilled holds the validity maps of evicted pages for claim to reuse:
+	// a paged decode claims a frame per block per token. Guarded by mu.
+	freeFilled [][]bool
+	// io is the page reader's worker pool (pageio.go), started on the first
+	// page-in and stopped at Close.
+	io pageIO
 
 	// Frames are the page budget, and they are reused buffers. "The model fits"
 	// means the budget holds every page, so nothing is ever evicted; below that
@@ -669,7 +678,7 @@ func (f *File) readAt(dst []byte, off int64) error {
 	// and an unaligned O_DIRECT read returns EINVAL. Calls are counted because a
 	// pread is priced per call, not per byte: a chunk dose that cut the bytes
 	// 16x left the decode rate unchanged.
-	atomic.AddInt64(&f.reads, 1)
+	f.countRead()
 	h := f.f
 	if f.direct != nil && directOK(off, len(dst)) && aligned(dst) {
 		h = f.direct
@@ -760,9 +769,7 @@ func (f *File) ReleasePages() {
 		}
 		f.release(f.pages[i])
 		f.pages[i] = nil
-		if f.filled != nil {
-			f.filled[i] = nil
-		}
+		f.dropFilled(i)
 	}
 	f.resident, f.recent = 0, -1
 	f.trimFree(0)
@@ -784,6 +791,33 @@ func (f *File) DropPage(i int) {
 	}
 }
 
+// dropFilled forgets page i's validity map, keeping it for takeFilled.
+// Callers hold f.mu.
+func (f *File) dropFilled(i int) {
+	if f.filled == nil || f.filled[i] == nil {
+		return
+	}
+	f.freeFilled = append(f.freeFilled, f.filled[i])
+	f.filled[i] = nil
+}
+
+// takeFilled is a cleared validity map of n chunks, reused from an evicted
+// page where one is long enough. Callers hold f.mu.
+func (f *File) takeFilled(n int) []bool {
+	for k := len(f.freeFilled) - 1; k >= 0; k-- {
+		if m := f.freeFilled[k]; cap(m) >= n {
+			last := len(f.freeFilled) - 1
+			f.freeFilled[k] = f.freeFilled[last]
+			f.freeFilled[last] = nil
+			f.freeFilled = f.freeFilled[:last]
+			m = m[:n]
+			clear(m)
+			return m
+		}
+	}
+	return make([]bool, n)
+}
+
 // unhold moves page i's frame to the free list and refunds what it was
 // charged: the frame's capacity, which take may have given a page smaller
 // than itself. Callers hold f.mu.
@@ -792,9 +826,7 @@ func (f *File) unhold(i int) {
 	n := uint64(cap(b))
 	f.putFree(n, b[:n])
 	f.pages[i] = nil
-	if f.filled != nil {
-		f.filled[i] = nil
-	}
+	f.dropFilled(i)
 	if f.resident >= n {
 		f.resident -= n
 	} else {
@@ -930,6 +962,8 @@ func (f *File) setCanEvict() {
 	f.canEvict.Store(f.budget != 0 && f.budget < f.pageTotal)
 }
 
+func (f *File) countRead() { atomic.AddInt64(&f.reads, 1) }
+
 // Reads is how many readAt calls the pager has issued, the quantity a
 // page-in is priced in; see readAt.
 func (f *File) Reads() int64 { return atomic.LoadInt64(&f.reads) }
@@ -983,6 +1017,7 @@ func (f *File) Close() error {
 		return nil
 	}
 	h, d := f.f, f.direct
+	f.stopIO()
 	// Every buffer goes, and the next allocation in this process may land on
 	// any of these addresses: the dense region, the pages and the free frames.
 	f.retire(f.dense)
