@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jitllm/jitllm/internal/testdevices"
 	"github.com/jitllm/jitllm/jit/gpu/backend"
 	"github.com/jitllm/jitllm/jit/gpu/vulkan"
 )
@@ -120,14 +121,20 @@ func TestNoROCmIsVulkanAndNotAnError(t *testing.T) {
 // past the device count, is an error naming which -- never the card through
 // Vulkan, never the host.
 func TestAnExplicitHIPRequestFailsNamingTheCause(t *testing.T) {
-	amdHost(t, 0)
-	dir := t.TempDir()
-	for _, spec := range []string{"hip:0", "hip"} {
-		devs, _, err := resolve(t, spec, dir)
-		if err == nil || !strings.Contains(err.Error(), "hip:0 requested but ROCm was not found (searched "+dir+")") {
-			t.Errorf("-devices %s with no ROCm: %v, %v", spec, labels(devs), err)
+	// The no-ROCm half reaches the real backend.OpenHIPWith, which a device
+	// selection refuses before ROCm is looked for: the error would name the
+	// selection, not the cause, and the open is counted as a violation.
+	t.Run("no-rocm", func(t *testing.T) {
+		testdevices.SkipSelected(t, "it names hip:0 through the real backend on a box that has none")
+		amdHost(t, 0)
+		dir := t.TempDir()
+		for _, spec := range []string{"hip:0", "hip"} {
+			devs, _, err := resolve(t, spec, dir)
+			if err == nil || !strings.Contains(err.Error(), "hip:0 requested but ROCm was not found (searched "+dir+")") {
+				t.Errorf("-devices %s with no ROCm: %v, %v", spec, labels(devs), err)
+			}
 		}
-	}
+	})
 	amdHost(t, 2)
 	if devs, _, err := resolve(t, "hip:3", ""); err == nil || !strings.Contains(err.Error(), "hip:3 requested; 2 HIP devices") {
 		t.Errorf("hip:3 on two devices: %v, %v", labels(devs), err)
