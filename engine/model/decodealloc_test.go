@@ -422,8 +422,11 @@ type decodeWindow struct{ ksliced, affine int64 }
 // a page or recorded the launch sequence again.
 func allocVerdict(t *testing.T, what string, w windowAllocs, n int, reads int64, captures int) {
 	t.Helper()
-	t.Logf("%s: %d engine allocation(s) over %d; %d in the runtime's per-P caches (sync.Pool, sudogs, "+
-		"timers); %d page read(s)", what, w.engine, n, w.caches, reads)
+	// The failure below is on engine plus unattributed, so the line reports
+	// both: a run that fails must show the count that failed it.
+	t.Logf("%s: %d engine allocation(s) over %d, %d unattributed (tiny, no stack); %d in the runtime's "+
+		"per-P caches (sync.Pool, sudogs, timers); %d page read(s)", what, w.engine, n,
+		max(w.unattributed, 0), w.caches, reads)
 	if captures != 0 {
 		t.Fatalf("the window recorded the launch sequence %d time(s): it measured a re-capture, not a "+
 			"replayed token", captures)
