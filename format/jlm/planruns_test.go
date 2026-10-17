@@ -61,7 +61,7 @@ func TestPlanRunsMatchesTheWindowSweep(t *testing.T) {
 		}
 
 		want := windowSweep(f, b, base, page, nc, have, rs)
-		_, gotBase, got, err := f.planRuns(b, rs)
+		_, gotBase, got, err := f.planRuns(b, rs, nil)
 		if err != nil {
 			t.Fatalf("trial %d: %v", trial, err)
 		}
@@ -154,7 +154,7 @@ func TestPlanRunsCostsWhatWasAskedForAndNotThePage(t *testing.T) {
 		rs := []Range{{Off: base, N: chunk}, {Off: base + uint64(nc-1)*chunk, N: chunk}}
 
 		const iters = 2000
-		f.planRuns(0, rs) // warm the scratch; the first call may grow it
+		f.planRuns(0, rs, nil) // warm the scratch; the first call may grow it
 		f.unpin(0)
 		var a, b runtime.MemStats
 		runtime.GC()
@@ -163,7 +163,7 @@ func TestPlanRunsCostsWhatWasAskedForAndNotThePage(t *testing.T) {
 			for c := range f.filled[0] {
 				f.filled[0][c] = false
 			}
-			f.planRuns(0, rs)
+			f.planRuns(0, rs, nil)
 			f.unpin(0)
 		}
 		runtime.ReadMemStats(&b)
