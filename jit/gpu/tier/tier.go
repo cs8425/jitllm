@@ -2008,6 +2008,9 @@ type devShared struct {
 	mmaOff bool
 	// tileOff records that this device refused kernels.GemmTile; see tileMV.
 	tileOff bool
+	// prefillRefused are the staged prefill forms this device refused to
+	// compile, by row width (initPagedPrefill).
+	prefillRefused map[prefillRefusal]struct{}
 	// tileCap is the collective-tile probe (tilesOK): 0 not yet asked, 1 the
 	// device lowers the 8x8 f16 tile GemmTile and FlashPrefillTile multiply
 	// in, -1 it does not.
