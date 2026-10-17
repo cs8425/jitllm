@@ -461,6 +461,7 @@ func (g *devTier) prewarmPromptWidths() {
 	}
 	g.prewarmHeadKernels()
 	g.prewarmPrompt()
+	g.prewarmDecodePlans()
 	grain := g.promptGrain()
 	if g.NoExactPrompt || g.promptW <= grain {
 		return
@@ -474,6 +475,27 @@ func (g *devTier) prewarmPromptWidths() {
 			g.prewarmFused(g.bbs[w])
 		}
 		g.dropBatch(w)
+	}
+}
+
+// prewarmDecodePlans builds the decode scratch's attention plan at every key
+// count its history can reach (pagedPlanFor follows the count, rounded to
+// scoreGrain): the plans differ in split count at a few depths only, and one
+// met first at a token would compile inside it. Callers hold g.mu.
+func (g *devTier) prewarmDecodePlans() {
+	bs := g.bs
+	if bs == nil || bs.pkv == nil {
+		return
+	}
+	defer g.scratchWin().close()
+	for keys := scoreGrain; ; keys += scoreGrain {
+		if _, err := g.pagedPlanFor(bs, keys); err != nil {
+			g.LastErr = "paged attention: " + err.Error()
+			return
+		}
+		if keys >= bs.p.MaxSeq {
+			return
+		}
 	}
 }
 
