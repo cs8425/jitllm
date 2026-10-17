@@ -40,7 +40,7 @@ func TestTilePrefillMatchesTheHost(t *testing.T) {
 		}
 		return g
 	}
-	ran := 0
+	ran, noTiles := 0, 0
 	for _, name := range []string{"Llama-3.2-1B-Instruct-Q4_K_M.gguf", "tinyllama-1.1b-q3_K_M.gguf",
 		"Qwen2-1.5B-Instruct-Q4_K_M.gguf", "gemma-2b.gguf", "Qwen3-MOE-4x0.6B-Q4_K_M.gguf",
 		"Ministral-3-3B-Instruct-2512-Q4_K_M.gguf"} {
@@ -120,9 +120,15 @@ func TestTilePrefillMatchesTheHost(t *testing.T) {
 			// the tile switched off still prints the dp4a arm's numbers.
 			st := g.Stats()
 			if st.TileMV == 0 {
-				if strings.Contains(g.Name(), "[msl]") || strings.Contains(g.Name(), "[ptx]") {
+				// sm_70 and older have no m16n8 matrix instruction to lower the
+				// tiles on (sm_70's m8n8k4 is GemmVolta's, and runs ahead of
+				// them): the device is not asked, which is not a refusal.
+				preTile := strings.Contains(g.Name(), "(sm_70)") || strings.Contains(g.Name(), "(sm_6") ||
+					strings.Contains(g.Name(), "(sm_5") || strings.Contains(g.Name(), "(sm_3")
+				if (strings.Contains(g.Name(), "[msl]") || strings.Contains(g.Name(), "[ptx]")) && !preTile {
 					t.Fatalf("no GemmTile was built on %s (refused: %q): the dp4a twin answered", g.Name(), st.TileWhy)
 				}
+				noTiles++
 				t.Skipf("%s does not lower the collective tiles: %s", g.Name(), st.TileWhy)
 			}
 			// FlashTileFor's 32-row blocking exists up to head width 128;
@@ -147,6 +153,9 @@ func TestTilePrefillMatchesTheHost(t *testing.T) {
 			}
 			ran++
 		})
+	}
+	if ran == 0 && noTiles > 0 {
+		t.Skip("the device lowers no collective tiles: nothing to select")
 	}
 	if ran == 0 {
 		testmodels.Missing(t, "no model ran: this gate proved nothing (set JITLLM_MODELS)")
