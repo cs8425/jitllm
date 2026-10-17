@@ -695,6 +695,12 @@ func (g *devTier) pagedAppend(sid uint64, seqs []seqEnd) error {
 	err := g.heldLayers(sid, func(li int, l *kvLayerPool) error {
 		for _, se := range seqs {
 			need := (l.positions(se.end) + kp.p - 1) / kp.p
+			// A named page this call writes into is copied first (kvshare.go).
+			if l.rate == 0 {
+				if err := g.cowPages(sid, kp, l, se.s, se.start, se.end); err != nil {
+					return err
+				}
+			}
 			if have := len(l.owned[se.s]); need > have {
 				if err := g.allocPages(sid, kp, l, se.s, need-have); err != nil {
 					return err
@@ -752,7 +758,7 @@ func (g *devTier) windowPages(sid uint64, kp *kvPool, li int, l *kvLayerPool, se
 	}
 	for j := l.rel[s]; j < first; j++ {
 		if id := l.owned[s][j]; id != 0 {
-			l.fenceID(id)
+			l.releaseID(id)
 			l.owned[s][j] = 0
 			g.tabPend = append(g.tabPend, tabWrite{l.tab, kp.ranges[s].off + j, l.owned[s][j : j+1]})
 			g.KVWindowReleased++
@@ -769,6 +775,9 @@ func (g *devTier) windowPages(sid uint64, kp *kvPool, li int, l *kvLayerPool, se
 // none (it was released behind a window). Callers hold g.mu, outside any
 // submission.
 func (g *devTier) allocAt(sid uint64, kp *kvPool, l *kvLayerPool, s seqID, j int) error {
+	if len(l.free) < 1 {
+		l.reclaimNamed(1)
+	}
 	if len(l.free) < 1 {
 		if err := g.growKVLayer(kp, l, l.n+1-len(l.free)); err != nil && !g.evictForRoom(sid, kp, l, 1) {
 			return err
@@ -934,7 +943,10 @@ func (g *devTier) pagedLayer(sid uint64, l *layer, li int, p *nn.LayerPlan) erro
 	kp.layers[li].win, kp.layers[li].chunked = p.Window(li), p.SWAChunked
 	// DeepSeek V4's rows and entries are read through their tables by the
 	// gathers, which a streamed pass does not serve: they never leave.
-	kp.layers[li].noEvict = p.DS4 != nil
+	// So does a selection over the whole history (the lightning indexer,
+	// MiniMax-M3's and QSA's block selections): a streamed pass cannot serve
+	// it, so its pages cannot go home either.
+	kp.layers[li].noEvict = p.DS4 != nil || selectsHistory(p)
 	if d := p.DS4; d != nil && p.Comp != nn.DS4CompNone {
 		ek := entKey(li)
 		geom := kvGeom{kvRow: d.EntRowAt(p.Comp, p.HeadDim), mla: true}
@@ -960,7 +972,30 @@ func (g *devTier) pagedLayer(sid uint64, l *layer, li int, p *nn.LayerPlan) erro
 			return err
 		}
 	}
+	// A history that cannot leave the card is held at the context asked for,
+	// charged here with the block, so the budget declines the block at
+	// placement rather than a call failing for want of a page mid-prompt.
+	if selectsHistory(p) {
+		if want := contextPages(kp, g.capped(p).MaxSeq, seats); kp.layers[li].n < want {
+			if err := g.growKVLayer(kp, kp.layers[li], want); err != nil {
+				if fresh {
+					delete(l.kv, sid)
+				}
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// selectsHistory reports a block whose attention selects from its whole
+// history: the lightning indexer, MiniMax-M3's and QSA's block selections.
+func selectsHistory(p *nn.LayerPlan) bool { return p.IdxHeads != 0 || p.QSA() }
+
+// contextPages is the pages a block that holds its context needs for seats
+// sequences of the plan's longest context, and the dummy.
+func contextPages(kp *kvPool, maxSeq, seats int) int {
+	return 1 + seats*((maxSeq+kp.p-1)/kp.p)
 }
 
 // pagedSeat raises layer li's floor to its attached sessions' working set and
@@ -988,7 +1023,12 @@ func (g *devTier) pagedLayerBytes(p *nn.LayerPlan) uint64 {
 	if g.kvp != nil {
 		words = g.kvp.tabWords
 	}
-	n := uint64(geom.kWords(g.kvPage())+geom.vWords(g.kvPage()))*4*uint64(1+g.sessions()) + uint64(words)*4 +
+	pages := uint64(1 + g.sessions())
+	if selectsHistory(p) && g.kvp != nil {
+		// Held at the context asked for (pagedLayer).
+		pages = uint64(contextPages(g.kvp, g.capped(p).MaxSeq, int(g.sessions())))
+	}
+	n := uint64(geom.kWords(g.kvPage())+geom.vWords(g.kvPage()))*4*pages + uint64(words)*4 +
 		kvStageBytes(geom, g.kvPage())
 	if d := p.DS4; d != nil && p.Comp != nn.DS4CompNone {
 		// The block's entries, a pool of their own (ds4.go).
@@ -1125,6 +1165,7 @@ func (g *devTier) pagedMigrate(sid uint64, li, base int, k, v []float32, pos int
 	}
 	s := seqID{sid, base}
 	kvRow, P := pl.geom.kvRow, kp.p
+	g.KVPositionsMigrated += pos
 	if pos*kvRow > len(k) || pos*kvRow > len(v) {
 		return fmt.Errorf("%d positions of %d floats do not fit the host's %d/%d", pos, kvRow, len(k), len(v))
 	}

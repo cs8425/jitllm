@@ -10187,6 +10187,7 @@ func (g *devTier) leaveLayers(sid uint64, lo, hi int) []int {
 // hold g.mu and drop the graph.
 func (g *devTier) releaseBlock(li int) {
 	l := g.layers[li]
+	g.freeRecSnaps(li)
 	if l == nil {
 		return
 	}
@@ -10463,6 +10464,12 @@ func (g *devTier) migrateRec(sid uint64, li int, conv, state []float32, toDevice
 			// directly would bring every other session's state below it home
 			// too.
 			err := func() error {
+				if len(v) == 0 {
+					// A block with no state of this kind (a short
+					// convolution has no delta-rule half): nothing to read,
+					// and a zero-byte buffer is no allocation a driver takes.
+					return nil
+				}
 				if st.base == 0 {
 					return b.Read(f32b(v))
 				}
@@ -10492,7 +10499,7 @@ func (g *devTier) migrateRec(sid uint64, li int, conv, state []float32, toDevice
 			g.LastErr = fmt.Sprintf("MigrateRec: block %d conv half %d: %v", li, i, err)
 			return false
 		}
-		if l.pool.s[i] == nil {
+		if l.pool.s[i] == nil || len(state) == 0 {
 			continue // a shared pool's second half is the device's scratch
 		}
 		if err := l.pool.s[i].WriteAt(st.base*g.recS*4, f32b(state)); err != nil {

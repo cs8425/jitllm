@@ -30,6 +30,18 @@ func ffnRecipeDecode(t *testing.T, m *Model, ids, toks []int32, noGraph bool, la
 		if layers >= 0 {
 			s.SetGPULayers(layers)
 		}
+		// The placement the arm names, asserted (RULE 10): "every block" is
+		// what fits, and another process holding the card's memory leaves a
+		// seam the control did not have -- different blocks on the host, a
+		// different answer, read as a recipe that is not exact.
+		want := layers
+		if want < 0 {
+			want = m.Cfg.NLayer
+		}
+		if s.GPULayers() != want {
+			t.Skipf("CARD TOO SMALL: %d of %d blocks placed, the arm names %d -- this gate proved nothing",
+				s.GPULayers(), m.Cfg.NLayer, want)
+		}
 		l, err := s.Prefill(ids)
 		if err != nil {
 			t.Fatal(err)

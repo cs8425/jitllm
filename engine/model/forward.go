@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"runtime"
@@ -667,6 +668,27 @@ type State struct {
 	// first. Nil in every session but a gate's: it is how a comparison sees
 	// every position of a prompt rather than only the last row's logits.
 	rowTap func(base int, rows []float32)
+	// recEv is the spacing of this hybrid's restore points (recEvery; 0 not
+	// yet asked, -1 none), and recBuf and recRd the buffer and reader a point
+	// is stored through, kept so a warm prompt makes none.
+	recEv  int
+	recBuf []float32
+	recRd  bytes.Reader
+	// endWord is the one word noteEnd and endsAt move a boundary's prompt
+	// ends through.
+	endWord [1]float32
+	// recMark is where the cached prompt in flight parts from the one before
+	// it (markParting), a restore point beside the spaced ones; recLast is
+	// that one's key.
+	recMark int
+	recLast []int32
+	// recBatch is sealRecOnDevice's block list, kept.
+	recBatch []int32
+	// recPrefill says a chunked prefill is running, which keeps its restore
+	// points itself (recRowPoint).
+	recPrefill bool
+	// recStage is faultRecurrentAt's staging, a buffer a linear block.
+	recStage [][]float32
 
 	// ranAt is when this State last started a decode token, in nanoseconds
 	// past servingEpoch plus one (0: never); see serving.go.
@@ -3372,6 +3394,8 @@ func (s *State) Reset() {
 			s.retireErr = fmt.Errorf("model: the recurrent state on the device could not be reset%s", why)
 		}
 	}
+	s.aliasMark(0, s.pos+1)
+	s.kv.retireTail(s.pos)
 	s.kv.reset()
 	s.kvErr.Store(nil)
 	s.kvSkipped = 0
@@ -3561,6 +3585,19 @@ func (s *State) ForwardSample(token int32, smp *Sampler) (int32, error) {
 // the token on the host (Layers may have written part of s.x).
 func (s *State) forward(fill func() error) ([]float32, error) {
 	s.touch()
+	// A State that led a host step across sessions lent the model its gate
+	// scratch (returnStep -> takeHostBatch), and the token it runs alone
+	// afterwards reads one query-gate row it no longer holds. It is made once;
+	// a State that does not lead holds it from NewState.
+	if c := s.c; c.AttnOutGate {
+		qd, n := c.NHead*c.HeadDim, len(s.bpos)
+		if cap(s.qgate) < n*2*qd {
+			s.qgate = make([]float32, n*2*qd)
+		}
+		if cap(s.ogate) < n*qd {
+			s.ogate = make([]float32, n*qd)
+		}
+	}
 	// Brackets one decode step for the host tuners, which time real tokens.
 	// Not when the device ran the whole token: no CPU matvec ran, and a
 	// settled answer would be cached under the CPU's key for later runs.
