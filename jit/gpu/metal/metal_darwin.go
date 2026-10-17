@@ -89,20 +89,20 @@ var (
 // Hot selectors are resolved once: sel() allocates and calls sel_registerName
 // on every use, and the encode path sends about nine messages per dispatch.
 var (
-	selSetPSO                        SEL
-	selSetBuffers                    SEL
-	selSetBuffer                     SEL
-	selDispatchTG                    SEL
-	selEndEncoding                   SEL
-	selCommit                        SEL
-	selWaitDone                      SEL
-	selStatus                        SEL
-	selError                         SEL
-	selCmdBuf                        SEL
-	selCmdBufUnret                   SEL
+	selSetPSO      SEL
+	selSetBuffers  SEL
+	selSetBuffer   SEL
+	selDispatchTG  SEL
+	selEndEncoding SEL
+	selCommit      SEL
+	selWaitDone    SEL
+	selStatus      SEL
+	selError       SEL
+	selCmdBuf      SEL
+	selCmdBufUnret SEL
 	// selBlitEnc and selCopyBuf are a blit's, looked up once: sel copies
 	// its name into a C string each call, a heap object per copy.
-	selBlitEnc, selCopyBuf SEL
+	selBlitEnc, selCopyBuf           SEL
 	selComputeEnc                    SEL
 	selComputeEncType, selMemBarrier SEL
 	selRetain                        SEL
