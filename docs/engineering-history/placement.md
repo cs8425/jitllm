@@ -4401,3 +4401,121 @@ with the machine that produced them, are here verbatim.
   having produced nothing in 27 minutes, while llama.cpp served the same
   model at 4.77 tok/s." The fix is "Closed: Open read every page before any
   budget existed" above.
+
+## Lossless page compression: the first filter on real pages
+
+The question (`docs/design/external-optimization-ideas.md`, "Conversion-time
+compression and where to decompress"): does the CURRENT stored representation
+of a page still have enough redundancy that an independently decodable,
+bit-exact encoding could pay for its decoder? This section is evidence only.
+No format change, no codec chosen, no rate claim.
+
+**Tool:** `dev/tools/pagecomp` (reads the container through `format/jlm`).
+It samples 4 block pages and 4 expert pages spread over the file plus the whole
+dense region ("head": embedding, output projection), takes each tensor's three
+planes (qs, d, sc) as stored, cuts them into 16 KiB tiles (32 evenly spaced
+tiles per plane), and compresses each tile independently so a tile is
+randomly decodable. A tile that does not shrink stays plain. The ratio r is
+compressed plus metadata over stored bytes, with 5 bytes of metadata per tile
+(offset and codec flag) and, for the entropy bound, 128 bytes of code-length
+table per lane. Codecs: DEFLATE level 1 and 9 (Go standard library), the
+order-0 byte-histogram entropy bound (what a per-tile Huffman or ANS coder
+could reach before its table), and each of those after a lane split (2 byte
+lanes for f16/bf16, 4 for f32 and for the 32-bit d and sc words, 2 nibble
+lanes for a 4-bit payload plane). The converter would keep a split plane
+unsplit where splitting does not help; the table takes the better of the
+columns per row, not per tile.
+
+**Host and method:** i9-12900HK laptop, six P-core threads
+(`taskset -c 0,2,4,6,8,10` under `scripts/cap 8G`), one thread per decode,
+Go's `compress/flate` inflate, warm tile, timed over at least 3 repetitions.
+Decode rates are therefore Go DEFLATE on one core (0.11-0.21 GB/s expanded),
+which prices the codec on this host and says nothing about a generated
+decoder or a GPU one. Only containers of the current version were sampled.
+
+**Lossless ratio r (smaller is better; metadata included):**
+
+| model (stored format) | class, type | DEFLATE-9 | split + DEFLATE-9 | order-0 bound | split + order-0 bound |
+|---|---|---|---|---|---|
+| Mistral-7B-Instruct-v0.3 Q4_K_M | dense q4s (Q4_K) | 0.899 | 0.875 | 0.899 | 0.848 |
+| | dense q6s (Q6_K) | 0.812 | 0.798 | 0.821 | 0.804 |
+| | head q4s | 0.767 | 0.740 | 0.835 | 0.765 |
+| | head q6s | 0.592 | 0.569 | 0.701 | 0.654 |
+| d1-3B Q8_0 | dense q8 | 0.819 | 0.824 | 0.830 | 0.793 |
+| | head q8 | 0.741 | 0.745 | 0.798 | 0.754 |
+| Moonlight-16B-A3B Q4_K_M (mixture) | dense q4s | 0.944 | 0.936 | 0.943 | 0.930 |
+| | dense q5 | 0.983 | 0.982 | 0.988 | 0.985 |
+| | dense q6s | 0.849 | 0.834 | 0.860 | 0.840 |
+| | expert q4s | 0.962 | 0.962 | 0.962 | 0.970 |
+| | expert q5 | 0.954 | 0.954 | 0.958 | 0.940 |
+| | expert q8 | 0.890 | 0.893 | 0.898 | 0.875 |
+| | head q4s / q6s | 0.895 / 0.776 | 0.869 / 0.746 | 0.895 / 0.795 | 0.829 / 0.748 |
+| Kev-4B BF16 | dense bf16 | 0.785 | 0.772 | 0.785 | 0.681 |
+| | head bf16 | 0.773 | 0.755 | 0.772 | 0.667 |
+| Qwen3.5-0.8B F16 | dense f16 | 0.772 | 0.772 | 0.771 | 0.677 |
+| | head f16 | 0.767 | 0.766 | 0.766 | 0.672 |
+| all of the above | f32 tensors (norms, scales kept f32; 0.5-3 MiB sampled) | 0.49-0.52 | 0.39-0.40 | 0.52-0.54 | 0.36-0.39 |
+
+Reading it:
+
+- Packed K-quant dense and expert pages are nearly incompressible by general
+  codecs: Q4_K r = 0.90-0.96, Q5 0.95-0.98, and the experts of the mixture
+  0.96. DEFLATE level 1 saves nothing on most Q4_K and expert planes (r >=
+  0.997, the tile stays plain). The metadata is small against these ratios
+  (5 B per 16 KiB tile, 0.03%) and does not decide any row.
+- Q6_K and Q8_0 are better (0.81-0.85 and 0.82-0.89), with the head
+  (embedding and output projection, tensors whose values cluster) at 0.59-0.78.
+- F16 and BF16 pages reach 0.77-0.79 with DEFLATE and 0.67-0.68 with a
+  per-lane entropy coder after the byte split: the exponent lane carries the
+  redundancy and a Huffman or ANS coder per lane finds it where an LZ coder
+  does not. That is the order of the BF16 results the design note cites; it
+  is not available to Q4_K.
+- The split helps the bound far more than it helps DEFLATE. The only winners
+  of the byte-plane split under DEFLATE are f32 tensors (r 0.50 to 0.39) and
+  bf16 head tensors by 2 points; on f16 it does nothing under DEFLATE.
+- The d plane (super-scales) compresses much better than the qs payload:
+  Q6_K's d plane reaches r 0.21-0.31 and Q4_K's head d plane 0.59-0.79, while
+  the qs planes sit at 0.79-1.00 and Q4_K's sc plane at 0.84-1.00. The d plane
+  is a small share of a tensor's bytes, so the whole tensor stays near 0.90.
+  Per-plane rows are in the tool's output.
+
+**Break-even, `D > B/(1-r)`** (D in expanded GB/s; B is the link being saved;
+the sampled link figures are the command-line defaults: disk 3.0, PCIe 12.0,
+device memory 800 GB/s, to be replaced by the figures measured on the host
+under test):
+
+| r | disk (3 GB/s) | PCIe (12 GB/s) | device memory (800 GB/s) |
+|---|---|---|---|
+| 0.96 (Q4_K expert) | 75 | 300 | 20,000 |
+| 0.90 (Q4_K dense) | 30 | 120 | 8,000 |
+| 0.82 (Q8_0 dense) | 17 | 67 | 4,400 |
+| 0.68 (BF16/F16, per-lane entropy) | 9.4 | 38 | 2,500 |
+| 0.50 (f32 tensors) | 6 | 24 | 1,600 |
+
+Against the measured single-core DEFLATE rate of 0.11-0.21 GB/s the serial
+sum is a loss in every row, by two orders of magnitude on disk, which is
+expected for a general LZ decoder on one thread; the cells that matter are the
+required rates. Overlap changes the sum toward a maximum, so a decoder with
+several cores or SMs hits the disk row first: 9.4 GB/s of expanded BF16 for a
+3 GB/s disk is about 30 times the single-core DEFLATE rate and within reach of
+a vectorised lane decoder on many threads, or of a GPU. A 4-bit packed page
+at r = 0.90 needs 30 GB/s from the same disk, and r = 0.96 experts need 75:
+for the stored formats most of this repository's models use, the filter says
+the redundancy is not there. The device-memory column (thousands of GB/s)
+shows the fused-consumer case cannot pay at any of these ratios: a decoder
+inside the matvec would have to run faster than the memory it saves.
+
+**Decision this filter supports.** Compression of BF16/F16 pages (about 0.68
+with per-lane entropy coding) is the only row with a ratio worth a decoder
+experiment, and only against disk or PCIe, for a model stored in those
+precisions under an evicting budget. Q4_K and Q5 pages and expert pages
+should stay plain: r >= 0.90 means a decoder fast enough to pay does not
+exist on any link measured. Nothing here is a measurement of whole-request
+speed, residency, eviction avoided or a GPU decoder; the near-capacity
+workload the design note asks for has not been run. Not sampled: MXFP4, IQ4_NL,
+TQ2 pages and KV pages (no container of the current version was at hand), and
+only 4+4 pages per model with 32 tiles per plane.
+
+**Reproduce:** `./scripts/cap 8G -- taskset -c 0,2,4,6,8,10 go run
+./dev/tools/pagecomp -pages 4 -tiles 32 model.jlm` (`-tile`, `-disk`, `-pcie`
+and `-hbm` set the tile size and the link figures).
