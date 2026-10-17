@@ -56,6 +56,7 @@ func main() {
 	requests := flag.Int("requests", 0, "requests per level per round per arm (0: 4 per slot, at least 8)")
 	rounds := flag.Int("rounds", 1, "interleaved rounds per level; a ratio needs at least 6")
 	warmup := flag.Int("warmup", 2, "requests per arm before the sweep, not measured")
+	warmLevel := flag.Int("warmup-c", 1, "warm-up requests in flight at once (warm at the widest -c to pass first-use compilation of its batch widths)")
 	lens := flag.String("prompt-lens", "128,512", "generated prompt lengths in words, one drawn per request")
 	promptFile := flag.String("prompts", "", "prompt file: one per line, or {\"prompt\":...} per line in a .jsonl")
 	seed := flag.Uint64("seed", 1, "workload seed")
@@ -135,6 +136,7 @@ func main() {
 			fail(fmt.Errorf("-prompt-lens: %v", err))
 		}
 		c.API, c.Requests, c.Rounds, c.Warmup = *api, *requests, *rounds, *warmup
+		c.WarmupLevel = *warmLevel
 		c.PromptFile, c.Seed, c.MaxTokens, c.Temperature = *promptFile, *seed, *maxTok, *temp
 		c.Extra = map[string]any{"ignore_eos": !*noIgnoreEOS}
 		if *noIgnoreEOS {

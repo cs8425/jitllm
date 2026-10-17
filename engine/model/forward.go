@@ -3561,6 +3561,19 @@ func (s *State) ForwardSample(token int32, smp *Sampler) (int32, error) {
 // the token on the host (Layers may have written part of s.x).
 func (s *State) forward(fill func() error) ([]float32, error) {
 	s.touch()
+	// A State that led a host step across sessions lent the model its gate
+	// scratch (returnStep -> takeHostBatch), and the token it runs alone
+	// afterwards reads one query-gate row it no longer holds. It is made once;
+	// a State that does not lead holds it from NewState.
+	if c := s.c; c.AttnOutGate {
+		qd, n := c.NHead*c.HeadDim, len(s.bpos)
+		if cap(s.qgate) < n*2*qd {
+			s.qgate = make([]float32, n*2*qd)
+		}
+		if cap(s.ogate) < n*qd {
+			s.ogate = make([]float32, n*qd)
+		}
+	}
 	// Brackets one decode step for the host tuners, which time real tokens.
 	// Not when the device ran the whole token: no CPU matvec ran, and a
 	// settled answer would be cached under the CPU's key for later runs.

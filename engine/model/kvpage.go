@@ -65,6 +65,15 @@ type KVStore interface {
 	Drop(cacheId string) error
 }
 
+// FillStore is a KVStore that can hold several pages which are byte prefixes
+// of one buffer over a single copy of it. SetFills takes, for one layer and
+// page index, src and for each i the page keys[i] = src[:lens[i]]; lens are
+// in bytes and none exceeds len(src). It has the effect of one Set per key.
+type FillStore interface {
+	KVStore
+	SetFills(layer, index int, src []byte, keys []string, lens []int) error
+}
+
 // NoStore holds nothing: every Get misses and every Set is discarded.
 //
 // It is the default: the cache is resident-only and a run that fits pays
@@ -2002,6 +2011,8 @@ func (kc *kvCache) sealTail(pos int) int {
 			continue // part of it is zeros a device sent for a released page
 		}
 		row := s.pp / s.p // floats per position, which is nseq*kvDim at nseq 1
+		var keys []string
+		var lens []int
 		for _, fill := range kvChunkFills(have) {
 			key := kc.pageKeyFill(li, cur, fill)
 			if key == "" {
@@ -2011,6 +2022,33 @@ func (kc *kvCache) sealTail(pos int) int {
 			if n > len(s.k[cur]) || n > len(s.v[cur]) {
 				continue
 			}
+			keys, lens = append(keys, key), append(lens, n)
+		}
+		if len(keys) == 0 {
+			continue
+		}
+		// The fills are byte prefixes of one another. A store that can hold
+		// them over one copy is offered them so (FillStore); any other takes
+		// each as a page of its own.
+		if fs, ok := kc.store.(FillStore); ok {
+			top := lens[len(lens)-1]
+			bk, bv := kvBytesOf(s.k[cur][:top]), kvBytesOf(s.v[cur][:top])
+			for i := range lens {
+				lens[i] *= 4 // float32 elements to bytes
+			}
+			if err := fs.SetFills(li*2, cur, bk, keys, lens); err != nil {
+				kc.failed++
+				continue
+			}
+			if err := fs.SetFills(li*2+1, cur, bv, keys, lens); err != nil {
+				kc.failed++
+				continue
+			}
+			stored += 2 * len(keys)
+			continue
+		}
+		for i, key := range keys {
+			n := lens[i]
 			if err := kc.store.Set(key, li*2, cur, bytes.NewReader(kvBytesOf(s.k[cur][:n]))); err != nil {
 				kc.failed++
 				continue

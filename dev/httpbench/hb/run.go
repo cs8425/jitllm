@@ -63,6 +63,11 @@ type Config struct {
 	Requests int `json:"requests"`
 	Rounds   int `json:"rounds"`
 	Warmup   int `json:"warmup"`
+	// WarmupLevel is how many warm-up requests run at once: zero is one at a
+	// time. An engine that compiles or tunes a kernel per batch width on first
+	// use is only warm for the widths its warm-up reached, so a measurement at
+	// concurrency c warms at c.
+	WarmupLevel int `json:"warmup_level,omitempty"`
 
 	// PromptLens is the mix of generated prompt lengths, in words (about a
 	// token each on a llama-family tokenizer; the measured count is in each
@@ -311,7 +316,7 @@ func Run(ctx context.Context, c Config, log func(string)) (*Result, error) {
 	}
 	if c.Warmup > 0 {
 		for i, a := range c.Arms {
-			for _, s := range runJobs(ctx, c, a, clients[i], c.jobs(prompts, 0, 0, c.Warmup), 1) {
+			for _, s := range runJobs(ctx, c, a, clients[i], c.jobs(prompts, 0, 0, c.Warmup), max(c.WarmupLevel, 1)) {
 				if s.Err != "" {
 					return nil, fmt.Errorf("arm %s: warm-up request failed: %s", a.Name, s.Err)
 				}

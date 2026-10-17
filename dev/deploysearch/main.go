@@ -92,7 +92,7 @@ func main() {
 	mix := flag.String("mix", "mixed", "named request mix: mixed, long or decode")
 	mixFile := flag.String("mix-file", "", "a JSON hb.Config (one arm is filled in) replacing the named mix")
 	rounds := flag.Int("rounds", 6, "interleaved rounds; a quotable ratio needs at least 6")
-	warmup := flag.Int("warmup", 2, "requests before each timed run, not measured")
+	warmup := flag.Int("warmup", 0, "requests before each timed run, not measured, run at the mix's concurrency (0: three times the widest level, at least 4)")
 	gridAll := flag.Bool("grid-all", false, "sweep the knobs on every -bin, not the first alone")
 	aa := flag.Bool("aa", true, "run an identical copy of the control as a candidate (A/A self-control)")
 	port := flag.Int("port", 4290, "first TCP port; each sample uses the next")
@@ -126,6 +126,15 @@ func main() {
 	}
 	base.Models = []hb.Model{{Name: *id, Weight: 1}}
 	base.Rounds, base.Warmup, base.Seed = 1, *warmup, 1
+	// Warm at the mix's own concurrency: a server restarted for each sample
+	// compiles and tunes a kernel per batch width the first time it runs one,
+	// and warm-up at concurrency 1 never reaches a joint step.
+	for _, l := range base.Levels {
+		base.WarmupLevel = max(base.WarmupLevel, l)
+	}
+	if base.Warmup == 0 {
+		base.Warmup = max(4, 3*base.WarmupLevel)
+	}
 
 	order, kmap := defaultOrder, defaultKnobs
 	if len(knobs) > 0 {
@@ -241,9 +250,13 @@ func report(w io.Writer, rs []Ratios, control string, rounds int) {
 		fmt.Fprintf(w, "%-34s %5s %15s %15s %15s %15s %15s  %s\n", r.Config, p, cell(r.TTFTp99), cell(r.ITLp99), cell(r.Goodput), cell(r.Mem), cell(r.LoadSec), v)
 	}
 	fmt.Fprintf(w, "\n* refused by the gate (too few rounds, a failed round or IQR/median above 0.10)\n\n")
-	fmt.Fprintf(w, "%-34s %12s %12s %14s %12s\n", "median absolute", "TTFT p99 ms", "ITL p99 ms", "goodput req/s", "memory MiB")
+	fmt.Fprintf(w, "%-34s %12s %12s %12s %14s %12s %12s\n", "median absolute", "TTFT p50 ms", "TTFT p99 ms", "ITL p99 ms", "goodput req/s", "tok/s", "memory MiB")
 	for _, r := range rs {
-		fmt.Fprintf(w, "%-34s %12.0f %12.1f %14.2f %12.0f\n", r.Config, r.MedianTTFT99, r.MedianITL99, r.MedianGoodput, r.MedianMemMiB)
+		fmt.Fprintf(w, "%-34s %12.0f %12.0f %12.1f %14.2f %12.1f %12.0f\n", r.Config, r.MedianTTFT50, r.MedianTTFT99, r.MedianITL99, r.MedianGoodput, r.MedianAgg, r.MedianMemMiB)
+	}
+	fmt.Fprintf(w, "\naggregate tok/s and TTFT p50, config/control per round, median [IQR/median]\n")
+	for _, r := range rs {
+		fmt.Fprintf(w, "%-34s %15s %15s\n", r.Config, cell(r.AggRate), cell(r.TTFTp50))
 	}
 }
 
