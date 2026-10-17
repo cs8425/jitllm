@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -662,6 +663,11 @@ func (l *layout) write(dst string, src *Source) (*Header, error) {
 	binary.LittleEndian.PutUint32(hdr[8:], l.ver)
 	tab := encodeTable(es)
 
+	// The part sits beside dst, so a destination in folders that do not
+	// exist yet creates them; the rename that publishes dst stays atomic.
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return nil, err
+	}
 	tmp := dst + ".part"
 	jn := tmp + journalSuffix
 	journal := src.Origin != ""
