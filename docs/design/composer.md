@@ -156,3 +156,195 @@ with every block placed with and without the graph and a half seam;
 violation `TestGate2InSeesASwap`). The tuner keeps it on both of
 Llama-3.2-1B's FFN keys on the V100. Rows: GK "The FFN's recipes, timed per
 card".
+
+## Above the recipes: the block graph and the rewrite interface
+
+The first slice decides recipes at sites `encodeLayer` names. `ffnKey` is the
+cost of that: a site is recognised by a negative list of thirty-odd fields
+(`l.router`, `l.mla`, `p.Parallel`, `l.nPostFFN`, ...), and every new
+architecture or feature has to remember to extend it, or the tier offers a
+recipe whose arms do not compute the block's function. The step past it is to
+find sites by matching the block's operations, which needs the operations
+written down once. This section is that representation and the interface a
+fusion or partitioning candidate implements against it; the reasoning and the
+precedents are in [external-optimization-ideas.md](external-optimization-ideas.md)
+("Toward a model-graph JIT", "Joint fusion and partitioning"), and the
+workflow an implementation follows is [optimization-agent-harness.md](optimization-agent-harness.md).
+
+It changes no AGENTS.md rule. The block stays the unit (RULE 8a), every
+operation stays generated (RULE 8), and a limit a candidate declares names its
+source (RULE 11e).
+
+### The block graph
+
+A **block graph** is a versioned, typed, SSA description of one block's values
+and state effects, built in `engine/graph` (data and a verifier, no
+arithmetic) from what the container states: `jlm.Config` and the block's
+weight inventory by role.
+
+    type Graph struct {
+        Version uint16       // the op language's version; an unknown one is refused
+        Block   int          // the graph is per block
+        Values  []Value      // SSA: each written by exactly one op or a boundary input
+        Ops     []Op         // in a legal order
+        In, Out []ValueID    // the residual at the block's boundary
+        State   []StateRef   // the block's persistent state: its KV, its recurrence
+    }
+    type Op struct {
+        Kind   OpKind  // norm, head_norm, matvec, rope, kv_append, attend, add, act_mul, ...
+        V      uint8   // the op's semantic version: a norm states eps placement, rope its pair layout
+        In     []ValueID
+        Out    []ValueID
+        Weight []Binding         // jlm role and block, with the shape the op requires
+        Reads, Writes []StateVersion // kv@0 -> kv@1: the effect, not a value
+        Attr   Attrs             // eps, rotary layout/base/nrot, window, activation, softcap
+    }
+
+**State is versioned, not aliased.** `kv_append` reads `kv@n` and writes
+`kv@n+1`; `attend` reads `kv@n+1`. A schedule that moves an attention read
+above its append has a read with no producer, which the verifier refuses before
+anything is emitted. A recurrent block's state has the same shape
+(`rec@n -> rec@n+1`). Pages, leases and transfers are not in the graph: they
+are the execution plan's binding of a version to memory, which is why a block
+that relocates keeps its graph.
+
+**The block boundary is a relocation point.** A graph's inputs and outputs are
+the residual between blocks, materialized. A rewrite may span blocks only as a
+candidate conditional on the blocks' co-placement and state ownership; the plan
+discards it at the next token boundary when either block moves, and the
+per-block graphs are what remain. Nothing in the graph requires a fused
+multi-block region to stay resident.
+
+**The verifier** checks, before allocation or emission: every value has one
+producer; every op version is known and has a lowering on the tier asked;
+every state read has a producing write ordered before it; every weight a
+binding names exists with the shape the op requires, and **every weight the
+container holds for the block is bound by some op** (an unconsumed `q_norm` is
+a missing q/k norm, not a harmless extra); the rotary layout and every
+attribute equal what the config states; the outputs are produced. It sizes
+nothing from an unchecked count (RULE 9).
+
+**Lowering.** The graph lowers to the operations the engine already runs: on
+the host, the `State` helpers `forward.go` calls (`s.norm`, `s.mv`,
+`attnPrep`, the attention) and through them the generated kernels; on the
+device, `nn.LayerPlan` and `nn.LayerWeights`, which the tier already consumes.
+There is no new kernel and no second family switch: the walker dispatches an op
+kind to the helper that runs it today. While a graph covers fewer blocks than
+`forward.go`, the hand-written path is the control and the default; a covered
+block runs the graph only when the caller forces it, and the gate compares the
+two. The walker replaces the hand-written dense path once it covers decode,
+batch and device for the dense family (Slice B), not before: it is a migration
+under test, not a second executor to keep.
+
+### The rewrite interface
+
+A rewrite is the unit an optimization is written as. It is data the composer
+selects from, and it carries everything a plan explanation needs to say why it
+was or was not taken.
+
+    type Rewrite struct {
+        Name     string
+        Match    func(g *graph.Graph) []Region         // by op kinds and dataflow, never by arch
+        Legal    func(g *graph.Graph, r Region) error   // shape, format, layout and state guards; the error is the reason
+        Contract Contract                               // exact against the reference recipe, or a band, per backend
+        Bounds   func(r Region, d Target) Resources     // launches, scratch, extra reads, registers: static
+        Build    func(r Region, d Target) []Candidate   // the recipes it offers; [0] stays the reference
+        Keys     func(r Region, d Target) string        // what makes a verdict stale: formats, shapes, device, placement
+    }
+
+- **Match** is structural: op kinds, single-consumer edges and shared operands.
+  A rewrite never asks for an architecture; a pattern that needs one means the
+  op language is missing a distinction, and the fix is an op or an attribute.
+- **Legal** returns a reason, which the plan explanation prints. A near miss
+  (the shape matched, a guard did not) is a recorded rejection, so a gate can
+  assert the rewrite refused it.
+- **Contract** is per backend, as recipes already are: Gate2 is exact on PTX
+  and is not offered on SPIR-V until its band gate exists. A band contract
+  names its band and the gate that measures it.
+- **Bounds** lets the search refuse statically (a partition whose partials cost
+  more bytes than the intermediate it removes), never accept: only a timed
+  complete region accepts.
+- **Keys** names what makes a verdict stale. A verdict is cached under it and is
+  evidence for that key only; a block relocated to another card takes that
+  card's verdict or the reference recipe.
+- **The target is a guard dimension, not an if at a call site.** A recipe
+  that pays on one device and is inert on another says so in a `Pays` guard
+  over a `Target`: the device's capability (ISA tier, the MMA shape it offers,
+  subgroup width, shared memory), the executed row-width class (one-row
+  decode, a few rows such as a speculative verify or fewer routed pairs than
+  the bank has experts, a prompt chunk's GEMM width) and the layout facts of
+  the rows (a stream-major residual, which every row slice must take whole).
+  Examples: a deep-tile GEMM verdict that needs sm_75's m16n8 tiles is refused
+  on sm_70 by name; a few-row verify and a prompt chunk are different row
+  classes with different winning forms. Every persisted verdict carries the
+  target's key, so evidence at one class or on one card is never read at
+  another.
+- **Bit identity is per backend, never across devices.** A block's generated
+  code may differ per device and per model; the bar is the gated error margin
+  and the speed. An exact contract means exact against the reference recipe on
+  the same backend.
+
+The search is the existing one: `timeRecipes` over the matched region's
+candidates, interleaved, with the margin and IQR gates above. A rewrite adds
+candidates, not a tuner.
+
+### How the candidates plug in
+
+| candidate | match | legality and contract | why it is a candidate and not a default |
+|---|---|---|---|
+| norm -> gate/up -> act -> down (the FFN site; `gate2in`) | a `norm` whose only consumers are two `matvec`s on its output, feeding one `act_mul`, feeding a `matvec` added into the residual | gate and up one format, one shape, one split (`gateUp2Shape`); the norm's input materialized by the previous add; exact on PTX | it removes a launch, and the outcome is per card and per shape (GK "The FFN's recipes, timed per card") |
+| q/k/v operand prologue | `norm` -> the q/k/v `matvec` group | the norm's single consumer group; exact | already timed by `tuneActIn`; its sites become matched |
+| residual + next norm's statistics in down's epilogue | an `add` into the residual whose consumer across the boundary is a `norm` | spans two blocks, so conditional on co-placement and dropped at a move; exact only with `RMSNormGroup`'s reduction tree | dep-block.md ranks it after the decomposition |
+| hidden-channel MLP partition | the FFN site, with a partition count S on the intermediate | band contract (down's sum is reassociated); Bounds: 4*H*S bytes of partials against the 4*F intermediate removed | at decode it fails its traffic budget (dep-block.md, "k-slice chaining": 256 KiB of partials against 32 KiB on the 1B) and is refused statically; at prefill widths and across devices the arithmetic differs, so it stays a candidate there |
+| producer/consumer tile alignment | a `matvec` whose output tiles a following `matvec` reduces over | a parameter of a region's candidates (gate/up row tile = down's split chunk), timed jointly with the split | scheduling alone lost: the persistent block 11% and the dependency-counter block 14-18% on the V100 (GK "A persistent decode block", "The dependency-counter block"), because every matvec reads its whole input; alignment has to remove traffic or a launch to be worth a trial |
+
+**A block split across devices** (attention on one card, the FFN or some
+experts on another) is a placement candidate of the same kind: the planner may
+cost it and try it, and it is never a manual mode. Its region is the block's
+two sublayers with the residual between them as a crossing; the cost it must
+beat is two device crossings per block per token (the residual out after
+attention and back after the FFN) plus the synchronisation on each, against
+the block running whole on either card. The KV stays with the attention
+sublayer's card and moves with it, as a relocation does today.
+
+Joint fusion and partitioning are one search, not two passes: a partition is a
+parameter of a fused region's candidates, so the trial times the complete
+region in each form, and a partition that loses alone is still timed under the
+fusion it enables (the harness's complete plans).
+
+### Task contract: Slice A
+
+```yaml
+task:
+  id: compiler-slice-a
+  base_commit: the merge of this note
+  objective: emit a verified block graph for two dense variants and run it through the existing generated operations, the hand-written path the control
+  workload:
+    model_and_artifact_hashes: Llama-3.2-1B-Instruct-Q4_K_M (plain llama); Qwen3-0.6B-Q8_0 (per-head q/k norm); the random-weight fixtures of each class; container hashes in the run manifest (stage 1)
+    input_trace_and_seed: the gates' fixed prompts; decode past position 0
+    prompt_and_generation_lengths: correctness at the gates' lengths; regression row p512 g256
+    concurrency_and_context_classes: one sequence, host decode
+    memory_budgets_and_relocation_trace: the default budget, and one below the model (paging)
+    hardware_and_backend: laptop amd64 host (AVX2) for correctness; the device path is unchanged by construction (the graph lowers to the LayerPlan it already receives)
+  metrics:
+    primary: token ids and logits identical to the control (same kernels, same order)
+    constraints: zero warm allocations; no new kernel; no Go arithmetic
+    cold_and_warm_boundaries: graph build and verify at Open, outside a token
+  scope:
+    allowed_subsystems: engine/graph (new), engine/model (emission, the walker, the forcing option), docs/design
+    excluded_work: batch and device lowering (Slice B); any fusion (Slice C); storing the graph in the container
+    required_reuse_demonstration: the walker calls only helpers forward.go calls
+  control:
+    baseline_commit_and_configuration: the base commit, the forcing option off
+    generated_reference_plan: forward.go's dense decode path
+  levers: []   # representation only
+  validation:
+    independent_reference: TestGreedyMatchesLlamaCpp's goldens and the transformers fixtures already gating llama and qwen3
+    required_checks_from_scripts_checks: go run ./scripts/checks on the diff
+    forced_path_evidence: a counter of blocks run through the graph, asserted equal to the block count
+    negative_cases: a graph without its q/k norm, with NEOX swapped for NORM, without kv_append, with a weight bound to the wrong role; each refused by the verifier
+  search:
+    initial_candidate_plans: none
+    hardware_trial_budget: none on the token path
+    expansion_and_stop_conditions: stop when both variants verify, match, and every violation fails
+```
