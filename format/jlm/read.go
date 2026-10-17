@@ -954,6 +954,25 @@ func (f *File) Resident(i int) bool {
 	return i >= 0 && i < len(f.pages) && f.pages[i] != nil
 }
 
+// Filled reports whether block i's whole page is in memory: Resident, and no
+// range of it left unread by a partial EnsureRanges.
+func (f *File) Filled(i int) bool {
+	if f == nil {
+		return false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i < 0 || i >= len(f.pages) || f.pages[i] == nil || f.filled == nil || f.filled[i] == nil {
+		return false
+	}
+	for _, ok := range f.filled[i] {
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // LoadAll makes every block resident, reading the pages concurrently.
 //
 // It is a configuration, not a mode (paging is always on and a model that
