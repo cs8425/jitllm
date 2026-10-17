@@ -245,3 +245,18 @@ func bigSource(t *testing.T) *jlm.Source {
 	src.Tensors = ts
 	return src
 }
+
+// TestWriteCreatesMissingDirectories gates a destination in folders that do
+// not exist yet: they are created and the container lands with no part left.
+func TestWriteCreatesMissingDirectories(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "a", "b", "c", "out"+jlm.Ext)
+	if _, err := jlm.Write(dst, smallSource(t), jlm.Fingerprint{Host: "test"}); err != nil {
+		t.Fatalf("writing into missing directories: %v", err)
+	}
+	if _, err := os.Stat(dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dst + ".part"); err == nil {
+		t.Errorf("a part was left beside %s", dst)
+	}
+}
