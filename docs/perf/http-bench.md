@@ -103,7 +103,10 @@ Each of these is a way a row has gone wrong before (RULE 1):
 - **The harness is a process too.** Run it on cores the servers are not
   pinned to (`taskset` it apart), or on another machine over a quiet link,
   and say which.
-- **Warm.** `-warmup` (default 2) requests go to each arm before the sweep.
+- **Warm.** `-warmup` (default 2) requests go to each arm before the sweep, one
+  at a time unless `-warmup-c N` runs them N at once: an engine that compiles
+  or tunes a kernel per batch width is only warm for the widths its warm-up
+  reached, so warm at the widest `-c` swept.
   An engine that compiles or captures graphs on first use (vLLM, SGLang,
   jitllm's tuners) has to be past that before a round is timed.
 
@@ -226,7 +229,9 @@ rounds, the workload and the SLOs.
 `-step-cost`, `-fairness`, `-sessions`, `-mem-cache-max`, and any other flag
 given with `-knob FLAG=V1,V2` or as a bundle with `-combo`) on a named request
 mix (`mixed`, `long`, `decode`, or a `-mix-file` hb.Config). Each sample
-restarts the server, so every candidate is measured from a cold process, and
+restarts the server, so every candidate is measured from a fresh process warmed
+at the mix's own concurrency (`-warmup`, three times its widest level, at least
+four requests, that many at once), and
 rounds are interleaved over the candidates (A B C, then C B A) with the
 unchanged default as the control and an identical copy of it ("aa") as the
 self-control. It reports TTFT p99, inter-token p99, goodput under the mix's

@@ -1690,3 +1690,122 @@ Both cases are work proposed or built beside machinery that already did it.
 A PR's "what existed and was reused" section could not have been written for
 either at the time, which is how the duplication was found late instead of at
 the proposal.
+
+## Four concurrent requests served a third of one stream: the memory cache sealed every prompt on the step loop
+
+**The reading.** The deployment search (docs/perf/http-bench.md) found every
+setting it swept, the unchanged default included, at 12-17 tok/s of aggregate
+throughput at concurrency 4 and a TTFT p99 near 18 s, on Llama-3.1-8B Q4_K_M on
+one V100, where one stream on the same card decodes 138 tok/s and the loop's
+decode steps cost 8-12 ms. So the decode was not the cost, and no setting
+moved it.
+
+**Where a request's time went** (jitllmd, one request at a time, a 129-token
+prompt, 64 tokens, the step loop timed per step; V100 under the shared box's
+ordinary load):
+
+| | prompt step | TTFT p50 | the same with `-no-mem-cache` |
+|---|---|---|---|
+| main | 470-630 ms | 480-950 ms | 64 ms prefill, TTFT 62 ms |
+
+`State.SealPrompt` (the memory cache's offer of a finished prompt) runs inside
+the step that finishes the prompt, and a profile and per-phase timers put the
+time there:
+
+1. **The store half, 290-360 ms.** `sealTail` offers the partly filled last page
+   at every sixteen-position boundary and its exact end, each as a page of its
+   own, so a 129-token prompt copied 704 positions of K and V per layer (5.5
+   times the prompt), through `io.ReadAll`'s grown and cleared slice and then a
+   second copy into the mapping, with the collector scanning the garbage. The
+   fills are byte prefixes of one another.
+2. **The card half, 90-140 ms on a quiet box, 200-570 ms under the box's other
+   jobs, outliers of 2 and 7 s.** `syncKVFromDevice` reads each layer's pages
+   home (a gather, a read, two device allocations, a host transpose) so the store
+   has something to hold. Device allocation and free are 1-2 ms of it, the gather
+   3-4 ms, the reads 17-55 ms; the rest is host work that slows with the host.
+3. **The step budget collapsed.** `stepBudget` fits a step's time against the
+   prompt tokens it carried, and the seal was inside that time. A step that
+   completed a prompt read 250 ms for a few tokens; the fit went to its floor
+   and stayed there (`rows=9 prompt=8` step after step), so every later prompt
+   beside a decoding row was fed 8 tokens a step and its first token waited
+   16 steps, each carrying the seal of the prompt before. This is the failure
+   the budget's own comment describes for an outlier step; the outlier was the
+   seal, every time.
+4. **A latent panic the fix exposed.** With rows no longer in lockstep, a State
+   that had led a host step across sessions ran its next token alone and sliced
+   a nil `s.qgate` (`takeHostBatch` had lent the model the leader's scratch):
+   an architecture with a gated attention output (Qwen3.5 reproduces it)
+   panicked in `projectQ`. It reproduces on main with
+   two States and no server (`TestAStateThatLedAHostStepDecodesAlone`).
+
+**What changed.** `MemStore.SetFills` holds the fills of a page over one
+off-heap copy, charged once; `Set` reads a reader that knows its length
+straight into the mapping. The loop seals after the step is timed, so the
+budget and the fairness quantum are fitted to the step alone. `forward()` makes
+the gate rows a State needs when it no longer holds them. Gates run against
+violations: a corrupted copy fails `TestMemStoreFillsServeASharedPrefix`; the
+parent commit panics `TestAStateThatLedAHostStepDecodesAlone`. The store half
+fell from 290-360 ms to 35-45 ms a request.
+
+**Paired, interleaved, A/A in the same pass** (`dev/deploysearch`, a fresh
+server per sample, warm-up at the measured concurrency, ratios are fix/main per
+round, median [IQR/median]; a ratio is quotable at 8 rounds or more and
+IQR/median up to 0.10). The fix is the commit after the one the main arm is
+built from.
+
+Laptop, Llama-3.2-1B Q4_K_M, GeForce RTX 3050 Ti Laptop GPU (CUDA), six P-core
+threads, 8 rounds, host load 2-6:
+
+| | main | fix | fix/main | A/A (main twice) |
+|---|---|---|---|---|
+| c=1 tok/s | 142.4 | 149.9 | 1.053 [0.006] | 0.998 [0.006] |
+| c=1 TTFT p50 | 84 ms | 62 ms | 0.743 [0.018] | 1.003 [0.006] |
+| c=1 memory | 2651 MiB | 2479 MiB | 0.936 [0.003] | 1.000 |
+| c=4 tok/s | 238.0 | 271.5 | 1.133 [0.263] refused; 1.153 [0.087] in a second pass | 0.990 [0.149] refused; 1.008 [0.197] refused |
+| c=4 TTFT p99 | 490 ms | 367 ms | 0.740 [0.171] refused | 1.060 [0.213] refused |
+
+c=4 against c=1: 1.67 times one stream before, 1.81 after. On this 1B the seal
+is 11-16 ms, so the gain at c=4 is the budget, not the copy.
+
+V100 (Tesla V100-SXM2-16GB, CUDA, one card under its lock), Llama-3.1-8B
+Q4_K_M, the box carrying other projects' jobs (load average 5-57 while these
+ran, which moves TTFT between 0.5 and 3.7 s at one stream and is why the
+numbers are not gated):
+
+| pass | c | main tok/s | fix tok/s | fix/main | A/A (main twice) |
+|---|---|---|---|---|---|
+| 8 rounds | 4 | 23.0 | 53.6 | 2.142 [0.461] refused | 0.994 [0.441] refused |
+| 8 rounds | 4 | 59.0 | 80.6 | 1.563 [0.173] refused | 0.904 [0.835] refused |
+| 12 rounds | 4 | 19.9 | 25.5 | 1.294 [0.243] refused | 0.920 [0.204], 0.949 [0.115] refused |
+| 8 rounds | 1 | 18.2 | 36.0 | 1.564 [0.377] refused | 1.070 [0.366] refused |
+| 8 rounds | 1 | 17.1 | 28.0 | 1.610 [0.222] refused | 0.932 [0.786] refused |
+
+Every V100 ratio is on the side of the fix (three passes at c=4, 1.29-2.14, TTFT
+p50 0.23-0.70; two at c=1, 1.56-1.61; host plus device memory 0.81-0.82,
+because the store's fills are held once), and none passes the gate: the A/A
+copy of main moves as far as the fix does. That is the measurement, not a claim
+of a gain of any size. The laptop pair is the one that resolves.
+
+**What is left, and what was tried.**
+
+- The seal's card half still runs on the loop: 90-140 ms a request at 8B on a
+  quiet box, and under load seconds, during which no row steps. At c=4 on the
+  V100 the fix did not make four streams scale (25.5 tok/s against 28.0 at one
+  stream in separate passes): TTFT is still the seal and the prompt step in
+  turn. Reading the history home without a host copy of it per layer, or
+  reading it home only for the pages the store does not hold, is the next
+  lever.
+- Sealing on a goroutine beside the other rows' steps (the row waits for its
+  own seal; decode and other prompts proceed) was built, with a gate that holds
+  one seal and demands another request finish, and passed the batch gates and
+  `-race`. On the laptop it left tok/s at 1.08 [0.14] and made TTFT p50 1.5 times
+  worse (the seal's device calls wait behind the other rows' steps); on the
+  V100 it read 1.63 [1.2] against 1.56 [0.17] for sealing after the step, TTFT
+  p99 7.7 s against 3.9 s. Not kept.
+- A cold server is not a warm one: `hb`'s warm-up ran at concurrency 1, so a
+  server measured at c=4 compiled and tuned each joint width inside the
+  measurement. `httpbench -warmup-c` and `deploysearch` now warm at the mix's
+  concurrency.
+- The 64-request memory gate (`TestAServerUnderLoadStaysUnderItsBound`) took
+  a cache that held 33 MB of each prompt; now 6 MB, so it reaches its bound with
+  a host reporting 512 MiB available.
