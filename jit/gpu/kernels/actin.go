@@ -60,17 +60,20 @@ func (in ActIn) check(k, group int) error {
 		return fmt.Errorf("kernels: ActIn: k=%d is not a multiple of 32 and of the window %d", k, in.Window)
 	case group%ir.SubgroupLanes != 0 || group%span != 0:
 		return fmt.Errorf("kernels: ActIn: window %d does not tile a %d-thread group", in.Window, group)
-	case (k/4+k/32+k/16+2+group/ir.SubgroupLanes+RMSNormGroup+group)*4 > 48<<10:
+	case (k/4+k/32+k/16+2+group/ir.SubgroupLanes+normSlots(group)+group)*4 > 48<<10:
 		// The operand, its scales and sums, the window and norm partials and
 		// the matvec's own in-group partials, against the 48 KiB every
 		// backend gives a workgroup's static threadgroup memory.
 		return fmt.Errorf("kernels: ActIn: k=%d does not fit threadgroup memory", k)
-	case in.Norm && (group > RMSNormGroup || RMSNormGroup%group != 0):
-		return fmt.Errorf("kernels: ActIn: a %d-thread group cannot run the norm's %d-thread reduction",
-			group, RMSNormGroup)
 	}
 	return nil
 }
+
+// normSlots is the norm partials' threadgroup slots: RMSNormGroup's, rounded
+// up to whole groups, since a group that does not divide the norm's runs
+// ceil(RMSNormGroup/group) virtual threads a thread and the ones past the
+// norm's group store into slots the reduction never reads.
+func normSlots(group int) int { return (RMSNormGroup + group - 1) / group * group }
 
 // actSpan is the amax window in packed words.
 func actSpan(in ActIn) int { return max(in.Window/32, 1) * 8 }
@@ -117,9 +120,9 @@ func actPrologue(b *ir.Builder, k, group int, in ActIn, ps actParamSet) (pA, pAX
 		shW = b.Shared("actWin", ir.F32, group/lanes)
 	}
 	if in.Norm {
-		n := RMSNormGroup
+		n := normSlots(group)
 		if in.Warp {
-			n = RMSNormGroup / lanes
+			n /= lanes
 		}
 		part = b.Shared("actSS", ir.F32, n)
 	}
@@ -216,7 +219,8 @@ func actPrologue(b *ir.Builder, k, group int, in ActIn, ps actParamSet) (pA, pAX
 // butterflies) combines the same partials in the same order.
 func normScale(b *ir.Builder, k, group int, in ActIn, pIn, part, tid ir.Value) ir.Value {
 	const g = RMSNormGroup
-	nv := g / group
+	nv := (g + group - 1) / group
+	gC := b.Const(ir.U32, g)
 	last := b.Const(ir.U32, int64(k-1))
 	kk := b.Const(ir.U32, int64(k))
 	zeroF := b.ConstF32(0)
@@ -229,7 +233,13 @@ func normScale(b *ir.Builder, k, group int, in ActIn, pIn, part, tid ir.Value) i
 			i := b.Add(ir.U32, vt[j], b.Const(ir.U32, int64(m*g)))
 			idx := b.Min(ir.U32, i, last)
 			x := b.Load(ir.F32, pIn, idx, 0)
-			accs[j] = b.Add(ir.F32, accs[j], b.Select(ir.F32, b.Lt(ir.U32, i, kk), b.Mul(ir.F32, x, x), zeroF))
+			sq := b.Select(ir.F32, b.Lt(ir.U32, i, kk), b.Mul(ir.F32, x, x), zeroF)
+			if nv*group > g {
+				// A virtual thread past the norm's group is not one of its
+				// threads: it sums nothing, and its slot past g is never read.
+				sq = b.Select(ir.F32, b.Lt(ir.U32, vt[j], gC), sq, zeroF)
+			}
+			accs[j] = b.Add(ir.F32, accs[j], sq)
 		}
 	}
 
