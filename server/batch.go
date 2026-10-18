@@ -97,6 +97,10 @@ type stepLoop struct {
 	// The prompting rows promptUnits walks, and their allotments.
 	prompts []*row
 	alloc   []int
+	// sealing is the rows whose prompt a step just completed and whose
+	// history the memory cache is yet to be offered (sealPrompts), with the
+	// logits the prompt ended on.
+	sealing []sealJob
 
 	// chunkOf is how many prompt tokens a row's State takes in one prefill:
 	// its pipelined chunk when the State pipelines (State.PromptChunk). A
@@ -531,7 +535,7 @@ func (lp *stepLoop) admit() {
 		lp.renumber()
 	}
 	if page > 0 {
-		lp.lm.gpu.PromiseKV(promised)
+		lp.lm.gpuTier().PromiseKV(promised)
 	}
 }
 
@@ -575,7 +579,7 @@ func rowPages(r *row, pos, page int) int {
 // goes to the tier too (tier.GPU.PromiseKV), so a batched scratch built
 // after admission does not take the pages it was made on.
 func (lp *stepLoop) kvRoom() (room, page, promised int) {
-	g := lp.lm.gpu
+	g := lp.lm.gpuTier()
 	if g == nil {
 		return 0, 0, 0
 	}
@@ -607,7 +611,7 @@ func (r *row) started() {
 		QueueDepth:   r.depth,
 		DeviceBlocks: devBlocks,
 		HostBlocks:   lm.m.Cfg.NLayer - devBlocks,
-		DeviceIDs:    lm.deviceIDs,
+		DeviceIDs:    lm.devIDs(),
 		Prefill:      r.prefill,
 		Execution:    ExecutionParallel,
 		Batched:      true,
@@ -692,6 +696,30 @@ func (lp *stepLoop) iterate() {
 		lp.stepNs = ewma(lp.stepNs, float64(d))
 	}
 	lp.post.wait()
+	lp.sealPrompts()
+}
+
+// sealJob is a row whose prompt just ran, and the logits it ended on.
+type sealJob struct {
+	r      *row
+	logits []float32
+}
+
+// sealPrompts offers each completed prompt's history to the memory cache
+// (State.SealPrompt). It runs between steps, outside the time the step budget
+// and the fairness quantum are fitted to: nothing has moved on since the prompt
+// ended, because the row's next token is sampled at the next step.
+func (lp *stepLoop) sealPrompts() {
+	for _, j := range lp.sealing {
+		if j.r.isDone() {
+			continue // the loop never touches a retired row's State
+		}
+		if err := j.r.s.st.SealPrompt(j.logits); err != nil {
+			lp.finish(j.r, FinishError, "", err)
+		}
+	}
+	clear(lp.sealing)
+	lp.sealing = lp.sealing[:0]
 }
 
 // decodeUnits samples every decoding row's next token from the logits its
@@ -966,7 +994,7 @@ func (lp *stepLoop) stepJoint(units []unit) bool {
 		runs = append(runs, model.Run{State: u.r.s.st, Tokens: u.tokens, Logits: u.logits})
 		rows += len(u.tokens)
 	}
-	gpu := lp.lm.gpu
+	gpu := lp.lm.gpuTier()
 	if gpu == nil {
 		return lp.stepHost(units, runs, rows)
 	}
@@ -1050,12 +1078,13 @@ func (lp *stepLoop) ran(u unit, logits []float32) {
 	}
 	r.logits = logits
 	if r.seal {
-		// The store gets this prompt as PrefillCached would have left it.
-		if err := r.s.st.SealPrompt(logits); err != nil {
-			r.started()
-			lp.finish(r, FinishError, "", err)
-			return
-		}
+		// The store gets this prompt as PrefillCached would have left it, once
+		// the step is over: sealing reads the whole history home from the card
+		// and copies it into the store, which costs several times the prompt's
+		// own prefill, and inside the step it was counted as the prompt's
+		// time -- stepBudget read prompt tokens as dear and fed every later
+		// prompt a handful of tokens a step.
+		lp.sealing = append(lp.sealing, sealJob{r: r, logits: logits})
 	}
 	r.prefill = time.Since(r.promptStart)
 	r.s.prefilled.Add(int64(len(r.ids)))

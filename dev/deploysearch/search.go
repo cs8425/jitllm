@@ -106,6 +106,7 @@ type Ratios struct {
 	TTFTp50, TTFTp99, ITLp99    hb.RatioGate
 	Goodput, AggRate, Mem       hb.RatioGate
 	LoadSec                     hb.RatioGate
+	MedianTTFT50, MedianAgg     float64
 	MedianTTFT99, MedianITL99   float64
 	MedianGoodput, MedianMemMiB float64
 }
@@ -136,7 +137,7 @@ func Compare(samples []Sample, control string) []Ratios {
 	var out []Ratios
 	for _, n := range names {
 		var t50, t99, i99, gp, ag, mem, ld []float64
-		var vt, vi, vg, vm []float64
+		var vt, vi, vg, vm, v50, vag []float64
 		for _, r := range rounds {
 			m, ok := byRound[n][r]
 			c := byRound[control][r]
@@ -152,10 +153,12 @@ func Compare(samples []Sample, control string) []Ratios {
 			mem = append(mem, ratio(m.Mem(), c.Mem()))
 			ld = append(ld, ratio(m.LoadSec, c.LoadSec))
 			vt, vi, vg, vm = append(vt, m.TTFTp99), append(vi, m.ITLp99), append(vg, m.Goodput), append(vm, m.Mem())
+			v50, vag = append(v50, m.TTFTp50), append(vag, m.AggRate)
 		}
 		out = append(out, Ratios{
 			Config: n, TTFTp50: hb.Gate(t50), TTFTp99: hb.Gate(t99), ITLp99: hb.Gate(i99),
 			Goodput: hb.Gate(gp), AggRate: hb.Gate(ag), Mem: hb.Gate(mem), LoadSec: hb.Gate(ld),
+			MedianTTFT50: hb.Median(v50), MedianAgg: hb.Median(vag),
 			MedianTTFT99: hb.Median(vt), MedianITL99: hb.Median(vi),
 			MedianGoodput: hb.Median(vg), MedianMemMiB: hb.Median(vm),
 		})
