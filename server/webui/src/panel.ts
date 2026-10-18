@@ -164,6 +164,16 @@ function engine(force: boolean) {
 let placeBuilt = false, placeBox: HTMLElement, placeTimer = 0, placeSession = "";
 const targetPick = { id: "" };
 let lastMove = "";
+// The layers selected on the map: one contiguous range, picked by click,
+// shift-click or drag. It belongs to the session on show.
+let selRange: [number, number] | null = null, selAnchor = -1, dragging = false, selFor = "";
+const inSel = (i: number) => !!selRange && i >= selRange[0] && i <= selRange[1];
+function paintSel() {
+  placeBox.querySelectorAll<HTMLElement>(".blk[data-i]").forEach((c) => c.classList.toggle("sel", inSel(Number(c.dataset.i))));
+  const note = placeBox.querySelector(".pick + p");
+  if (note) note.textContent = selRange ? `Selected layers ${selRange[0]}–${selRange[1]} (${selRange[1] - selRange[0] + 1})` : "Click a layer, shift-click or drag to select a range.";
+}
+document.addEventListener("mouseup", () => { if (dragging) { dragging = false; drawPlacement(); } });
 
 async function placementSession(): Promise<string> {
   const id = viewModel();
@@ -201,6 +211,7 @@ function drawPlacement() {
     placeBox.replaceChildren(...kids);
     return;
   }
+  if (selFor !== placeSession) { selFor = placeSession; selRange = null; selAnchor = -1; }
   const nb = p.blocks.length;
   const per = new Map<string, { n: number; bytes: number }>();
   for (const b of p.blocks) {
@@ -240,10 +251,21 @@ function drawPlacement() {
     card("Where this model runs",
       h("p", { class: "plain" }, `A model is a stack of ${nb} layers. Each layer runs either on the CPU or on a graphics card; a card is faster when it has room.`),
       h("div", { class: "seam" }, h("b", { text: String(nb) }), ` layers: ${sentence}`),
-      h("div", { class: "blocks" }, ...p.blocks.map((b) => h("i", {
-        class: "blk " + (b.location === BlockLocation.DEVICE ? "dev" : "host") + (b.kind === BlockKind.LINEAR ? " lin" : "") + (b.kind === BlockKind.VISION ? " vis" : "") + (b.location !== BlockLocation.DEVICE && !b.hostResident ? " cold" : ""),
+      h("div", { class: "blocks pick", attrs: { role: "group", "aria-label": "Layers: click, shift-click or drag to select" } }, ...p.blocks.map((b) => h("i", {
+        class: "blk " + (b.location === BlockLocation.DEVICE ? "dev" : "host") + (b.kind === BlockKind.LINEAR ? " lin" : "") + (b.kind === BlockKind.VISION ? " vis" : "") + (b.location !== BlockLocation.DEVICE && !b.hostResident ? " cold" : "") + (inSel(b.index) ? " sel" : ""),
         title: `layer ${b.index} · ${BlockKind[b.kind].toLowerCase()} · ${b.location === BlockLocation.DEVICE ? b.deviceId : "CPU"} · ${b.bytes?.human ?? ""}`,
+        attrs: { "data-i": String(b.index) },
+        on: {
+          mousedown: (e: MouseEvent) => {
+            e.preventDefault();
+            if (e.shiftKey && selAnchor >= 0) { selRange = [Math.min(selAnchor, b.index), Math.max(selAnchor, b.index)]; drawPlacement(); return; }
+            selAnchor = b.index; selRange = [b.index, b.index]; dragging = true;
+            paintSel();
+          },
+          mouseenter: () => { if (dragging) { selRange = [Math.min(selAnchor, b.index), Math.max(selAnchor, b.index)]; paintSel(); } },
+        },
       }))),
+      h("p", { class: "dim small", text: selRange ? `Selected layers ${selRange[0]}–${selRange[1]} (${selRange[1] - selRange[0] + 1})` : "Click a layer, shift-click or drag to select a range." }),
       h("div", { class: "legend" }, h("span", {}, h("i", { class: "blk host" }), " CPU"), h("span", {}, h("i", { class: "blk dev" }), " graphics card"), h("span", {}, h("i", { class: "blk lin" }), " linear layer")),
       ...p.declines.slice(0, 3).map((d) => h("p", { class: "warn small", text: `layer ${d.blockIndex}: ${d.reason}` }))),
     ...(devCards.length ? [card("Device memory", ...devCards)] : []),
@@ -253,8 +275,11 @@ function drawPlacement() {
         s.value = target?.ref?.id ?? ""; return s;
       })()) : null,
       h("div", { class: "ctl" },
-        btn("+1 layer to GPU", hostIdx.length > 0, "move the next CPU layer to the card", () => move(hostIdx[0], hostIdx[0], false, "+1 layer")),
-        btn("−1 layer to CPU", nd > 0, "bring the last card layer back", () => move(devIdx[devIdx.length - 1], devIdx[devIdx.length - 1], true, "−1 layer")),
+        btn("Send selection to GPU", !!selRange, "run the selected layers on the card", () => selRange && move(selRange[0], selRange[1], false, `layers ${selRange[0]}–${selRange[1]} to GPU`)),
+        btn("Send selection to CPU", !!selRange, "run the selected layers on the CPU", () => selRange && move(selRange[0], selRange[1], true, `layers ${selRange[0]}–${selRange[1]} to CPU`)),
+        h("button", { class: "btn sm ghost", text: "Select all", on: { click: () => { selRange = [0, nb - 1]; selAnchor = 0; drawPlacement(); } } }),
+        h("button", { class: "btn sm ghost", text: "Clear", disabled: !selRange, on: { click: () => { selRange = null; selAnchor = -1; drawPlacement(); } } })),
+      h("div", { class: "ctl" },
         btn("All on GPU", hostIdx.length > 0, "run every layer on the card", () => move(0, nb - 1, false, "all to GPU")),
         btn("All on CPU", nd > 0, "run every layer on the CPU", () => move(0, nb - 1, true, "all to CPU"))),
       no ? h("p", { class: "dim small", text: no }) : null,

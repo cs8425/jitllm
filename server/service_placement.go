@@ -130,37 +130,24 @@ func (s *PlacementService) RelocateBlocks(ctx context.Context, req *connect.Requ
 
 	start := time.Now()
 	sess.mu.Lock()
-	cur := sess.st.GPULayers()
 	var moved int
 	var declined []*v1.PlacementDecline
-	switch {
-	case m.ToHost:
-		if last != cur-1 {
-			sess.mu.Unlock()
-			return nil, unimplemented(
-				"relocate: the seam is a COUNT -- blocks 0..%d are on the device -- so bringing "+
-					"%d..%d home would leave a hole. Only the TAIL of the device set can be "+
-					"brought home; ask for %d..%d",
-				cur-1, first, last, first, cur-1)
+	if m.ToHost {
+		n, err := sess.st.ReleaseBlocks(first, last+1)
+		moved = n
+		if err != nil {
+			declined = append(declined, &v1.PlacementDecline{BlockIndex: int32(first), Reason: err.Error()})
 		}
-		got := sess.st.SetGPULayers(first)
-		moved = cur - got
-	default:
-		if first != cur {
-			sess.mu.Unlock()
-			return nil, unimplemented(
-				"relocate: the seam is a COUNT -- blocks 0..%d are on the device -- so placing "+
-					"%d..%d would leave a hole. Only a range that EXTENDS the device set can be "+
-					"placed; ask for %d..%d",
-				cur-1, first, last, cur, last)
-		}
-		got := sess.st.SetGPULayers(last + 1)
-		moved = got - cur
-		if got < last+1 {
+	} else {
+		n, err := sess.st.PlaceBlocks(first, last+1)
+		moved = n
+		if err != nil {
+			declined = append(declined, &v1.PlacementDecline{BlockIndex: int32(first), DeviceId: m.ToDeviceId, Reason: err.Error()})
+		} else if want := last + 1 - first; n < want && !s.allOnDevices(sess, first, last) {
 			declined = append(declined, &v1.PlacementDecline{
-				BlockIndex:  int32(got),
+				BlockIndex:  int32(first),
 				DeviceId:    m.ToDeviceId,
-				Reason:      fmt.Sprintf("the device took %d of the %d block(s) asked for", moved, last+1-cur),
+				Reason:      fmt.Sprintf("the device took %d of the %d block(s) asked for", n, want),
 				OutOfMemory: true,
 			})
 		}
@@ -168,12 +155,47 @@ func (s *PlacementService) RelocateBlocks(ctx context.Context, req *connect.Requ
 	sess.refresh()
 	sess.mu.Unlock()
 
+	// The tier chose a card for what it placed; a named card gets the blocks
+	// that landed elsewhere, moved there with their history.
+	if !m.ToHost && moved > 0 && m.ToDeviceId != "" {
+		if lo, hi, ok := s.elsewhere(sess, first, last, m.ToDeviceId); ok {
+			if _, err := s.moveBetweenDevices(ctx, sess, lo, hi, m.ToDeviceId); err != nil {
+				declined = append(declined, &v1.PlacementDecline{BlockIndex: int32(lo), DeviceId: m.ToDeviceId, Reason: err.Error()})
+			}
+		}
+	}
+
 	return connect.NewResponse(&v1.RelocateBlocksResponse{
 		Placement:   s.E.pbPlacement(sess),
 		BlocksMoved: int32(moved),
 		Declined:    declined,
 		Millis:      millis(time.Since(start)),
 	}), nil
+}
+
+// allOnDevices reports whether blocks first..last are all on a device now.
+func (s *PlacementService) allOnDevices(sess *Session, first, last int) bool {
+	return sess.onDevices(first, last)
+}
+
+// elsewhere is the hull of the blocks in first..last that sit on a device
+// other than want, when that hull is wholly on devices.
+func (s *PlacementService) elsewhere(sess *Session, first, last int, want string) (lo, hi int, ok bool) {
+	on := sess.placement().on
+	lo, hi = -1, -1
+	for li := first; li <= last && li < len(on); li++ {
+		if on[li] == "" || s.E.gateKey(on[li]) == s.E.gateKey(want) {
+			continue
+		}
+		if lo < 0 {
+			lo = li
+		}
+		hi = li
+	}
+	if lo < 0 || !sess.onDevices(lo, hi) {
+		return 0, 0, false
+	}
+	return lo, hi, true
 }
 
 func (s *PlacementService) SetRelocation(ctx context.Context, req *connect.Request[v1.SetRelocationRequest]) (*connect.Response[v1.SetRelocationResponse], error) {

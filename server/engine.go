@@ -302,12 +302,10 @@ type LoadedModel struct {
 	// hwIDs are the devices the tier opened, by their own ids, whatever the
 	// load called them (auto, gpu:0): what a new device is listed beside.
 	hwIDs []string
-	// retired are the closers of tiers a later attachDevice replaced; the
-	// sessions still on one keep it open until the model unloads.
-	retired []func()
-	// attachMu serialises attachDevice; open is the load's own options, which
-	// the tier it opens later takes the session count and config from.
-	attachMu sync.Mutex
+	// attachMu is held for writing by attachDevice and for reading by a
+	// session being placed on the tier; open is the load's own options, which
+	// a tier opened later takes the session count and config from.
+	attachMu sync.RWMutex
 	open     LoadOptions
 	// gateKeys is the physical devices the tier opened, one gate key each
 	// (deviceGateKeys): what a session of this model serialises on. deviceIDs
@@ -406,14 +404,10 @@ func (lm *LoadedModel) holds(id string) bool {
 	return hasString(lm.deviceIDs, id) || hasString(lm.hwIDs, id) || hasString(normaliseDeviceIDs(lm.open.DeviceIDs), id)
 }
 
-// closeTiers closes the model's tier and every one it replaced.
+// closeTiers closes the model's tier.
 func (lm *LoadedModel) closeTiers() {
 	lm.devMu.Lock()
 	defer lm.devMu.Unlock()
-	for _, c := range lm.retired {
-		c()
-	}
-	lm.retired = nil
 	lm.closeDev()
 }
 
@@ -607,14 +601,6 @@ func (e *Engine) LoadModel(o LoadOptions) (*LoadedModel, error) {
 
 	opts := []model.Option{model.WithPageBudget(hostBudget), model.WithPreload(preloadDepth)}
 	kv := cmp.Or(o.KVF16, e.cfg.KVF16)
-	if kv == nil && dev == nil && e.hasAccelerator() {
-		// A binary16 KV cache with history cannot move to a device
-		// (engine/model/forward.go SetDeviceLayers steps it down only while the
-		// history is empty), so a host-loaded model on a machine with a device
-		// keeps f32 and its sessions stay relocatable. KVF16 names it back.
-		f32 := false
-		kv = &f32
-	}
 	if kv != nil {
 		opts = append(opts, model.WithKVF16(*kv))
 	}
@@ -685,6 +671,29 @@ func (e *Engine) LoadModel(o LoadOptions) (*LoadedModel, error) {
 	return lm, nil
 }
 
+// tierOptions are the options every tier of this server opens with, whether it
+// opens (openTier) or takes a device later (attachDevice).
+func (e *Engine) tierOptions(sessions int, tierConfig func(*tier.Config), hostBudget uint64) []tier.Option {
+	return []tier.Option{
+		tier.WithROCm(e.cfg.ROCm),
+		tier.WithTuneCache(e.cfg.TuneCache),
+		tier.WithLazyTune(e.cfg.TuneCache != ""),
+		tier.WithHostBudget(hostBudget),
+		tier.WithConfig(func(c *tier.Config) {
+			c.Sessions = sessions
+			// The step loop (newStepLoop) runs steps of up to MaxStepRows
+			// rows: the device reserves their scratch at placement, or a card
+			// the blocks filled refuses the step.
+			if e.cfg.MaxBatchRows != 1 {
+				c.StepRows = model.MaxStepRows
+			}
+			if tierConfig != nil {
+				tierConfig(c)
+			}
+		}),
+	}
+}
+
 // openTier opens the tier for the devices named, or returns nil when they name
 // none (the host alone). Only "auto" degrades to the host when it cannot open:
 // a spec that names a device asked for that device, and silently answering on
@@ -706,25 +715,7 @@ func (e *Engine) openTier(ids []string, sessions int, tierConfig func(*tier.Conf
 	if !wantsDevice {
 		return nil, nil
 	}
-	g, err := tier.OpenWith(
-		tier.WithDevices(spec),
-		tier.WithROCm(e.cfg.ROCm),
-		tier.WithTuneCache(e.cfg.TuneCache),
-		tier.WithLazyTune(e.cfg.TuneCache != ""),
-		tier.WithHostBudget(hostBudget),
-		tier.WithConfig(func(c *tier.Config) {
-			c.Sessions = sessions
-			// The step loop (newStepLoop) runs steps of up to MaxStepRows
-			// rows: the device reserves their scratch at placement, or a card
-			// the blocks filled refuses the step.
-			if e.cfg.MaxBatchRows != 1 {
-				c.StepRows = model.MaxStepRows
-			}
-			if tierConfig != nil {
-				tierConfig(c)
-			}
-		}),
-	)
+	g, err := tier.OpenWith(append(e.tierOptions(sessions, tierConfig, hostBudget), tier.WithDevices(spec))...)
 	if err != nil {
 		if len(es) != 1 || es[0].API != "auto" {
 			return nil, &DeviceError{err}
@@ -732,17 +723,6 @@ func (e *Engine) openTier(ids []string, sessions int, tierConfig func(*tier.Conf
 		return nil, nil
 	}
 	return g, nil
-}
-
-// hasAccelerator is true when the probe found a device that can hold blocks.
-func (e *Engine) hasAccelerator() bool {
-	devs, _ := e.Devices(false)
-	for _, d := range devs {
-		if d.Kind != KindHost && d.Available {
-			return true
-		}
-	}
-	return false
 }
 
 // DefaultDevices is the placement a load takes when the caller names none:
@@ -923,8 +903,9 @@ type Session struct {
 	moveMu sync.Mutex
 	move   *moveReq
 	// tier is the model's tier this session's State was attached to, or nil
-	// for a State still on the host alone. Under mu.
-	tier nn.Device
+	// for a State still on the host alone. Read without mu (a move must not
+	// wait for a generate to finish), so it is a box behind an atomic.
+	tier atomic.Pointer[tierBox]
 
 	sampling model.Sampler
 	created  time.Time
@@ -1096,6 +1077,8 @@ func (e *Engine) CreateSession(o SessionOptions) (*Session, error) {
 		st = lm.m.NewState(maxSeq)
 		lm.ttft.statesCreated.Add(1)
 	}
+	lm.attachMu.RLock()
+	defer lm.attachMu.RUnlock()
 	tierDev := lm.device()
 	if tierDev != nil && !reused {
 		max := o.MaxDeviceBlocks
@@ -1136,9 +1119,9 @@ func (e *Engine) CreateSession(o SessionOptions) (*Session, error) {
 		created:  time.Now(),
 		cached:   o.KVStore != nil,
 		spec:     o.Speculation,
-		tier:     tierDev,
 	}
 	s.lastUsed.Store(time.Now().UnixMilli())
+	s.tier.Store(&tierBox{tierDev})
 	s.mu.Lock()
 	s.refresh()
 	s.mu.Unlock()
@@ -2435,67 +2418,101 @@ func (s *Session) finishMove(r *moveReq, res moveRes) {
 	r.done <- res
 }
 
-// attachDevice makes the device named part of the model's tier. The tier is
-// opened for a set of devices and cannot take another afterwards (no
-// tier.GPU method adds one; jit/gpu/tier/open.go OpenWith fixes g.devs), so
-// this opens a new tier over the old set and the new device (openTier, as
-// LoadModel does), publishes it as the model's under devMu, and keeps the old
-// one open for the sessions still on it. A model loaded host-only has no old
-// tier. Sessions move onto the new tier one at a time (bindSession).
+// attachDevice makes the device named part of the model's tier. A model that
+// has a tier takes the device with tier.GPU.AddDevices, so its weights are not
+// held twice; one loaded host-only gets a tier opened for it (openTier, as
+// LoadModel does). Either way the tier's device list is read without a lock
+// by every placement and step, so every session of the model is held off it
+// (each session's lock) for the change, and a session is not created across
+// it (attachMu). Sessions of a host-only model bind to the new tier when they
+// ask to move (bindSession).
 func (e *Engine) attachDevice(lm *LoadedModel, to string) error {
 	lm.attachMu.Lock()
 	defer lm.attachMu.Unlock()
 	if lm.holds(to) {
 		return nil
 	}
-	lm.devMu.RLock()
-	ids := append(append([]string{}, lm.hwIDs...), to)
-	lm.devMu.RUnlock()
 	lm.mu.Lock()
 	hostBudget := lm.budget
 	lm.mu.Unlock()
-	g, err := e.openTier(ids, lm.open.Sessions, lm.open.tierConfig, hostBudget)
-	if err != nil {
-		return err
+
+	e.mu.RLock()
+	held := make([]*Session, 0, len(lm.sessions))
+	for _, s := range lm.sessions {
+		held = append(held, s)
 	}
-	if g == nil {
-		return fmt.Errorf("%w: %q names no device this server can open", ErrPlacement, to)
+	e.mu.RUnlock()
+	sort.Slice(held, func(i, j int) bool { return held[i].id < held[j].id })
+	for _, s := range held {
+		s.mu.Lock()
 	}
-	resolved := resolveDeviceIDs(normaliseDeviceIDs(ids), g.Hardware())
-	if !hasString(resolved, to) {
-		g.Close()
-		return fmt.Errorf("%w: %q is not a device of this server (the tier opened %v)", ErrPlacement, to, resolved)
+	defer func() {
+		for _, s := range held {
+			s.mu.Unlock()
+		}
+	}()
+
+	if g := lm.gpuTier(); g != nil {
+		if _, err := g.AddDevices(to, e.tierOptions(lm.open.Sessions, lm.open.tierConfig, hostBudget)...); err != nil {
+			return &DeviceError{err}
+		}
+		ids := tierNames(g)
+		keys := e.deviceGateKeys(g)
+		lm.devMu.Lock()
+		lm.deviceIDs, lm.hwIDs, lm.gateKeys = ids, ids, keys
+		lm.devMu.Unlock()
+	} else {
+		g, err := e.openTier([]string{to}, lm.open.Sessions, lm.open.tierConfig, hostBudget)
+		if err != nil {
+			return err
+		}
+		if g == nil {
+			return fmt.Errorf("%w: %q names no device this server can open", ErrPlacement, to)
+		}
+		ids := tierNames(g)
+		keys := e.deviceGateKeys(g)
+		lm.devMu.Lock()
+		lm.dev, lm.gpu, lm.closeDev = g, g, g.Close
+		lm.deviceIDs, lm.hwIDs, lm.gateKeys = ids, ids, keys
+		lm.devMu.Unlock()
 	}
-	keys := e.deviceGateKeys(g)
-	lm.devMu.Lock()
-	if lm.dev != nil {
-		lm.retired = append(lm.retired, lm.closeDev)
+	if !lm.holds(to) {
+		return fmt.Errorf("%w: %q is not a device of this server (the tier holds %v)", ErrPlacement, to, lm.devIDs())
 	}
-	lm.dev, lm.gpu, lm.closeDev = g, g, g.Close
-	lm.deviceIDs, lm.hwIDs = resolved, resolved
-	lm.gateKeys = keys
-	lm.devMu.Unlock()
-	// The pool's States were placed on the tier that was.
+	// The pool's States were placed before the tier changed.
 	e.dropIdle(lm)
 	return nil
 }
+
+// tierNames is the devices a tier holds, by their own ids.
+func tierNames(g *tier.GPU) []string {
+	hw := g.Hardware()
+	out := make([]string, 0, len(hw))
+	for _, h := range hw {
+		out = append(out, h.Ref)
+	}
+	return out
+}
+
+// tierBox holds a tier behind an atomic pointer.
+type tierBox struct{ d nn.Device }
 
 // bindSession attaches the session's State to the model's current tier when it
 // is on another (or on none), keeping as many blocks on a device as it had.
 // model.State.SetDeviceLayers brings the history home before it changes tier,
 // so the answer does not change; the blocks go back up after.
 func (e *Engine) bindSession(s *Session) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	dev := s.lm.device()
-	if dev == nil || s.tier == dev {
+	if b := s.tier.Load(); dev == nil || (b != nil && b.d == dev) {
 		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	prev := s.st.GPULayers()
 	if err := s.st.SetDeviceLayers(dev, 0); err != nil {
 		return fmt.Errorf("%w: %v", ErrPlacement, err)
 	}
-	s.tier = dev
+	s.tier.Store(&tierBox{dev})
 	if prev > 0 {
 		s.st.SetGPULayers(prev)
 	}

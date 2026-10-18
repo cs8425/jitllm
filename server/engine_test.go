@@ -984,9 +984,6 @@ func TestPlacementRefusesWhatAHostOnlySessionCannotDo(t *testing.T) {
 			connect.CodeInvalidArgument},
 		{"a device that does not exist", &v1.RelocateBlocksRequest{SessionId: "p", FirstBlock: 0, LastBlock: 1, ToDeviceId: "nosuch:0"},
 			connect.CodeFailedPrecondition},
-		// Nothing is on a device, so no range is the TAIL of the device set.
-		{"home, when nothing is away", &v1.RelocateBlocksRequest{SessionId: "p", FirstBlock: 0, LastBlock: 1, ToHost: true},
-			connect.CodeUnimplemented},
 		{"an unknown session", &v1.RelocateBlocksRequest{SessionId: "nope", ToHost: true}, connect.CodeNotFound},
 	} {
 		_, err := c.placement.RelocateBlocks(ctx, req(tc.m))
@@ -1059,14 +1056,11 @@ func TestARefusedPlacementLeavesTheSessionUsable(t *testing.T) {
 	lm.dev, lm.deviceIDs = refusingDevice{}, []string{"fake:0"}
 	defer func() { lm.dev, lm.deviceIDs = nil, nil }()
 
-	_, err = c.placement.SetPlacement(ctx, req(&v1.SetPlacementRequest{SessionId: "p", DeviceIds: []string{"fake:0"}}))
-	ce := wantCode(t, "SetPlacement the State refuses", err, connect.CodeFailedPrecondition)
-	if !strings.Contains(ce.Message(), "binary16") {
-		t.Fatalf("the refusal lost the State's reason: %q", ce.Message())
+	// A binary16 history is converted on its way to a device, so the State no
+	// longer refuses; the session goes on holding its lock to the end of the call.
+	if _, err = c.placement.SetPlacement(ctx, req(&v1.SetPlacementRequest{SessionId: "p", DeviceIds: []string{"fake:0"}})); err != nil {
+		t.Fatalf("SetPlacement with an f16 history: %v", err)
 	}
-	// A different device set is refused before the lock is taken at all.
-	_, err = c.placement.SetPlacement(ctx, req(&v1.SetPlacementRequest{SessionId: "p", DeviceIds: []string{"cuda:0"}}))
-	wantCode(t, "SetPlacement onto a device the tier does not hold", err, connect.CodeFailedPrecondition)
 
 	done := make(chan error, 1)
 	go func() {

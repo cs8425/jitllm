@@ -225,3 +225,4 @@ label.tog input{width:auto;margin:0;accent-color:var(--brand)}
 .menu button{display:block;width:100%;text-align:left;border:0;background:none;padding:.4rem .7rem;border-radius:7px;font:13px var(--mono)}.menu button:hover{background:var(--surface-3)}
 .menu .cur{color:var(--brand)}
 .tab{padding:.45rem .6rem}.tabs{overflow-x:auto;scrollbar-width:none}
+.blocks.pick .blk{cursor:pointer;user-select:none}.blk.sel{outline:2px solid var(--yellow);outline-offset:1px}
