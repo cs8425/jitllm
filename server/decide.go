@@ -137,8 +137,8 @@ func (e *Engine) decideQueued(lm *LoadedModel) {
 	defer gs.release()
 	if lm.dec == nil {
 		d, err := lm.m.NewDecider(e.defaultMaxSeq(lm))
-		if err == nil && lm.dev != nil {
-			if err = d.SetDevice(lm.dev, lm.deviceBlocks()); err != nil {
+		if err == nil && lm.device() != nil {
+			if err = d.SetDevice(lm.device(), lm.deviceBlocks()); err != nil {
 				d.Close()
 			}
 		}

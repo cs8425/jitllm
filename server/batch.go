@@ -535,7 +535,7 @@ func (lp *stepLoop) admit() {
 		lp.renumber()
 	}
 	if page > 0 {
-		lp.lm.gpu.PromiseKV(promised)
+		lp.lm.gpuTier().PromiseKV(promised)
 	}
 }
 
@@ -579,7 +579,7 @@ func rowPages(r *row, pos, page int) int {
 // goes to the tier too (tier.GPU.PromiseKV), so a batched scratch built
 // after admission does not take the pages it was made on.
 func (lp *stepLoop) kvRoom() (room, page, promised int) {
-	g := lp.lm.gpu
+	g := lp.lm.gpuTier()
 	if g == nil {
 		return 0, 0, 0
 	}
@@ -611,7 +611,7 @@ func (r *row) started() {
 		QueueDepth:   r.depth,
 		DeviceBlocks: devBlocks,
 		HostBlocks:   lm.m.Cfg.NLayer - devBlocks,
-		DeviceIDs:    lm.deviceIDs,
+		DeviceIDs:    lm.devIDs(),
 		Prefill:      r.prefill,
 		Execution:    ExecutionParallel,
 		Batched:      true,
@@ -994,7 +994,7 @@ func (lp *stepLoop) stepJoint(units []unit) bool {
 		runs = append(runs, model.Run{State: u.r.s.st, Tokens: u.tokens, Logits: u.logits})
 		rows += len(u.tokens)
 	}
-	gpu := lp.lm.gpu
+	gpu := lp.lm.gpuTier()
 	if gpu == nil {
 		return lp.stepHost(units, runs, rows)
 	}

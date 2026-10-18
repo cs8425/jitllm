@@ -28,7 +28,7 @@ func TestLoadWithNoDevicesTakesEveryDevice(t *testing.T) {
 }
 
 // TestSelectorsResolveToTheOpenedDevices: "auto" becomes the ids of the devices
-// the tier opened, so a session on it can be relocated by id; explicit ids stay.
+// the tier opened, so a session on it can be relocated by id; an explicit id is the device it names.
 //
 // VIOLATION SIGNATURE. Return ids unchanged and the first case keeps "auto".
 func TestSelectorsResolveToTheOpenedDevices(t *testing.T) {
@@ -36,7 +36,7 @@ func TestSelectorsResolveToTheOpenedDevices(t *testing.T) {
 	if got := resolveDeviceIDs([]string{"auto"}, hw); !slices.Equal(got, []string{"cuda:0", "vulkan:1"}) {
 		t.Fatalf("auto -> %v", got)
 	}
-	if got := resolveDeviceIDs([]string{"cuda:0"}, hw); !slices.Equal(got, []string{"cuda:0"}) {
+	if got := resolveDeviceIDs([]string{"cuda:0"}, hw[:1]); !slices.Equal(got, []string{"cuda:0"}) {
 		t.Fatalf("explicit -> %v", got)
 	}
 }

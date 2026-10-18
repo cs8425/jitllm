@@ -964,8 +964,10 @@ func TestPlacementRefusesWhatAHostOnlySessionCannotDo(t *testing.T) {
 	if home.Msg.GetPlacement().GetDeviceBlockCount() != 0 {
 		t.Fatal("everything-home left a block on a device")
 	}
-	_, err = c.placement.SetPlacement(ctx, req(&v1.SetPlacementRequest{SessionId: "p", DeviceIds: []string{"cuda:0"}}))
-	wantCode(t, "SetPlacement onto a device for a host-only model", err, connect.CodeFailedPrecondition)
+	// A host-only model takes a device that exists (TestAHostLoadedModelRelocatesToADeviceAndBack);
+	// one that does not is a precondition the caller can change.
+	_, err = c.placement.SetPlacement(ctx, req(&v1.SetPlacementRequest{SessionId: "p", DeviceIds: []string{"nosuch:0"}}))
+	wantCode(t, "SetPlacement onto a device that does not exist", err, connect.CodeFailedPrecondition)
 
 	for _, tc := range []struct {
 		what string
@@ -980,7 +982,7 @@ func TestPlacementRefusesWhatAHostOnlySessionCannotDo(t *testing.T) {
 			connect.CodeInvalidArgument},
 		{"no destination", &v1.RelocateBlocksRequest{SessionId: "p", FirstBlock: 0, LastBlock: 1},
 			connect.CodeInvalidArgument},
-		{"a device for a host-only model", &v1.RelocateBlocksRequest{SessionId: "p", FirstBlock: 0, LastBlock: 1, ToDeviceId: "cuda:0"},
+		{"a device that does not exist", &v1.RelocateBlocksRequest{SessionId: "p", FirstBlock: 0, LastBlock: 1, ToDeviceId: "nosuch:0"},
 			connect.CodeFailedPrecondition},
 		// Nothing is on a device, so no range is the TAIL of the device set.
 		{"home, when nothing is away", &v1.RelocateBlocksRequest{SessionId: "p", FirstBlock: 0, LastBlock: 1, ToHost: true},
