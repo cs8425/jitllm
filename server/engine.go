@@ -1011,7 +1011,10 @@ type SessionOptions struct {
 	MaxSeq          int
 	DeviceIDs       []string
 	MaxDeviceBlocks int
-	Relocate        bool
+	// callerPlaced is a session whose request named its devices: like a
+	// positive MaxDeviceBlocks, a placement the orchestrator leaves alone.
+	callerPlaced bool
+	Relocate     bool
 	// KeepOffHost turns off what a State does by default when its context
 	// outgrows the device: hand a block to the host. A device choice that
 	// leaves the CPU out is kept, and the token takes the device's refusal.
@@ -1160,6 +1163,11 @@ func (e *Engine) CreateSession(o SessionOptions) (*Session, error) {
 		created:  time.Now(),
 		cached:   o.KVStore != nil,
 		spec:     o.Speculation,
+	}
+	// A session that states its own placement is the caller's: the
+	// orchestrator neither promotes nor demotes it (orchestrate.go).
+	if o.MaxDeviceBlocks > 0 || o.callerPlaced {
+		s.pinned.Store(true)
 	}
 	s.lastUsed.Store(time.Now().UnixMilli())
 	s.tier.Store(&tierBox{tierDev})
