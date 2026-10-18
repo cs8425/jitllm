@@ -2450,6 +2450,10 @@ func (e *Engine) applyPageBudget(lm *LoadedModel, newest *model.State) {
 		st.SetLimit(e.storeLimit(avail, st.Bytes()))
 		kv += st.Bytes()
 	}
+	if sh := lm.ttft.shared; sh != nil {
+		sh.Trim(e.storeLimit(avail, sh.Bytes()))
+		kv += sh.Bytes()
+	}
 	if kv < avail {
 		avail -= kv
 	} else {

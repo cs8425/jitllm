@@ -1894,3 +1894,87 @@ func TestPrefixCacheReusesASharedPrefix(t *testing.T) {
 	t.Logf("%d of %d shared positions reused at chunk %d; tokens identical to an "+
 		"uncached run", reused, len(shared), kvChunk)
 }
+
+// fillCountingStore is a MemStore that counts the SetFills it is offered, so a
+// test can say the shared-copy path ran.
+type fillCountingStore struct {
+	*MemStore
+	fills, keys int
+}
+
+func (c *fillCountingStore) SetFills(layer, index int, src []byte, keys []string, lens []int) error {
+	c.fills++
+	c.keys += len(keys)
+	return c.MemStore.SetFills(layer, index, src, keys, lens)
+}
+
+// TestMemStoreFillsServeASharedPrefix is TestPrefixCacheReusesASharedPrefix on
+// a MemStore, the store a server keeps: the partial last page goes in as fills
+// over one copy (SetFills), and a second prompt that shares part of it, and
+// the identical prompt again, restore from those fills with the tokens an
+// uncached run gives.
+func TestMemStoreFillsServeASharedPrefix(t *testing.T) {
+	path := jlmOf(t, testmodels.Path("tinyllama-1.1b-q3_K_M.gguf"))
+	m, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	const maxSeq, gen, page = 256, 10, 128
+	shared := make([]int32, 0, 40)
+	for i := 0; i < 40; i++ {
+		shared = append(shared, int32(300+i*7))
+	}
+	first := append(append([]int32{}, shared...), 611, 612, 613)
+	second := append(append([]int32{}, shared...), 907, 908, 909, 910, 911)
+
+	ms := NewMemStore()
+	defer ms.Close()
+	store := &fillCountingStore{MemStore: ms}
+	run := func(p []int32, cached bool) ([]int32, int) {
+		defer m.setKVPageForTest(page)()
+		s := m.NewState(maxSeq)
+		defer s.Close()
+		if cached {
+			s.SetKVStore(store)
+			mustKey(t, s, "fills/prefix")
+		}
+		lg, err := s.PrefillCached(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]int32, 0, gen)
+		for i := 0; i < gen; i++ {
+			id := int32(argmax(lg))
+			out = append(out, id)
+			if lg, err = s.Forward(id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return out, s.KVRestored()
+	}
+
+	wantSecond, _ := run(second, false)
+	wantFirst, _ := run(first, false)
+
+	if _, n := run(first, true); n != 0 {
+		t.Fatalf("the first pass restored %d positions from an empty store", n)
+	}
+	if store.fills == 0 || store.keys <= store.fills {
+		t.Fatalf("the partial page went to the store as %d SetFills call(s) of %d key(s): "+
+			"the shared-copy path did not run, or carried one fill", store.fills, store.keys)
+	}
+	got, reused := run(second, true)
+	if reused == 0 || reused > len(shared) {
+		t.Fatalf("a prompt sharing %d tokens restored %d positions from the fills", len(shared), reused)
+	}
+	sameTokens(t, "fills shared-prefix", wantSecond, got)
+	again, whole := run(first, true)
+	if whole == 0 {
+		t.Fatal("the identical prompt restored nothing from its exact-end fill")
+	}
+	sameTokens(t, "fills identical-prompt", wantFirst, again)
+	t.Logf("%d SetFills of %d keys; %d of %d shared positions and %d of %d identical-prompt positions restored; tokens identical",
+		store.fills, store.keys, reused, len(shared), whole, len(first))
+}
