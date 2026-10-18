@@ -211,14 +211,16 @@ function drawPlacement() {
   }
   const sentence = [...per.entries()].sort((a, b) => (a[0] === "host" ? 1 : 0) - (b[0] === "host" ? 1 : 0))
     .map(([k, e]) => `${e.n} on ${k === "host" ? hostName : k}`).join(", ");
-  // A session moves layers only between the devices its model was loaded on.
-  const gpus = live.devs.filter((d) => d.kind !== DeviceKind.HOST && d.available && !d.sameDeviceAs && live.sessDevs.includes(d.ref?.id ?? ""));
-  const anyGpu = live.devs.some((d) => d.kind !== DeviceKind.HOST && d.available);
+  // Any device the server has can take layers: a model's starting placement
+  // does not limit where its session can go. The default is the first card not
+  // sharing host memory.
+  const order = gpuIds();
+  const gpus = live.devs.filter(accelerator).sort((a, b) => (order.indexOf(a.ref?.id ?? "") + 1 || 99) - (order.indexOf(b.ref?.id ?? "") + 1 || 99));
   const target = gpus.find((d) => d.ref?.id === targetPick.id) ?? gpus[0];
   const nd = p.deviceBlockCount;
   const hostIdx = p.blocks.filter((b) => b.location !== BlockLocation.DEVICE).map((b) => b.index);
   const devIdx = p.blocks.filter((b) => b.location === BlockLocation.DEVICE).map((b) => b.index);
-  const no = target ? "" : !anyGpu ? "no GPU on this server" : "this model was loaded on the CPU only: unload it and load it on a graphics card";
+  const no = target ? "" : "no GPU on this server";
   const move = async (first: number, last: number, toHost: boolean, what: string) => {
     try {
       const r = await placement.relocateBlocks({ sessionId: placeSession, firstBlock: first, lastBlock: last, toHost, toDeviceId: toHost ? "" : target!.ref!.id });
