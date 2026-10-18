@@ -52,7 +52,7 @@ func (s *TelemetryService) snapshot(modelID, sessionID string) *v1.GetStatsRespo
 		out.Models = append(out.Models, &v1.ModelStats{
 			ModelId:         lm.id,
 			Residency:       pbResidency(lm),
-			Sessions:        int32(len(lm.sessions)),
+			Sessions:        int32(s.E.sessionCount(lm)),
 			TokensGenerated: lm.tokensGenerated.Load(),
 			TokensPrefilled: lm.tokensPrefilled.Load(),
 			Batch:           lm.loop.pb(),

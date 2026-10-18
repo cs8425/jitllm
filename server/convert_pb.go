@@ -163,9 +163,7 @@ func (e *Engine) pbModelInfo(lm *LoadedModel) *v1.ModelInfo {
 		pooling = lm.m.Pooling().String()
 	}
 
-	e.mu.RLock()
-	sessions := len(lm.sessions)
-	e.mu.RUnlock()
+	sessions := e.sessionCount(lm)
 
 	return &v1.ModelInfo{
 		ModelId:           lm.id,
@@ -400,3 +398,11 @@ func pbSampling(p *v1.SamplingParams) *model.Sampler {
 }
 
 func millis(d time.Duration) int64 { return d.Milliseconds() }
+
+// sessionCount is how many sessions lm has. The sessions map is written under
+// e.mu, so a reader on another goroutine (a stats snapshot) takes it too.
+func (e *Engine) sessionCount(lm *LoadedModel) int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(lm.sessions)
+}
