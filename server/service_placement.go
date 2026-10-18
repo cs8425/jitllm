@@ -128,6 +128,8 @@ func (s *PlacementService) RelocateBlocks(ctx context.Context, req *connect.Requ
 		return s.moveBetweenDevices(ctx, sess, first, last, m.ToDeviceId)
 	}
 
+	// The caller placed this session: the orchestrator leaves it alone.
+	sess.pinned.Store(true)
 	start := time.Now()
 	sess.mu.Lock()
 	var moved int

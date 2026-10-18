@@ -46,6 +46,11 @@ type Config struct {
 	// generate then runs alone on its gates.
 	MaxBatchRows int
 
+	// NoOrchestrate turns the orchestrator off (orchestrate.go): the server
+	// then moves no block on its own, and a session runs where the caller and
+	// the engine's own relocation leave it.
+	NoOrchestrate bool
+
 	// PromptChunk is how many prompt tokens the step loop feeds into one step
 	// beside the rows already decoding, which bounds how much admitting a
 	// prompt holds each of their tokens up. Zero takes a device prefill chunk
@@ -211,6 +216,8 @@ type Engine struct {
 	favored   string
 
 	preempt preemptStats
+	// orch is the orchestrator's record of the moves it made.
+	orch orchestrator
 
 	// devices is the hardware probe, taken once. See devices.go for why it is
 	// not re-taken on every list.
@@ -299,6 +306,8 @@ type LoadedModel struct {
 	gpu       *tier.GPU
 	closeDev  func()
 	deviceIDs []string
+	// callerPlaced is a model whose placement the load named (orchestrate.go).
+	callerPlaced bool
 	// hwIDs are the devices the tier opened, by their own ids, whatever the
 	// load called them (auto, gpu:0): what a new device is listed beside.
 	hwIDs []string
@@ -660,6 +669,10 @@ func (e *Engine) LoadModel(o LoadOptions) (*LoadedModel, error) {
 		open:      o,
 		maxBlocks: o.MaxDeviceBlocks,
 		sessions:  map[string]*Session{},
+		// A load that names the host alone, or caps the device blocks, is a
+		// placement the caller chose: the orchestrator leaves it (and its
+		// sessions) where it is.
+		callerPlaced: o.MaxDeviceBlocks >= 0 || len(o.DeviceIDs) == 1 && o.DeviceIDs[0] == "cpu",
 	}
 	if e.cfg.MaxBatchRows != 1 {
 		lm.loop = newStepLoop(e, lm)
@@ -974,6 +987,9 @@ type Session struct {
 	// as of the last snapshot (model.State.HistoryBytes).
 	priority atomic.Int32
 	parked   atomic.Bool
+	// pinned is a session the caller placed (RelocateBlocks, SetPlacement):
+	// the orchestrator neither promotes nor demotes it (orchestrate.go).
+	pinned   atomic.Bool
 	snapHist atomic.Uint64
 	// parkView is the memory cache view a parked session's pages are pinned
 	// in (park), released when it resumes. Guarded by mu.
@@ -1696,6 +1712,11 @@ func (e *Engine) Generate(ctx context.Context, o GenerateOptions, emit func(Even
 		}
 	}
 	if err := e.admitKV(s, npos+tokenLimit(o.MaxTokens, s.st.MaxSeq()-s.st.Pos()-npos)); err != nil {
+		return err
+	}
+	// A conversation that is talking runs on a card whenever one can hold
+	// it, idle ones giving way (orchestrate.go).
+	if err := e.promote(s); err != nil {
 		return err
 	}
 	spec := s.spec
@@ -2527,6 +2548,15 @@ func (e *Engine) bindSession(s *Session) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return e.bindSessionLocked(s)
+}
+
+// bindSessionLocked is bindSession for a caller holding s.mu.
+func (e *Engine) bindSessionLocked(s *Session) error {
+	dev := s.lm.device()
+	if b := s.tier.Load(); dev == nil || (b != nil && b.d == dev) {
+		return nil
+	}
 	prev := s.st.GPULayers()
 	if err := s.st.SetDeviceLayers(dev, 0); err != nil {
 		return fmt.Errorf("%w: %v", ErrPlacement, err)

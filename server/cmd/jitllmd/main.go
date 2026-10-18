@@ -166,6 +166,9 @@ func serve(args []string) {
 	gpuLayers := fs.Int("gpu-layers", -1, "blocks to place on a device for -load; -1 is as many as fit")
 	sessions := fs.Int("sessions", 1, "concurrent sessions each linear device block reserves a recurrent state for, for -load (attention history is paged)")
 	maxSeq := fs.Int("max-seq", 0, "default KV capacity per session, in positions (default: the model's context length)")
+	orchestrate := fs.Bool("orchestrate", true,
+		"move blocks between the host and the devices on the server's own initiative: a session that "+
+			"generates is promoted onto a card, idle ones demoted to make room (docs/design/orchestrator.md)")
 	maxBatch := fs.Int("max-batch", 0,
 		"generates of one model that decode as rows of one step. 0 is the engine's "+
 			"bound (the widest step across sessions); 1 turns batching off")
@@ -318,6 +321,7 @@ func serve(args []string) {
 		PromptStore:      store,
 		ModelDir:         *models,
 		MaxBatchRows:     *maxBatch,
+		NoOrchestrate:    !*orchestrate,
 		PromptChunk:      *promptChunk,
 		StepPromptTokens: *stepPrompt,
 		StepCost:         *stepCost,
