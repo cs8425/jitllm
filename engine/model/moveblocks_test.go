@@ -1,6 +1,7 @@
 package model
 
 import (
+	"github.com/jitllm/jitllm/jit/cpu"
 	"math"
 	"strings"
 	"testing"
@@ -225,4 +226,265 @@ func (s *State) moveAll(t *testing.T, from, to string, blocks []int) BlockMove {
 		all.Path, all.Head = mv.Path, all.Head || mv.Head
 	}
 	return all
+}
+
+// TestBlocksMoveToADeviceAddedLater: a tier opened on one card takes a second
+// mid-sequence (tier.GPU.AddDevices), the blocks move onto it and back with
+// their history, and the logits stay in the band of a run that never moved --
+// the plasticity a running model needs to reach a card it was not opened with,
+// without a second tier holding its weights twice.
+func TestBlocksMoveToADeviceAddedLater(t *testing.T) {
+	a, b := moveDevices(t)
+	g, err := tier.OpenWith(tier.WithDevices(a), tier.WithDeviceTune(tier.TuneOff))
+	if err != nil || g == nil {
+		noDevice(t, a, err)
+	}
+	defer g.Close()
+	m, err := Open(jlmOf(t, testmodels.Path("Llama-3.2-1B-Instruct-Q4_K_M.gguf")),
+		WithPlacement(Placement{Rest: &Place{On: a}, Head: &Place{On: a}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	const ntok, moveAt, backAt = 10, 3, 7
+	prompt := m.Vocab.Encode("The capital of France is a city that", true)
+	run := func(ids []int32, move bool) [][]float32 {
+		st := m.NewState(len(prompt) + ntok + 1)
+		defer st.Close()
+		if err := st.SetDevice(g); err != nil {
+			t.Fatal(err)
+		}
+		placed := st.placedOn(a)
+		if len(placed) == 0 {
+			t.Skipf("%s took no block: %s", a, g.Err())
+		}
+		lo, hi := placed[0], placed[len(placed)-1]+1
+		logits, err := st.Prefill(prompt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lg [][]float32
+		for i := 0; i < ntok; i++ {
+			lg = append(lg, append([]float32(nil), logits...))
+			next := Greedy(logits)
+			if ids != nil {
+				next = ids[i]
+			}
+			if move && i == moveAt {
+				added, err := g.AddDevices(b)
+				if err != nil || len(added) != 1 {
+					t.Fatalf("adding %s: %v %v", b, added, err)
+				}
+				if _, err := g.AddDevices(b); err == nil {
+					t.Fatalf("%s was added twice", b)
+				}
+			}
+			if move && (i == moveAt || i == backAt) {
+				to := b
+				if i == backAt {
+					to = a
+				}
+				mv, err := st.MoveBlocks(lo, hi, to)
+				if err != nil || len(mv.Moved) == 0 {
+					t.Fatalf("move to %s: %+v %v", to, mv, err)
+				}
+				if at, _ := st.DeviceOf(placed[0]); at != nn.DeviceName(to) {
+					t.Fatalf("block %d is on %q after a move to %s", placed[0], at, to)
+				}
+			}
+			if logits, err = st.Forward(next); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return lg
+	}
+	ctl := run(nil, false)
+	var ids []int32
+	for _, l := range ctl {
+		ids = append(ids, Greedy(l))
+	}
+	moved := run(ids, true)
+	for i := range ctl {
+		var worst float64
+		for j, v := range ctl[i] {
+			worst = max(worst, math.Abs(float64(v-moved[i][j])))
+		}
+		switch {
+		case math.IsNaN(worst):
+			t.Fatalf("token %d: a non-finite logit", i)
+		case i <= moveAt && worst != 0:
+			t.Fatalf("token %d is before any move and differs by %g", i, worst)
+		case worst > 2.5:
+			t.Fatalf("token %d: %g from the control, outside the band", i, worst)
+		}
+	}
+}
+
+// TestABinary16HistoryMovesToTheDevice: a session that built its history on
+// the host in the f16 cache moves onto a device and back mid-sequence -- its
+// rows widened on the way up and narrowed home (migrateKVAs) -- and the logits
+// stay in the band of a host run that never moved. A host-loaded model need not
+// give up the f16 cache to keep its plasticity.
+func TestABinary16HistoryMovesToTheDevice(t *testing.T) {
+	a, _ := moveDevices(t)
+	g, err := tier.OpenWith(tier.WithDevices(a), tier.WithDeviceTune(tier.TuneOff))
+	if err != nil || g == nil {
+		noDevice(t, a, err)
+	}
+	defer g.Close()
+	m, err := Open(jlmOf(t, testmodels.Path("Llama-3.2-1B-Instruct-Q4_K_M.gguf")), WithKVF16(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	const ntok, upAt, homeAt = 10, 3, 7
+	prompt := m.Vocab.Encode("The capital of France is a city that", true)
+	run := func(ids []int32, move bool) [][]float32 {
+		st := m.NewState(len(prompt) + ntok + 1)
+		defer st.Close()
+		if st.kvFmt != cpu.KVF16 {
+			t.Skipf("the host cache is %v, not binary16: this gate proved nothing", st.kvFmt)
+		}
+		logits, err := st.Prefill(prompt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lg [][]float32
+		for i := 0; i < ntok; i++ {
+			lg = append(lg, append([]float32(nil), logits...))
+			next := Greedy(logits)
+			if ids != nil {
+				next = ids[i]
+			}
+			if move && i == upAt {
+				if err := st.SetDevice(g); err != nil {
+					t.Fatalf("a binary16 history with %d positions could not attach: %v", st.pos, err)
+				}
+				if st.SetGPULayers(m.Cfg.NLayer); st.GPULayers() == 0 {
+					t.Skipf("%s took no block: %s", a, g.Err())
+				}
+			}
+			if move && i == homeAt {
+				if st.SetGPULayers(0); st.GPULayers() != 0 {
+					t.Fatalf("%d blocks stayed on the device", st.GPULayers())
+				}
+			}
+			if logits, err = st.Forward(next); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return lg
+	}
+	ctl := run(nil, false)
+	var ids []int32
+	for _, l := range ctl {
+		ids = append(ids, Greedy(l))
+	}
+	moved := run(ids, true)
+	for i := range ctl {
+		var worst float64
+		for j, v := range ctl[i] {
+			worst = max(worst, math.Abs(float64(v-moved[i][j])))
+		}
+		switch {
+		case math.IsNaN(worst):
+			t.Fatalf("token %d: a non-finite logit", i)
+		case i <= upAt && worst != 0:
+			t.Fatalf("token %d is before the move and differs by %g", i, worst)
+		case worst > 2.5:
+			t.Fatalf("token %d: %g from the host control, outside the band", i, worst)
+		}
+	}
+}
+
+// TestAnyRangeMovesWithItsHistory: placement is a set. A middle range of
+// blocks goes to the device mid-sequence (PlaceBlocks), part of it comes home
+// leaving a hole between two device runs (ReleaseBlocks), the rest after it,
+// and every token stays in the band of a host run that never moved.
+func TestAnyRangeMovesWithItsHistory(t *testing.T) {
+	a, _ := moveDevices(t)
+	g, err := tier.OpenWith(tier.WithDevices(a), tier.WithDeviceTune(tier.TuneOff))
+	if err != nil || g == nil {
+		noDevice(t, a, err)
+	}
+	defer g.Close()
+	m, err := Open(jlmOf(t, testmodels.Path("Llama-3.2-1B-Instruct-Q4_K_M.gguf")), WithKVF16(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	n := m.Cfg.NLayer
+	const ntok, placeAt, holeAt, homeAt = 12, 3, 6, 9
+	prompt := m.Vocab.Encode("The capital of France is a city that", true)
+	run := func(ids []int32, move bool) [][]float32 {
+		st := m.NewState(len(prompt) + ntok + 1)
+		defer st.Close()
+		if move {
+			if err := st.SetDevice(g); err != nil {
+				t.Fatal(err)
+			}
+			st.SetGPULayers(0)
+		}
+		logits, err := st.Prefill(prompt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lg [][]float32
+		for i := 0; i < ntok; i++ {
+			lg = append(lg, append([]float32(nil), logits...))
+			next := Greedy(logits)
+			if ids != nil {
+				next = ids[i]
+			}
+			switch {
+			case move && i == placeAt:
+				got, err := st.PlaceBlocks(n/4, 3*n/4)
+				if err != nil || got != n/2 {
+					t.Fatalf("placed %d of blocks %d..%d: %v (%s)", got, n/4, 3*n/4-1, err, g.Err())
+				}
+				if st.devAt(0) || st.devAt(n-1) || !st.devAt(n/4) {
+					t.Fatalf("the placement is not the range asked")
+				}
+			case move && i == holeAt:
+				got, err := st.ReleaseBlocks(n/4+1, n/4+3)
+				if err != nil || got != 2 {
+					t.Fatalf("released %d: %v", got, err)
+				}
+				if !st.devAt(n/4) || st.devAt(n/4+1) || !st.devAt(n/4+3) {
+					t.Fatalf("no hole between two device runs")
+				}
+			case move && i == homeAt:
+				if _, err := st.ReleaseBlocks(0, n); err != nil {
+					t.Fatal(err)
+				}
+				if st.devCount() != 0 {
+					t.Fatalf("%d blocks stayed on the device", st.devCount())
+				}
+			}
+			if logits, err = st.Forward(next); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return lg
+	}
+	ctl := run(nil, false)
+	var ids []int32
+	for _, l := range ctl {
+		ids = append(ids, Greedy(l))
+	}
+	moved := run(ids, true)
+	for i := range ctl {
+		var worst float64
+		for j, v := range ctl[i] {
+			worst = max(worst, math.Abs(float64(v-moved[i][j])))
+		}
+		switch {
+		case math.IsNaN(worst):
+			t.Fatalf("token %d: a non-finite logit", i)
+		case i <= placeAt && worst != 0:
+			t.Fatalf("token %d is before the move and differs by %g", i, worst)
+		case worst > 2.5:
+			t.Fatalf("token %d: %g from the host control, outside the band", i, worst)
+		}
+	}
 }
