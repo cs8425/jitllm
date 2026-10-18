@@ -36,11 +36,19 @@ model holds it there (the tier's rule). It never demotes a running session,
 and it stops when the promotion fits or no victim is left: then the session
 runs where it is, as before (nothing is refused).
 
-**Leave alone.** A session the caller placed explicitly (RelocateBlocks,
-SetPlacement, or a load's `max_device_blocks`) is pinned: the orchestrator
-neither promotes nor demotes it until the caller releases the pin
-(`SetPlacement` with orchestrated placement). The engine's own per-session
-relocation on a full card (SetRelocation) keeps working underneath.
+**Leave alone.** A placement the caller chose is pinned: the orchestrator
+neither promotes nor demotes it. A session is pinned by RelocateBlocks or
+SetPlacement (before anything moves, a move between devices included), and
+at creation by a positive `max_device_blocks` or named devices. A model is
+left alone when its load named the host alone or capped its device blocks.
+`Session.Unpin` hands a session back. The engine's own per-session relocation
+on a full card (SetRelocation) keeps working underneath.
+
+**One budget per card.** A server holds a tier per model, and each tier used
+to size its own pool for a card from what was free when it opened, so the room
+one model gave back stayed out of another's reach. Every tier the engine opens
+takes its cards' pools from one `tier.PoolRegistry`, keyed by the card's
+identity: a card's memory is spent once across models.
 
 **Visible.** Every orchestrated move is recorded -- session, model, blocks,
 from, to, why ("promote: generating", "make room for s-…"), how long it took
@@ -54,14 +62,20 @@ Defaults on: the server reaches the best placement without user tuning.
 
 ## Gates
 
-- A session demoted to make room and promoted back produces the same greedy
-  tokens as one that never moved (and its KV is not recomputed: cached tokens
-  carried).
-- Two models on one card that cannot hold both: the one generating gets the
-  card, alternately, every turn; no refusal, no recomputed prompt.
-- A pinned session is never moved; `-orchestrate=false` moves nothing.
-- No leaks across many promote/demote cycles (device ledger and host frames
-  back to baseline), and the five principles' gates with it on.
+- `TestTheTalkingModelGetsTheCard`: two models on 1200 MiB of one card. The
+  model generating gets the card every turn and the idle one goes home (9
+  promotions and 5 demotions over three turns on a V100), each turn's first
+  token the unmoved controls' (host and card). The stats carry the same
+  counts. Without the registry both models fit their own budget, nothing
+  moves, and the gate fails.
+- `TestAPinnedSessionIsNotMoved`: a pinned session keeps its blocks while
+  another model talks; with the orchestrator off nothing moves.
+- `TestBatchASessionNotWhollyOnTheDeviceRunsAlone`: a session held to two
+  device blocks stays at two.
+- `tier.TestTwoModelsShareACardThroughTheRegistry` (engine/model): the
+  second model takes the room the first gives back.
+- The engine's gates hold a moved history to the unmoved one exactly
+  (`TestAnyRangeMovesWithItsHistory`, `TestABinary16HistoryMovesToTheDevice`).
 
 ## Later (v2)
 
