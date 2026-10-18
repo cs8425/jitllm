@@ -159,7 +159,7 @@ func serve(args []string) {
 		"load a model of -models a request names (by file name or alias) that is not loaded, unless it is disabled; "+
 			"it takes -devices (default auto), -gpu-layers and -sessions")
 	devices := fs.String("devices", "",
-		"devices for -load: auto|all|cpu|gpu[:N]|(cuda|vulkan|metal)[:DEVICE][=BYTES], comma-separated; "+
+		"devices for -load: auto (the default: every device, as many blocks as fit)|all|cpu (the host alone)|gpu[:N]|(cuda|vulkan|metal)[:DEVICE][=BYTES], comma-separated; "+
 			"a bare gpu, cuda or vulkan is every such device, a :DEVICE selector pins one")
 	maxmem := fs.String("maxmem", "",
 		"page budget for -load, e.g. 8G (default: the engine's own budget)")
@@ -349,6 +349,7 @@ func serve(args []string) {
 			MaxDeviceBlocks: *gpuLayers,
 			Sessions:        *sessions,
 		}
+		o.DeviceIDs = server.DefaultDevices(nil)
 		if *devices != "" {
 			o.DeviceIDs = strings.Split(*devices, ",")
 		}

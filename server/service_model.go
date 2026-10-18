@@ -182,7 +182,7 @@ func (s *ModelService) LoadModel(ctx context.Context, req *connect.Request[v1.Lo
 		Path:            m.Path,
 		ModelID:         m.ModelId,
 		PageBudgetBytes: m.PageBudgetBytes,
-		DeviceIDs:       m.DeviceIds,
+		DeviceIDs:       DefaultDevices(m.DeviceIds),
 		MaxDeviceBlocks: -1,
 	}
 	if m.MaxDeviceBlocks != nil {

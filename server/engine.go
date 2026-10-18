@@ -580,7 +580,7 @@ func (e *Engine) LoadModel(o LoadOptions) (*LoadedModel, error) {
 				}
 			} else {
 				dev, gpu, closeDev = g, g, g.Close
-				devIDs = normaliseDeviceIDs(o.DeviceIDs)
+				devIDs = resolveDeviceIDs(normaliseDeviceIDs(o.DeviceIDs), g.Hardware())
 				gateKeys = e.deviceGateKeys(g)
 			}
 		}
@@ -653,6 +653,34 @@ func (e *Engine) LoadModel(o LoadOptions) (*LoadedModel, error) {
 		}
 	}
 	return lm, nil
+}
+
+// DefaultDevices is the placement a load takes when the caller names none:
+// every available device, as many blocks as fit, and the host when the machine
+// has no device. The host alone is asked for by name, as ["cpu"].
+func DefaultDevices(ids []string) []string {
+	if len(ids) == 0 {
+		return []string{"auto"}
+	}
+	return ids
+}
+
+// resolveDeviceIDs names the devices a tier opened when the caller gave a
+// selector (auto, all, gpu, a bare backend) instead of device ids, so a session
+// of the model can be moved between them by id.
+func resolveDeviceIDs(ids []string, hw []tier.Hardware) []string {
+	selector := false
+	for _, id := range ids {
+		selector = selector || !strings.Contains(id, ":")
+	}
+	if !selector || len(hw) == 0 {
+		return ids
+	}
+	out := make([]string, 0, len(hw))
+	for _, h := range hw {
+		out = append(out, h.Ref)
+	}
+	return out
 }
 
 // normaliseDeviceIDs drops the specs that name no device, so gateIDs does not
