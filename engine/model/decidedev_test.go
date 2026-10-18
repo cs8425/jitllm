@@ -228,9 +228,9 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 				probe.Close()
 				ran++
 				t.Run(spec, func(t *testing.T) {
-					open := func() *tier.GPU {
-						g, err := tier.OpenWith(append([]tier.Option{tier.WithDevices(spec),
-							tier.WithDeviceTune(tier.TuneOff)}, testTierOpts(t)...)...)
+					open := func(extra ...tier.Option) *tier.GPU {
+						g, err := tier.OpenWith(append(append([]tier.Option{tier.WithDevices(spec),
+							tier.WithDeviceTune(tier.TuneOff)}, testTierOpts(t)...), extra...)...)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -254,7 +254,18 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 						}
 					})
 					t.Run("every-block", func(t *testing.T) {
-						g := open()
+						// The arm asks for every block AND the head. A unified
+						// device's default budget is a carve-out of the host's
+						// RAM (a choice of the tier, not the machine's limit), and
+						// on a 16 GB host it sits below a 9.7 GB model plus its
+						// head, so the arm states the budget it needs: the weights,
+						// an eighth over for the head (a decision head is held as
+						// f32) and a gigabyte of slack. A machine that really lacks
+						// that much memory still skips, naming the bytes.
+						need := m.WeightBytes()
+						need += need/8 + 1<<30
+						g := open(tier.WithBudget(need), tier.WithHostBudget(need))
+						t.Logf("every-block budget %d bytes", need)
 						defer g.Close()
 						all := func(n int) bool { return n == nb }
 						got, placed, why, picked := decideOn(t, m, g, -1, all)
@@ -273,7 +284,7 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 							// the same rows through the host's head answer within
 							// the band.
 							if picked != len(decisionRequests) {
-								cardTooSmall(t, g.Err(), "Clef's head ran on %s for %d of %d requests", spec, picked, len(decisionRequests))
+								cardTooSmall(t, g.Err(), "Clef's head ran on %s for %d of %d requests (budget %d)", spec, picked, len(decisionRequests), need)
 							}
 							home, _, _, hp := decideOn(t, m, g, -1, all, "host-head")
 							if hp != 0 {
@@ -288,7 +299,7 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 							// The head ran on the device for every question
 							// (a decline is an error, not a host run).
 							if picked == 0 {
-								cardTooSmall(t, g.Err(), "Kev's head never ran on %s", spec)
+								cardTooSmall(t, g.Err(), "Kev's head never ran on %s (budget %d)", spec, need)
 							}
 						} else if !m.IsEncoder() {
 							// The labels' logits were picked on the device, and
