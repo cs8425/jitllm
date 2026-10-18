@@ -201,6 +201,21 @@ function placementTab(force: boolean) {
 
 const hostName = "the CPU";
 
+// serverMoves is what the server moved on its own initiative: a conversation
+// that is talking promoted onto a card, idle ones moved home to make room.
+function serverMoves(): HTMLElement {
+  const o = live.stats?.orchestrator;
+  if (!o) return card("Server moves", h("p", { class: "dim small", text: "Waiting for the server's stats…" }));
+  if (!o.enabled) return card("Server moves", h("p", { class: "dim small", text: "Off: the server moves no layer on its own (jitllmd -orchestrate=false)." }));
+  const rows = [...o.moves].reverse().slice(0, 8).map((m) =>
+    h("div", { class: "kv" },
+      h("span", { class: "dim small", text: new Date(Number(m.unixMillis)).toLocaleTimeString() }),
+      h("span", { class: "small", text: `${m.blocks} layer(s) of ${m.modelId} (${m.sessionId}) to ${m.to === "host" ? "CPU" : "GPU"} · ${m.why} · ${m.millis.toFixed(0)} ms` })));
+  return card("Server moves",
+    h("p", { class: "dim small", text: `The server puts a conversation that is replying on a card, moving idle ones to the CPU to make room. ${o.promotions} promotion(s), ${o.demotions} demotion(s); ${o.blocksUp} layer(s) up, ${o.blocksHome} home.` }),
+    rows.length ? h("div", { class: "kvs" }, ...rows) : h("p", { class: "dim small", text: "No moves yet." }));
+}
+
 function drawPlacement() {
   const p = live.place;
   const id = viewModel();
@@ -284,7 +299,8 @@ function drawPlacement() {
         btn("All on CPU", nd > 0, "run every layer on the CPU", () => move(0, nb - 1, true, "all to CPU"))),
       no ? h("p", { class: "dim small", text: no }) : null,
       lastMove ? h("p", { class: "small", text: lastMove }) : null,
-      h("p", { class: "dim small", text: "Moves apply to this conversation's own session; its history moves with the layers." })));
+      h("p", { class: "dim small", text: "Moves apply to this conversation's own session; its history moves with the layers. A layer you move stays where you put it: the server no longer moves this session on its own." })),
+    serverMoves());
   placeBox.replaceChildren(...kids.filter((k) => k));
 }
 

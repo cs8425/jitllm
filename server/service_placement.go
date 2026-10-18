@@ -59,6 +59,8 @@ func (s *PlacementService) SetPlacement(ctx context.Context, req *connect.Reques
 	if err := s.reach(sess, want...); err != nil {
 		return nil, err
 	}
+	// The caller placed this session: the orchestrator leaves it alone.
+	sess.pinned.Store(true)
 
 	start := time.Now()
 	sess.mu.Lock()
@@ -124,6 +126,8 @@ func (s *PlacementService) RelocateBlocks(ctx context.Context, req *connect.Requ
 			return nil, err
 		}
 	}
+	// The caller placed this session: the orchestrator leaves it alone.
+	sess.pinned.Store(true)
 	if m.ToDeviceId != "" && sess.onDevices(first, last) {
 		return s.moveBetweenDevices(ctx, sess, first, last, m.ToDeviceId)
 	}

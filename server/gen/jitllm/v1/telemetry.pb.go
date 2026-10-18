@@ -865,12 +865,15 @@ func (x *GetStatsRequest) GetSessionId() string {
 }
 
 type GetStatsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	UnixMillis    int64                  `protobuf:"varint,1,opt,name=unix_millis,json=unixMillis,proto3" json:"unix_millis,omitempty"`
-	Models        []*ModelStats          `protobuf:"bytes,2,rep,name=models,proto3" json:"models,omitempty"`
-	Sessions      []*SessionStats        `protobuf:"bytes,3,rep,name=sessions,proto3" json:"sessions,omitempty"`
-	Devices       []*Device              `protobuf:"bytes,4,rep,name=devices,proto3" json:"devices,omitempty"`
-	Host          *HostMemory            `protobuf:"bytes,5,opt,name=host,proto3" json:"host,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	UnixMillis int64                  `protobuf:"varint,1,opt,name=unix_millis,json=unixMillis,proto3" json:"unix_millis,omitempty"`
+	Models     []*ModelStats          `protobuf:"bytes,2,rep,name=models,proto3" json:"models,omitempty"`
+	Sessions   []*SessionStats        `protobuf:"bytes,3,rep,name=sessions,proto3" json:"sessions,omitempty"`
+	Devices    []*Device              `protobuf:"bytes,4,rep,name=devices,proto3" json:"devices,omitempty"`
+	Host       *HostMemory            `protobuf:"bytes,5,opt,name=host,proto3" json:"host,omitempty"`
+	// What the orchestrator (docs/design/orchestrator.md) has done: its
+	// counters, and its most recent moves, oldest first.
+	Orchestrator  *OrchestratorStats `protobuf:"bytes,6,opt,name=orchestrator,proto3" json:"orchestrator,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -940,6 +943,195 @@ func (x *GetStatsResponse) GetHost() *HostMemory {
 	return nil
 }
 
+func (x *GetStatsResponse) GetOrchestrator() *OrchestratorStats {
+	if x != nil {
+		return x.Orchestrator
+	}
+	return nil
+}
+
+// OrchestratorStats is the server moving blocks on its own initiative: a
+// session that generates promoted onto the cards, idle ones demoted home to
+// make room.
+type OrchestratorStats struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Enabled       bool                   `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	Promotions    int64                  `protobuf:"varint,2,opt,name=promotions,proto3" json:"promotions,omitempty"`
+	Demotions     int64                  `protobuf:"varint,3,opt,name=demotions,proto3" json:"demotions,omitempty"`
+	BlocksUp      int64                  `protobuf:"varint,4,opt,name=blocks_up,json=blocksUp,proto3" json:"blocks_up,omitempty"`
+	BlocksHome    int64                  `protobuf:"varint,5,opt,name=blocks_home,json=blocksHome,proto3" json:"blocks_home,omitempty"`
+	Moves         []*OrchestratorMove    `protobuf:"bytes,6,rep,name=moves,proto3" json:"moves,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OrchestratorStats) Reset() {
+	*x = OrchestratorStats{}
+	mi := &file_jitllm_v1_telemetry_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OrchestratorStats) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OrchestratorStats) ProtoMessage() {}
+
+func (x *OrchestratorStats) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_telemetry_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OrchestratorStats.ProtoReflect.Descriptor instead.
+func (*OrchestratorStats) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_telemetry_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *OrchestratorStats) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *OrchestratorStats) GetPromotions() int64 {
+	if x != nil {
+		return x.Promotions
+	}
+	return 0
+}
+
+func (x *OrchestratorStats) GetDemotions() int64 {
+	if x != nil {
+		return x.Demotions
+	}
+	return 0
+}
+
+func (x *OrchestratorStats) GetBlocksUp() int64 {
+	if x != nil {
+		return x.BlocksUp
+	}
+	return 0
+}
+
+func (x *OrchestratorStats) GetBlocksHome() int64 {
+	if x != nil {
+		return x.BlocksHome
+	}
+	return 0
+}
+
+func (x *OrchestratorStats) GetMoves() []*OrchestratorMove {
+	if x != nil {
+		return x.Moves
+	}
+	return nil
+}
+
+// OrchestratorMove is one move the orchestrator made.
+type OrchestratorMove struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	UnixMillis int64                  `protobuf:"varint,1,opt,name=unix_millis,json=unixMillis,proto3" json:"unix_millis,omitempty"`
+	SessionId  string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	ModelId    string                 `protobuf:"bytes,3,opt,name=model_id,json=modelId,proto3" json:"model_id,omitempty"`
+	Blocks     int32                  `protobuf:"varint,4,opt,name=blocks,proto3" json:"blocks,omitempty"`
+	// "device" or "host".
+	To string `protobuf:"bytes,5,opt,name=to,proto3" json:"to,omitempty"`
+	// Why, in words: "promote: generating", "make room for <session>".
+	Why           string  `protobuf:"bytes,6,opt,name=why,proto3" json:"why,omitempty"`
+	Millis        float64 `protobuf:"fixed64,7,opt,name=millis,proto3" json:"millis,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OrchestratorMove) Reset() {
+	*x = OrchestratorMove{}
+	mi := &file_jitllm_v1_telemetry_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OrchestratorMove) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OrchestratorMove) ProtoMessage() {}
+
+func (x *OrchestratorMove) ProtoReflect() protoreflect.Message {
+	mi := &file_jitllm_v1_telemetry_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OrchestratorMove.ProtoReflect.Descriptor instead.
+func (*OrchestratorMove) Descriptor() ([]byte, []int) {
+	return file_jitllm_v1_telemetry_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *OrchestratorMove) GetUnixMillis() int64 {
+	if x != nil {
+		return x.UnixMillis
+	}
+	return 0
+}
+
+func (x *OrchestratorMove) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *OrchestratorMove) GetModelId() string {
+	if x != nil {
+		return x.ModelId
+	}
+	return ""
+}
+
+func (x *OrchestratorMove) GetBlocks() int32 {
+	if x != nil {
+		return x.Blocks
+	}
+	return 0
+}
+
+func (x *OrchestratorMove) GetTo() string {
+	if x != nil {
+		return x.To
+	}
+	return ""
+}
+
+func (x *OrchestratorMove) GetWhy() string {
+	if x != nil {
+		return x.Why
+	}
+	return ""
+}
+
+func (x *OrchestratorMove) GetMillis() float64 {
+	if x != nil {
+		return x.Millis
+	}
+	return 0
+}
+
 type WatchStatsRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	ModelId   string                 `protobuf:"bytes,1,opt,name=model_id,json=modelId,proto3" json:"model_id,omitempty"`
@@ -952,7 +1144,7 @@ type WatchStatsRequest struct {
 
 func (x *WatchStatsRequest) Reset() {
 	*x = WatchStatsRequest{}
-	mi := &file_jitllm_v1_telemetry_proto_msgTypes[9]
+	mi := &file_jitllm_v1_telemetry_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -964,7 +1156,7 @@ func (x *WatchStatsRequest) String() string {
 func (*WatchStatsRequest) ProtoMessage() {}
 
 func (x *WatchStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_telemetry_proto_msgTypes[9]
+	mi := &file_jitllm_v1_telemetry_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -977,7 +1169,7 @@ func (x *WatchStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchStatsRequest.ProtoReflect.Descriptor instead.
 func (*WatchStatsRequest) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_telemetry_proto_rawDescGZIP(), []int{9}
+	return file_jitllm_v1_telemetry_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *WatchStatsRequest) GetModelId() string {
@@ -1009,7 +1201,7 @@ type GetServerInfoRequest struct {
 
 func (x *GetServerInfoRequest) Reset() {
 	*x = GetServerInfoRequest{}
-	mi := &file_jitllm_v1_telemetry_proto_msgTypes[10]
+	mi := &file_jitllm_v1_telemetry_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1021,7 +1213,7 @@ func (x *GetServerInfoRequest) String() string {
 func (*GetServerInfoRequest) ProtoMessage() {}
 
 func (x *GetServerInfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_telemetry_proto_msgTypes[10]
+	mi := &file_jitllm_v1_telemetry_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1034,7 +1226,7 @@ func (x *GetServerInfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServerInfoRequest.ProtoReflect.Descriptor instead.
 func (*GetServerInfoRequest) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_telemetry_proto_rawDescGZIP(), []int{10}
+	return file_jitllm_v1_telemetry_proto_rawDescGZIP(), []int{12}
 }
 
 type GetServerInfoResponse struct {
@@ -1046,7 +1238,7 @@ type GetServerInfoResponse struct {
 
 func (x *GetServerInfoResponse) Reset() {
 	*x = GetServerInfoResponse{}
-	mi := &file_jitllm_v1_telemetry_proto_msgTypes[11]
+	mi := &file_jitllm_v1_telemetry_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1058,7 +1250,7 @@ func (x *GetServerInfoResponse) String() string {
 func (*GetServerInfoResponse) ProtoMessage() {}
 
 func (x *GetServerInfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_jitllm_v1_telemetry_proto_msgTypes[11]
+	mi := &file_jitllm_v1_telemetry_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1071,7 +1263,7 @@ func (x *GetServerInfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetServerInfoResponse.ProtoReflect.Descriptor instead.
 func (*GetServerInfoResponse) Descriptor() ([]byte, []int) {
-	return file_jitllm_v1_telemetry_proto_rawDescGZIP(), []int{11}
+	return file_jitllm_v1_telemetry_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetServerInfoResponse) GetInfo() *ServerInfo {
@@ -1170,14 +1362,35 @@ const file_jitllm_v1_telemetry_proto_rawDesc = "" +
 	"\x0fGetStatsRequest\x12\x19\n" +
 	"\bmodel_id\x18\x01 \x01(\tR\amodelId\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x02 \x01(\tR\tsessionId\"\xef\x01\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\"\xb1\x02\n" +
 	"\x10GetStatsResponse\x12\x1f\n" +
 	"\vunix_millis\x18\x01 \x01(\x03R\n" +
 	"unixMillis\x12-\n" +
 	"\x06models\x18\x02 \x03(\v2\x15.jitllm.v1.ModelStatsR\x06models\x123\n" +
 	"\bsessions\x18\x03 \x03(\v2\x17.jitllm.v1.SessionStatsR\bsessions\x12+\n" +
 	"\adevices\x18\x04 \x03(\v2\x11.jitllm.v1.DeviceR\adevices\x12)\n" +
-	"\x04host\x18\x05 \x01(\v2\x15.jitllm.v1.HostMemoryR\x04host\"v\n" +
+	"\x04host\x18\x05 \x01(\v2\x15.jitllm.v1.HostMemoryR\x04host\x12@\n" +
+	"\forchestrator\x18\x06 \x01(\v2\x1c.jitllm.v1.OrchestratorStatsR\forchestrator\"\xdc\x01\n" +
+	"\x11OrchestratorStats\x12\x18\n" +
+	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x1e\n" +
+	"\n" +
+	"promotions\x18\x02 \x01(\x03R\n" +
+	"promotions\x12\x1c\n" +
+	"\tdemotions\x18\x03 \x01(\x03R\tdemotions\x12\x1b\n" +
+	"\tblocks_up\x18\x04 \x01(\x03R\bblocksUp\x12\x1f\n" +
+	"\vblocks_home\x18\x05 \x01(\x03R\n" +
+	"blocksHome\x121\n" +
+	"\x05moves\x18\x06 \x03(\v2\x1b.jitllm.v1.OrchestratorMoveR\x05moves\"\xbf\x01\n" +
+	"\x10OrchestratorMove\x12\x1f\n" +
+	"\vunix_millis\x18\x01 \x01(\x03R\n" +
+	"unixMillis\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\x12\x19\n" +
+	"\bmodel_id\x18\x03 \x01(\tR\amodelId\x12\x16\n" +
+	"\x06blocks\x18\x04 \x01(\x05R\x06blocks\x12\x0e\n" +
+	"\x02to\x18\x05 \x01(\tR\x02to\x12\x10\n" +
+	"\x03why\x18\x06 \x01(\tR\x03why\x12\x16\n" +
+	"\x06millis\x18\a \x01(\x01R\x06millis\"v\n" +
 	"\x11WatchStatsRequest\x12\x19\n" +
 	"\bmodel_id\x18\x01 \x01(\tR\amodelId\x12\x1d\n" +
 	"\n" +
@@ -1206,7 +1419,7 @@ func file_jitllm_v1_telemetry_proto_rawDescGZIP() []byte {
 	return file_jitllm_v1_telemetry_proto_rawDescData
 }
 
-var file_jitllm_v1_telemetry_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_jitllm_v1_telemetry_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_jitllm_v1_telemetry_proto_goTypes = []any{
 	(*ServerInfo)(nil),            // 0: jitllm.v1.ServerInfo
 	(*PoolStats)(nil),             // 1: jitllm.v1.PoolStats
@@ -1217,36 +1430,40 @@ var file_jitllm_v1_telemetry_proto_goTypes = []any{
 	(*SessionStats)(nil),          // 6: jitllm.v1.SessionStats
 	(*GetStatsRequest)(nil),       // 7: jitllm.v1.GetStatsRequest
 	(*GetStatsResponse)(nil),      // 8: jitllm.v1.GetStatsResponse
-	(*WatchStatsRequest)(nil),     // 9: jitllm.v1.WatchStatsRequest
-	(*GetServerInfoRequest)(nil),  // 10: jitllm.v1.GetServerInfoRequest
-	(*GetServerInfoResponse)(nil), // 11: jitllm.v1.GetServerInfoResponse
-	(*Device)(nil),                // 12: jitllm.v1.Device
-	(*Residency)(nil),             // 13: jitllm.v1.Residency
-	(*HostMemory)(nil),            // 14: jitllm.v1.HostMemory
+	(*OrchestratorStats)(nil),     // 9: jitllm.v1.OrchestratorStats
+	(*OrchestratorMove)(nil),      // 10: jitllm.v1.OrchestratorMove
+	(*WatchStatsRequest)(nil),     // 11: jitllm.v1.WatchStatsRequest
+	(*GetServerInfoRequest)(nil),  // 12: jitllm.v1.GetServerInfoRequest
+	(*GetServerInfoResponse)(nil), // 13: jitllm.v1.GetServerInfoResponse
+	(*Device)(nil),                // 14: jitllm.v1.Device
+	(*Residency)(nil),             // 15: jitllm.v1.Residency
+	(*HostMemory)(nil),            // 16: jitllm.v1.HostMemory
 }
 var file_jitllm_v1_telemetry_proto_depIdxs = []int32{
-	12, // 0: jitllm.v1.ServerInfo.devices:type_name -> jitllm.v1.Device
-	13, // 1: jitllm.v1.ModelStats.residency:type_name -> jitllm.v1.Residency
+	14, // 0: jitllm.v1.ServerInfo.devices:type_name -> jitllm.v1.Device
+	15, // 1: jitllm.v1.ModelStats.residency:type_name -> jitllm.v1.Residency
 	4,  // 2: jitllm.v1.ModelStats.batch:type_name -> jitllm.v1.BatchStats
 	5,  // 3: jitllm.v1.BatchStats.choices:type_name -> jitllm.v1.JointChoice
 	1,  // 4: jitllm.v1.SessionStats.pool:type_name -> jitllm.v1.PoolStats
 	2,  // 5: jitllm.v1.SessionStats.mixture:type_name -> jitllm.v1.MixtureStats
 	3,  // 6: jitllm.v1.GetStatsResponse.models:type_name -> jitllm.v1.ModelStats
 	6,  // 7: jitllm.v1.GetStatsResponse.sessions:type_name -> jitllm.v1.SessionStats
-	12, // 8: jitllm.v1.GetStatsResponse.devices:type_name -> jitllm.v1.Device
-	14, // 9: jitllm.v1.GetStatsResponse.host:type_name -> jitllm.v1.HostMemory
-	0,  // 10: jitllm.v1.GetServerInfoResponse.info:type_name -> jitllm.v1.ServerInfo
-	7,  // 11: jitllm.v1.TelemetryService.GetStats:input_type -> jitllm.v1.GetStatsRequest
-	9,  // 12: jitllm.v1.TelemetryService.WatchStats:input_type -> jitllm.v1.WatchStatsRequest
-	10, // 13: jitllm.v1.TelemetryService.GetServerInfo:input_type -> jitllm.v1.GetServerInfoRequest
-	8,  // 14: jitllm.v1.TelemetryService.GetStats:output_type -> jitllm.v1.GetStatsResponse
-	8,  // 15: jitllm.v1.TelemetryService.WatchStats:output_type -> jitllm.v1.GetStatsResponse
-	11, // 16: jitllm.v1.TelemetryService.GetServerInfo:output_type -> jitllm.v1.GetServerInfoResponse
-	14, // [14:17] is the sub-list for method output_type
-	11, // [11:14] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	14, // 8: jitllm.v1.GetStatsResponse.devices:type_name -> jitllm.v1.Device
+	16, // 9: jitllm.v1.GetStatsResponse.host:type_name -> jitllm.v1.HostMemory
+	9,  // 10: jitllm.v1.GetStatsResponse.orchestrator:type_name -> jitllm.v1.OrchestratorStats
+	10, // 11: jitllm.v1.OrchestratorStats.moves:type_name -> jitllm.v1.OrchestratorMove
+	0,  // 12: jitllm.v1.GetServerInfoResponse.info:type_name -> jitllm.v1.ServerInfo
+	7,  // 13: jitllm.v1.TelemetryService.GetStats:input_type -> jitllm.v1.GetStatsRequest
+	11, // 14: jitllm.v1.TelemetryService.WatchStats:input_type -> jitllm.v1.WatchStatsRequest
+	12, // 15: jitllm.v1.TelemetryService.GetServerInfo:input_type -> jitllm.v1.GetServerInfoRequest
+	8,  // 16: jitllm.v1.TelemetryService.GetStats:output_type -> jitllm.v1.GetStatsResponse
+	8,  // 17: jitllm.v1.TelemetryService.WatchStats:output_type -> jitllm.v1.GetStatsResponse
+	13, // 18: jitllm.v1.TelemetryService.GetServerInfo:output_type -> jitllm.v1.GetServerInfoResponse
+	16, // [16:19] is the sub-list for method output_type
+	13, // [13:16] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_jitllm_v1_telemetry_proto_init() }
@@ -1262,7 +1479,7 @@ func file_jitllm_v1_telemetry_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_jitllm_v1_telemetry_proto_rawDesc), len(file_jitllm_v1_telemetry_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
