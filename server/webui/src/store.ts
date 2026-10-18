@@ -37,7 +37,7 @@ export interface Msg {
   meta?: Meta;
 }
 export interface Meta {
-  reason?: string; tokens?: number; tps?: number; ttft?: number; prompt?: number; cached?: number; gbps?: number; error?: string; stopped?: boolean;
+  reason?: string; tokens?: number; tps?: number; ttft?: number; prompt?: number; cached?: number; gbps?: number; error?: string; stopped?: boolean; dev?: number; host?: number;
 }
 export interface Chat { id: string; title: string; model: string; at: number; msgs: Msg[]; }
 

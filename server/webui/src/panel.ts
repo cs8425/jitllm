@@ -1,7 +1,7 @@
 // The side panel: the engine's live numbers, the devices, the models and the
 // sampling settings. Nothing here talks to the page's chat; it reads `live`.
 import { h, svg, clear } from "./dom.ts";
-import { live, subscribe, refreshLists, refreshFiles, refreshPlacement, changed, Series } from "./live.ts";
+import { live, subscribe, refreshFiles, refreshPlacement, firstSessionOf, changed, Series } from "./live.ts";
 import { models, placement, sessions, errText } from "./api.ts";
 import { BlockLocation, BlockKind, DeviceKind, ExecutionMode } from "./gen/jitllm/v1/common_pb";
 import type { Device } from "./gen/jitllm/v1/device_pb";
@@ -9,9 +9,14 @@ import { settings, saveSettings } from "./store.ts";
 import { human } from "./chat.ts";
 
 export interface Ctx {
-  model(): string;
+  // The model and the session of the chat in view: what the panels show unless
+  // told to look at another loaded model.
+  chatModel(): string;
+  chatSession(): string;
+  chatId(): string;
   toast(msg: string, bad?: boolean): void;
-  setModel(id: string): void;
+  newChatOn(model: string): void;
+  ensureSession(): Promise<string>;
 }
 
 const n = (x: bigint | number | undefined) => Number(x ?? 0);
@@ -55,7 +60,7 @@ let ctx: Ctx;
 let modelsSig = "";
 const conv = new Map<string, string>(); // path -> conversion progress text
 
-const TABS: [string, string][] = [["engine", "Engine"], ["devices", "Devices"], ["models", "Models"], ["settings", "Sampling"]];
+const TABS: [string, string][] = [["engine", "Engine"], ["placement", "Placement"], ["devices", "Devices"], ["models", "Models"], ["settings", "Sampling"]];
 
 export function mount(el: HTMLElement, c: Ctx) {
   root = el; ctx = c;
@@ -72,8 +77,23 @@ export function mount(el: HTMLElement, c: Ctx) {
 }
 export function showTab(id: string) { if (id === "models") refreshFiles(); tab = id; settings.tab = id; saveSettings(); modelsSig = ""; root.querySelectorAll(".tab").forEach((b, i) => b.classList.toggle("on", TABS[i][0] === id)); render(true); }
 
+// The panels show the chat's model unless the viewer picked another loaded one.
+let viewing: string | null = null;
+const loadedNow = () => live.list?.loaded.map((m) => m.modelId) ?? live.stats?.models.map((m) => m.modelId) ?? [];
+export const viewModel = () => (viewing && loadedNow().includes(viewing) ? viewing : ctx.chatModel());
+export function followChat() { viewing = null; if (root) render(true); }
+
+function modelPicker(): HTMLElement {
+  const ids = loadedNow();
+  const sel = h("select", { on: { change: (e: any) => { viewing = e.target.value === ctx.chatModel() ? null : e.target.value; render(true); } } },
+    ...ids.map((id) => h("option", { value: id, text: id + (id === ctx.chatModel() ? "  (this chat)" : "") })));
+  sel.value = viewModel();
+  return h("label", { class: "viewer" }, "Showing", sel);
+}
+
 function render(force: boolean) {
   if (tab === "engine") engine(force);
+  else if (tab === "placement") placementTab(force);
   else if (tab === "devices") deviceTab();
   else if (tab === "models") modelsTab(force);
   else if (force) settingsTab();
@@ -82,22 +102,16 @@ function render(force: boolean) {
 // ---- engine ---------------------------------------------------------------
 
 let engineBuilt = false;
-let dyn: HTMLElement, blocksBox: HTMLElement, ctl: HTMLElement;
-let placeTimer = 0;
+let dyn: HTMLElement;
 
 function engine(force: boolean) {
   if (force || !engineBuilt || !body.contains(dyn)) {
     clear(body);
     dyn = h("div", { class: "stack" });
-    blocksBox = h("div", {});
-    ctl = h("div", { class: "ctl" });
-    body.append(dyn, card("Blocks", blocksBox, ctl));
+    body.append(dyn);
     engineBuilt = true;
-    refreshPlacement(ctx.model());
-    clearInterval(placeTimer);
-    placeTimer = window.setInterval(() => { if (tab === "engine") refreshPlacement(ctx.model()); }, 10000);
   }
-  const id = ctx.model();
+  const id = viewModel();
   const ms = live.stats?.models.find((m) => m.modelId === id);
   const info = live.list?.loaded.find((m) => m.modelId === id);
   const L = live.last;
@@ -116,7 +130,8 @@ function engine(force: boolean) {
 
   const batch = ms?.batch;
   const sess = live.stats?.sessions.filter((s) => s.modelId === id) ?? [];
-  const pos = Math.max(L.position, ...sess.map((s) => s.position), 0);
+  const mine = id === ctx.chatModel() ? sess.find((s) => s.sessionId === ctx.chatSession()) : undefined;
+  const pos = mine ? mine.position : Math.max(...sess.map((s) => s.position), 0);
   const ctxLen = info?.contextLength ?? 0;
   const model = card("Model " + (id || ""),
     info ? h("div", { class: "kvs" },
@@ -141,46 +156,109 @@ function engine(force: boolean) {
       kv("read", `${r.bytesRead?.human ?? "0"} in ${n(r.readRequests)} reads`)),
     h("p", { class: r.fits ? "dim small" : "warn small", text: r.fits ? "The model fits in its page budget; nothing is evicted." : "Over budget: blocks are evicted and read back as needed." })) : null;
 
-  dyn.replaceChildren(hero, model, ...(pager ? [pager] : []));
-  drawBlocks();
+  dyn.replaceChildren(modelPicker(), hero, model, ...(pager ? [pager] : []));
 }
 
-function drawBlocks() {
+// ---- placement --------------------------------------------------------------
+
+let placeBuilt = false, placeBox: HTMLElement, placeTimer = 0, placeSession = "";
+const targetPick = { id: "" };
+let lastMove = "";
+
+async function placementSession(): Promise<string> {
+  const id = viewModel();
+  if (id === ctx.chatModel()) return ctx.chatSession();
+  return firstSessionOf(id);
+}
+
+function placementTab(force: boolean) {
+  if (force || !placeBuilt || !body.contains(placeBox)) {
+    clear(body);
+    placeBox = h("div", { class: "stack" });
+    body.append(placeBox);
+    placeBuilt = true;
+    const poll = async () => {
+      if (tab !== "placement") return;
+      placeSession = await placementSession();
+      refreshPlacement(placeSession);
+    };
+    poll();
+    clearInterval(placeTimer);
+    placeTimer = window.setInterval(poll, 10000);
+  }
+  drawPlacement();
+}
+
+const hostName = "the CPU";
+
+function drawPlacement() {
   const p = live.place;
-  clear(blocksBox);
-  clear(ctl);
-  if (!live.session || !p) {
-    blocksBox.append(h("p", { class: "dim small", text: "A block map needs a session on the model: it holds the model's place on the host and the cards." }));
-    if (ctx.model()) ctl.append(h("button", { class: "btn", text: "Open a session", on: { click: async () => {
-      try { await sessions.createSession({ modelId: ctx.model() }); await refreshPlacement(ctx.model()); } catch (e) { ctx.toast(errText(e), true); }
-    } } }));
+  const id = viewModel();
+  const kids: Node[] = [modelPicker()];
+  const mine = id === ctx.chatModel();
+  if (!p || live.placeFor !== placeSession) {
+    kids.push(card("Layers", h("p", { class: "dim small", text: mine ? "Opening this chat's session…" : "No conversation is using this model right now, so it has no layers placed to show." })));
+    placeBox.replaceChildren(...kids);
     return;
   }
-  const nd = p.deviceBlockCount, nb = p.blocks.length;
-  blocksBox.append(
-    h("div", { class: "seam" }, h("b", { text: String(nd) }), ` of ${nb} blocks on a device`,
-      p.headOnDevice ? h("span", { class: "chip", text: "head on device" }) : null),
-    h("div", { class: "blocks" }, ...p.blocks.map((b) => h("i", {
-      class: "blk " + (b.location === BlockLocation.DEVICE ? "dev" : "host") + (b.kind === BlockKind.LINEAR ? " lin" : "") + (b.kind === BlockKind.VISION ? " vis" : "") + (b.hostResident ? "" : " cold"),
-      title: `block ${b.index} · ${BlockKind[b.kind].toLowerCase()} · ${b.location === BlockLocation.DEVICE ? b.deviceId : "host"} · ${b.bytes?.human ?? ""}`,
-    }))),
-    h("div", { class: "legend" }, h("span", {}, h("i", { class: "blk host" }), " host"), h("span", {}, h("i", { class: "blk dev" }), " device"), h("span", {}, h("i", { class: "blk lin" }), " linear")),
-    ...p.declines.slice(0, 3).map((d) => h("p", { class: "warn small", text: `block ${d.blockIndex}: ${d.reason}` })));
-  const card_ = live.devs.find((d) => d.kind !== DeviceKind.HOST && d.available);
-  const move = async (first: number, last: number, toHost: boolean) => {
+  const nb = p.blocks.length;
+  const per = new Map<string, { n: number; bytes: number }>();
+  for (const b of p.blocks) {
+    const k = b.location === BlockLocation.DEVICE ? b.deviceId : "host";
+    const e = per.get(k) ?? { n: 0, bytes: 0 };
+    e.n++; e.bytes += n(b.bytes?.bytes);
+    per.set(k, e);
+  }
+  const sentence = [...per.entries()].sort((a, b) => (a[0] === "host" ? 1 : 0) - (b[0] === "host" ? 1 : 0))
+    .map(([k, e]) => `${e.n} on ${k === "host" ? hostName : k}`).join(", ");
+  // A session moves layers only between the devices its model was loaded on.
+  const gpus = live.devs.filter((d) => d.kind !== DeviceKind.HOST && d.available && !d.sameDeviceAs && live.sessDevs.includes(d.ref?.id ?? ""));
+  const anyGpu = live.devs.some((d) => d.kind !== DeviceKind.HOST && d.available);
+  const target = gpus.find((d) => d.ref?.id === targetPick.id) ?? gpus[0];
+  const nd = p.deviceBlockCount;
+  const hostIdx = p.blocks.filter((b) => b.location !== BlockLocation.DEVICE).map((b) => b.index);
+  const devIdx = p.blocks.filter((b) => b.location === BlockLocation.DEVICE).map((b) => b.index);
+  const no = target ? "" : !anyGpu ? "no GPU on this server" : "this model was loaded on the CPU only: unload it and load it on a graphics card";
+  const move = async (first: number, last: number, toHost: boolean, what: string) => {
     try {
-      const r = await placement.relocateBlocks({ sessionId: live.session!.sessionId, firstBlock: first, lastBlock: last, toHost, toDeviceId: toHost ? "" : card_!.ref!.id });
-      if (r.declined[0]) ctx.toast(r.declined[0].reason, true);
-    } catch (e) { ctx.toast(errText(e), true); }
-    await refreshPlacement(ctx.model());
+      const r = await placement.relocateBlocks({ sessionId: placeSession, firstBlock: first, lastBlock: last, toHost, toDeviceId: toHost ? "" : target!.ref!.id });
+      lastMove = r.declined[0] ? `Declined: ${r.declined[0].reason}` : `${what}: ${r.blocksMoved} layer(s) moved in ${r.millis} ms`;
+      ctx.toast(lastMove, !!r.declined[0]);
+    } catch (e) { lastMove = errText(e); ctx.toast(lastMove, true); }
+    refreshPlacement(placeSession);
   };
-  const b = (label: string, on: boolean, f: () => void, tip: string) => h("button", { class: "btn sm", text: label, title: tip, disabled: !on, on: { click: f } });
-  ctl.append(
-    b("−1", nd > 0, () => move(nd - 1, nd - 1, true), "bring the last device block home"),
-    b("+1", !!card_ && nd < nb, () => move(nd, nd, false), card_ ? `move the next block to ${card_.name}` : "no accelerator on this machine"),
-    b("All host", nd > 0, () => move(0, nb - 1, true), "run every block on the host"),
-    b("All device", !!card_ && nd < nb, () => move(0, nb - 1, false), "run every block on the accelerator"),
-    h("button", { class: "btn sm ghost", text: "Close session", on: { click: async () => { try { await sessions.closeSession({ sessionId: live.session!.sessionId }); } catch (e) { ctx.toast(errText(e), true); } live.place = null; live.session = null; changed(); } } }));
+  const btn = (label: string, ok: boolean, tip: string, f: () => void) => h("button", { class: "btn sm", text: label, title: no || tip, disabled: !ok || !!no, on: { click: f } });
+  const devCards = [...per.keys(), ...gpus.map((g) => g.ref?.id ?? "")].filter((k, i, a) => a.indexOf(k) === i && k !== "host").map((k) => {
+    const d = live.devs.find((x) => x.ref?.id === k);
+    if (!d) return null;
+    const total = n(d.totalMemory?.bytes), free = n(d.freeMemory?.bytes), mine_ = per.get(k)?.bytes ?? 0;
+    return h("div", { class: "ctxrow" }, kv(d.name || k, `${human(total - free)} used of ${d.totalMemory?.human ?? "?"}` + (mine_ ? ` · this model ${human(mine_)}` : "")), meter(total ? (total - free) / total : 0));
+  });
+  kids.push(
+    card("Where this model runs",
+      h("p", { class: "plain" }, `A model is a stack of ${nb} layers. Each layer runs either on the CPU or on a graphics card; a card is faster when it has room.`),
+      h("div", { class: "seam" }, h("b", { text: String(nb) }), ` layers: ${sentence}`),
+      h("div", { class: "blocks" }, ...p.blocks.map((b) => h("i", {
+        class: "blk " + (b.location === BlockLocation.DEVICE ? "dev" : "host") + (b.kind === BlockKind.LINEAR ? " lin" : "") + (b.kind === BlockKind.VISION ? " vis" : "") + (b.location !== BlockLocation.DEVICE && !b.hostResident ? " cold" : ""),
+        title: `layer ${b.index} · ${BlockKind[b.kind].toLowerCase()} · ${b.location === BlockLocation.DEVICE ? b.deviceId : "CPU"} · ${b.bytes?.human ?? ""}`,
+      }))),
+      h("div", { class: "legend" }, h("span", {}, h("i", { class: "blk host" }), " CPU"), h("span", {}, h("i", { class: "blk dev" }), " graphics card"), h("span", {}, h("i", { class: "blk lin" }), " linear layer")),
+      ...p.declines.slice(0, 3).map((d) => h("p", { class: "warn small", text: `layer ${d.blockIndex}: ${d.reason}` }))),
+    ...(devCards.length ? [card("Device memory", ...devCards)] : []),
+    card("Move layers" + (mine ? "" : " (another chat's session)"),
+      gpus.length > 1 ? h("label", {}, "Graphics card", (() => {
+        const s = h("select", { on: { change: (e: any) => { targetPick.id = e.target.value; drawPlacement(); } } }, ...gpus.map((g) => h("option", { value: g.ref?.id ?? "", text: `${g.ref?.id} · ${g.name}` })));
+        s.value = target?.ref?.id ?? ""; return s;
+      })()) : null,
+      h("div", { class: "ctl" },
+        btn("+1 layer to GPU", hostIdx.length > 0, "move the next CPU layer to the card", () => move(hostIdx[0], hostIdx[0], false, "+1 layer")),
+        btn("−1 layer to CPU", nd > 0, "bring the last card layer back", () => move(devIdx[devIdx.length - 1], devIdx[devIdx.length - 1], true, "−1 layer")),
+        btn("All on GPU", hostIdx.length > 0, "run every layer on the card", () => move(0, nb - 1, false, "all to GPU")),
+        btn("All on CPU", nd > 0, "run every layer on the CPU", () => move(0, nb - 1, true, "all to CPU"))),
+      no ? h("p", { class: "dim small", text: no }) : null,
+      lastMove ? h("p", { class: "small", text: lastMove }) : null,
+      h("p", { class: "dim small", text: "Moves apply to this conversation's own session; its history moves with the layers." })));
+  placeBox.replaceChildren(...kids.filter((k) => k));
 }
 
 // ---- devices --------------------------------------------------------------
@@ -228,9 +306,21 @@ function uptime(ms: number) {
 let filter = "";
 let loadOpts = { device: "", budgetGiB: "", maxBlocks: "" };
 
+// The devices a load offers its layers to: every available accelerator, CUDA
+// and Metal before Vulkan, leaving out a Vulkan entry that is the same card as
+// one already listed. "cpu" asks for the host alone.
+// A software renderer is no accelerator, and a device sharing the host's memory
+// is not a second pool; both stay pickable by name but are not in the default.
+const accelerator = (d: Device) => d.kind !== DeviceKind.HOST && d.available && !d.sameDeviceAs && !/llvmpipe|swiftshader|software/i.test(d.name);
+function gpuIds(): string[] {
+  const rank = (id: string) => (id.startsWith("vulkan") ? 1 : 0);
+  return live.devs.filter((d) => accelerator(d) && !d.countsTowardHostBudget).map((d) => d.ref?.id ?? "").filter(Boolean).sort((a, b) => rank(a) - rank(b));
+}
+const loadDevices = () => (loadOpts.device === "cpu" ? ["cpu"] : loadOpts.device ? [loadOpts.device] : gpuIds());
+
 function modelsTab(force: boolean) {
   const m = live.files;
-  const sig = JSON.stringify([live.scanning, live.list?.loaded.map((x) => x.modelId), m?.files.map((f) => [f.path, f.modelId, f.isContainer]), live.devs.map((d) => d.ref?.id), [...conv.entries()], ctx.model()]);
+  const sig = JSON.stringify([live.scanning, live.list?.loaded.map((x) => x.modelId), m?.files.map((f) => [f.path, f.modelId, f.isContainer]), live.devs.map((d) => d.ref?.id), [...conv.entries()], live.stats?.models.map((s) => s.sessions)]);
   if (!force && sig === modelsSig) return;
   if (!force && body.contains(document.activeElement) && document.activeElement instanceof HTMLInputElement) return; // do not rebuild under typing
   modelsSig = sig;
@@ -244,12 +334,17 @@ function modelsTab(force: boolean) {
     render(true);
   };
   const loaded = (live.list?.loaded ?? m.loaded).map((x) => {
-    const on = x.modelId === ctx.model();
-    const un = h("button", { class: "btn sm ghost", text: "Unload" });
-    un.addEventListener("click", () => act(un, "Unloading", () => models.unloadModel({ modelId: x.modelId })));
-    return h("div", { class: "row" + (on ? " on" : "") , on: { click: (e: Event) => { if (e.target === un) return; ctx.setModel(x.modelId); } } },
-      h("div", { class: "grow" }, h("b", { text: x.modelId }), h("div", { class: "dim small", text: `${x.architecture} · ${x.blockCount} blocks · ctx ${x.contextLength}` })),
-      on ? h("span", { class: "chip ok", text: "active" }) : null, un);
+    const un = h("button", { class: "btn sm ghost", text: "Unload", title: "Free this model's memory" });
+    un.addEventListener("click", () => act(un, "Unloading", async () => {
+      const open = live.stats?.models.find((s) => s.modelId === x.modelId)?.sessions ?? 0;
+      if (open > 0 && !confirm(`${x.modelId} has ${open} open session${open === 1 ? "" : "s"}. Close them and unload?`)) return;
+      await models.unloadModel({ modelId: x.modelId, force: open > 0 });
+    }));
+    const chat = h("button", { class: "btn sm", text: "Chat", title: "Start a new conversation on this model", on: { click: () => ctx.newChatOn(x.modelId) } });
+    const users = live.stats?.models.find((s) => s.modelId === x.modelId)?.sessions ?? 0;
+    return h("div", { class: "row" },
+      h("div", { class: "grow" }, h("b", { text: x.modelId }), h("div", { class: "dim small", text: `${x.architecture} · ${x.blockCount} layers · ${x.defaultDeviceIds.length ? x.defaultDeviceIds.join(", ") : "CPU"} · ctx ${x.contextLength} · ${users} session${users === 1 ? "" : "s"}` })),
+      chat, un);
   });
   const files = m.files.filter((f) => f.modelId === "" && !f.name.startsWith("mmproj-") && f.name.toLowerCase().includes(filter.toLowerCase()));
   const rows = files.map((f) => {
@@ -257,10 +352,11 @@ function modelsTab(force: boolean) {
     const prog = conv.get(f.path);
     if (f.isContainer) b.addEventListener("click", () => act(b, "Loading", () => models.loadModel({
       path: f.path,
-      deviceIds: loadOpts.device ? [loadOpts.device] : [],
+      modelId: f.name,
+      deviceIds: loadDevices(),
       pageBudgetBytes: loadOpts.budgetGiB ? BigInt(Math.round(Number(loadOpts.budgetGiB) * 2 ** 30)) : 0n,
       ...(loadOpts.maxBlocks !== "" ? { maxDeviceBlocks: Number(loadOpts.maxBlocks) } : {}),
-    }).then(() => ctx.toast("Loaded " + f.name))));
+    }).then((r) => ctx.toast(`Loaded ${r.model?.modelId ?? f.name}: ${loadDevices().join(", ") || "CPU"} (${r.loadMillis} ms)`))));
     else b.addEventListener("click", async () => {
       const out = f.path.replace(/\.[^./]+$/, "") + ".jlm";
       conv.set(f.path, "starting"); modelsSig = ""; render(true);
@@ -273,8 +369,11 @@ function modelsTab(force: boolean) {
     return h("div", { class: "row" }, h("div", { class: "grow" }, h("div", { class: "fname", text: f.name }), h("div", { class: "dim small", text: [f.size?.human, f.isContainer ? "container" : "source: converts first"].filter(Boolean).join(" · ") })),
       prog ? h("span", { class: "chip", text: prog }) : b);
   });
-  const sel = h("select", { on: { change: (e: any) => (loadOpts.device = e.target.value) } }, h("option", { value: "", text: "Auto" }),
-    ...live.devs.map((d) => h("option", { value: d.ref?.id ?? "", text: d.name || d.ref?.id || "" })));
+  const g = gpuIds();
+  const sel = h("select", { on: { change: (e: any) => (loadOpts.device = e.target.value) } },
+    h("option", { value: "", text: g.length ? `All graphics cards (${g.join(", ")})` : "CPU (no graphics card found)" }),
+    h("option", { value: "cpu", text: "CPU only" }),
+    ...live.devs.filter(accelerator).map((d) => h("option", { value: d.ref?.id ?? "", text: `${d.ref?.id} · ${d.name}` })));
   sel.value = loadOpts.device;
   body.append(h("div", { class: "stack" },
     card("Loaded", ...(loaded.length ? loaded : [h("p", { class: "dim small", text: "Nothing loaded. Pick a model file below." })])),
@@ -282,8 +381,8 @@ function modelsTab(force: boolean) {
       h("label", {}, "Run on", sel),
       h("div", { class: "two" },
         h("label", {}, "Page budget (GiB)", h("input", { value: loadOpts.budgetGiB, placeholder: "auto", inputMode: "decimal", on: { input: (e: any) => (loadOpts.budgetGiB = e.target.value) } })),
-        h("label", {}, "Device blocks", h("input", { value: loadOpts.maxBlocks, placeholder: "auto", inputMode: "numeric", on: { input: (e: any) => (loadOpts.maxBlocks = e.target.value) } }))),
-      h("p", { class: "dim small", text: "Applied to the next load. Leave blank to let the engine place and budget itself." })),
+        h("label", {}, "Max GPU layers", h("input", { value: loadOpts.maxBlocks, placeholder: "auto", inputMode: "numeric", on: { input: (e: any) => (loadOpts.maxBlocks = e.target.value) } }))),
+      h("p", { class: "dim small", text: "Applied to the next load. By default a model gets every graphics card, as many layers as fit; the rest run on the CPU." })),
     card("Model files", h("div", { class: "filehead" }, h("input", { class: "search", placeholder: "Filter", value: filter, on: { input: (e: any) => { filter = e.target.value; modelsSig = ""; render(true); (body.querySelector(".search") as HTMLInputElement)?.focus(); } } }), h("button", { class: "btn sm", text: live.scanning ? "Reading…" : "Refresh", title: "Read the model folder again", disabled: live.scanning, on: { click: () => refreshFiles() } })),
       ...(rows.length ? rows : [h("p", { class: "dim small", text: "No files here. " + (m.directory ? "Folder: " + m.directory : "") })]))));
 }

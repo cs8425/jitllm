@@ -456,7 +456,8 @@ export type LoadModelRequest = Message<"jitllm.v1.LoadModelRequest"> & {
 
   /**
    * Devices to offer blocks to, in preference order, as DeviceRef ids.
-   * Empty means host only.
+   * Empty means every available device, as many blocks as fit (`auto`: host
+   * only when the machine has none). ["cpu"] asks for the host alone.
    *
    * @generated from field: repeated string device_ids = 4;
    */

@@ -43,3 +43,11 @@ export function errText(e: unknown): string {
 }
 export const isUnauth = (e: unknown) => e instanceof ConnectError && e.code === Code.Unauthenticated;
 export const isCancel = (e: unknown) => e instanceof ConnectError && e.code === Code.Canceled;
+
+// For the one request a page makes as it unloads, where a fetch with
+// keepalive outlives the page and the Connect client cannot.
+export function closeOnUnload(path: string, body: unknown) {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (key) headers.authorization = "Bearer " + key;
+  try { fetch((server ?? location.origin) + path, { method: "POST", headers, body: JSON.stringify(body), keepalive: true }); } catch { /* the server drops an idle session itself */ }
+}

@@ -8,6 +8,8 @@ import { infer, errText, isUnauth, keepKey, hasKey, isCancel, models as modelsAp
 import { live, start, subscribe, refreshLists, changed, loadedIds } from "./live.ts";
 import { settings, saveSettings, allChats, newChat, touch, dropChat, saveChats, type Chat, type Msg, type Meta } from "./store.ts";
 import * as panel from "./panel.ts";
+import * as sess from "./sess.ts";
+import { Code, ConnectError } from "@connectrpc/connect";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -20,7 +22,29 @@ let pending: { data: Uint8Array; mediaType: string }[] = [];
 const views = new Map<Msg, { update(): void; root: HTMLElement }>();
 let stick = true;
 
-const modelId = () => ($("model") as HTMLSelectElement | null)?.value || settings.model;
+// A chat's model is its own; nothing here is a global "current model". A chat
+// whose model is not loaded has none to run on until its model comes back or
+// another is chosen for it.
+const chatModel = () => (chat.model && loadedIds().includes(chat.model) ? chat.model : "");
+function defaultModel(): string {
+  const ids = loadedIds();
+  const last = allChats().find((c) => c !== chat && c.model && ids.includes(c.model));
+  return last?.model ?? ids[0] ?? "";
+}
+function setChatModel(id: string) {
+  if (chat.model === id) return;
+  const had = chat.msgs.length > 0;
+  chat.model = id;
+  if (had) touch(chat); else saveChats();
+  sess.ensure(chat.id, id).catch((e) => toast(errText(e), true));
+  if (had) toast("This chat now continues on " + id);
+  panel.followChat();
+  drawHeader(); drawChats(); changed();
+}
+function ensureSession() {
+  const model = chatModel();
+  if (model) sess.ensure(chat.id, model).catch((e) => toast(errText(e), true));
+}
 
 function toast(msg: string, bad = false) {
   const t = h("div", { class: "toast" + (bad ? " bad" : ""), text: msg });
@@ -32,19 +56,17 @@ function toast(msg: string, bad = false) {
 
 const header = $("top");
 function drawHeader() {
-  const sel = h("select", { id: "model", title: "Model", attrs: { "aria-label": "Model" }, on: { change: (e: any) => { settings.model = e.target.value; chat.model = e.target.value; saveSettings(); drawHeader(); changed(); } } });
-  const loaded = loadedIds().map((modelId) => ({ modelId }));
-  for (const m of loaded) sel.append(h("option", { value: m.modelId, text: m.modelId }));
-  if (!loaded.length) sel.append(h("option", { value: "", text: live.list || live.stats ? "no model loaded" : "connecting…" }));
-  const want = loaded.some((m) => m.modelId === settings.model) ? settings.model : chat.model && loaded.some((m) => m.modelId === chat.model) ? chat.model : loaded[0]?.modelId ?? "";
-  sel.value = want;
-  settings.model = want;
+  if (!chat.model && chat.msgs.length === 0) chat.model = defaultModel();
+  const cm = chat.model;
+  const ok = !!cm && loadedIds().includes(cm);
+  const chip = h("button", { class: "mchip" + (cm && !ok ? " off" : ""), id: "mchip", title: ok ? "The model this chat runs on (click to change)" : "This chat's model is not loaded", on: { click: modelMenu } },
+    cm || (live.list || live.stats ? "choose a model" : "connecting…"), cm && !ok ? " (not loaded)" : "", h("span", { class: "dim", text: "▾" }));
   const dotCls = live.connected ? "dot ok" : "dot bad";
   const rate = live.streaming ? live.decode.last : live.last.tps;
   header.replaceChildren(
     h("button", { class: "icon only-narrow", title: "Conversations (alt+L)", text: "☰", on: { click: () => drawer("chats") } }),
     h("img", { class: "logo", src: "wordmark.svg", alt: "jitllm", title: "jitllm" }),
-    sel,
+    chip,
     h("div", { class: "seg", attrs: { role: "group", "aria-label": "Prompt mode" } },
       h("button", { class: settings.chat ? "on" : "", text: "Chat", title: "Apply the chat template", on: { click: () => setChat(true) } }),
       h("button", { class: settings.chat ? "" : "on", text: "Raw", title: "Complete the prompt as written", on: { click: () => setChat(false) } })),
@@ -54,6 +76,16 @@ function drawHeader() {
     h("div", { class: "status", title: live.error || "connected" }, h("i", { class: dotCls }), h("span", { class: "dim", text: live.connected ? (live.info ? "v" + live.info.version : "connected") : live.error || "connecting" })),
     h("button", { class: "icon", title: "Commands (ctrl+K)", text: "⌘", on: { click: palette } }),
     h("button", { class: "icon" + (settings.panel ? " on" : ""), title: "Engine panel (alt+B)", text: "◧", on: { click: togglePanel } }));
+}
+function modelMenu() {
+  document.getElementById("modelmenu")?.remove();
+  const ids = loadedIds();
+  const r = document.getElementById("mchip")!.getBoundingClientRect();
+  const menu = h("div", { class: "menu", id: "modelmenu", style: { top: r.bottom + 4 + "px", left: r.left + "px" } },
+    ...(ids.length ? ids.map((id) => h("button", { class: id === chat.model ? "cur" : "", text: id, on: { click: () => { menu.remove(); setChatModel(id); } } })) : [h("div", { class: "dim small pad", text: "No model is loaded." })]),
+    h("button", { text: "Load another…", on: { click: () => { menu.remove(); settings.panel = true; layout(); panel.showTab("models"); drawerState(window.innerWidth < 1100 ? "panel" : ""); } } }));
+  document.body.append(menu);
+  setTimeout(() => document.addEventListener("click", () => menu.remove(), { once: true }), 0);
 }
 function setChat(on: boolean) { settings.chat = on; saveSettings(); drawHeader(); toast(on ? "Chat template on" : "Raw completion"); }
 function toggleThink() {
@@ -95,20 +127,22 @@ function drawChats() {
 const ago = (t: number) => { const s = (Date.now() - t) / 1000; return s < 60 ? "now" : s < 3600 ? Math.floor(s / 60) + "m" : s < 86400 ? Math.floor(s / 3600) + "h" : Math.floor(s / 86400) + "d"; };
 function newChatNow(): Chat {
   if (chat.msgs.length === 0) return chat;
-  return newChat(modelId());
+  return newChat(chat.model || defaultModel());
 }
 function switchTo(c: Chat) {
   if (busy) { toast("A reply is streaming: Esc stops it", true); return; }
   chat = c;
-  if (c.model && loadedIds().includes(c.model)) settings.model = c.model;
   drawerState("");
+  panel.followChat();
+  ensureSession();
   drawAll();
   $("prompt")?.focus();
 }
 function removeChat(c: Chat) {
   if (busy && c === chat) { toast("A reply is streaming: Esc stops it", true); return; }
   dropChat(c);
-  if (c === chat) chat = allChats()[0] ?? newChat(modelId());
+  sess.close(c.id);
+  if (c === chat) { chat = allChats()[0] ?? newChat(defaultModel()); panel.followChat(); ensureSession(); }
   drawAll();
 }
 function step(d: number) {
@@ -140,11 +174,12 @@ function drawLog() {
 }
 
 function emptyState(): HTMLElement {
-  const ok = !!modelId();
+  const ok = !!chatModel();
   const sug = ["Explain how a KV cache speeds up decoding.", "Write a Go function that merges two sorted slices.", "Summarise the tradeoffs of paging model weights from disk.", "Give me a haiku about a warm laptop fan."];
   return h("div", { class: "empty" },
     h("img", { class: "mark-img", src: "wordmark.svg", alt: "jitllm" }),
     h("p", { class: "tag", text: "Every kernel generated for the machine in front of it." }),
+    loadedIds().length > 1 ? h("div", { class: "pills", title: "The model this chat will run on" }, ...loadedIds().map((id) => h("button", { class: "pill" + (id === chat.model ? " on" : ""), text: id, on: { click: () => setChatModel(id) } }))) : null,
     ok ? h("div", { class: "sug" }, ...sug.map((s) => h("button", { class: "sugg", text: s, on: { click: () => { const p = $<HTMLTextAreaElement>("prompt"); p.value = s; send(); } } })))
       : h("div", { class: "noload" }, h("p", { text: live.list || live.stats ? "No model is loaded." : "Connecting to the server…" }),
         live.list || live.stats ? h("button", { class: "btn", text: "Choose a model", on: { click: () => { settings.panel = true; layout(); drawHeader(); panel.showTab("models"); drawerState(window.innerWidth < 1100 ? "panel" : ""); } } }) : null),
@@ -161,6 +196,7 @@ function metaLine(m: Meta): string {
   if (m.ttft) bits.push(`TTFT ${Math.round(m.ttft)} ms`);
   if (m.prompt) bits.push(`prompt ${m.prompt}${m.cached ? ` (${m.cached} cached)` : ""}`);
   if (m.gbps) bits.push(`${m.gbps.toFixed(1)} GB/s`);
+  if (m.dev !== undefined) bits.push(m.dev ? `${m.dev} layers on GPU, ${m.host} on CPU` : "all layers on CPU");
   return bits.join(" · ");
 }
 
@@ -322,13 +358,12 @@ async function send() {
     return;
   }
   if ((!text && pending.length === 0) || busy) return;
-  if (!modelId()) { toast("Load a model first (Models tab)", true); panel.showTab("models"); return; }
+  if (!chatModel()) { toast(chat.model ? `${chat.model} is not loaded: load it, or pick another model for this chat` : "Load a model first (Models tab)", true); if (!chat.model) panel.showTab("models"); return; }
   const user: Msg = { role: "user", content: text, pics: pending.length || undefined };
   if (pending.length) pictures.set(user, pending);
   pending = [];
   box.value = ""; box.style.height = "auto";
   chat.msgs.push(user);
-  chat.model = modelId();
   touch(chat);
   drawLog();
   drawChats();
@@ -337,7 +372,7 @@ async function send() {
 }
 
 async function run() {
-  const model = modelId();
+  const model = chatModel();
   const reply: Msg = { role: "assistant", content: "", model };
   chat.msgs.push(reply);
   const wrap = log.querySelector(".thread") ?? log.appendChild(h("div", { class: "thread" }));
@@ -355,8 +390,12 @@ async function run() {
     return one ? [{ ...one, images: (pictures.get(m) ?? []).map((p) => ({ data: p.data, mediaType: p.mediaType })) }] : [];
   });
   const lastUser = history[history.length - 1];
+  // The chat's own session carries the turn, so the server keeps its KV cache
+  // from one turn to the next; without one the request names the model.
+  let sid = "";
+  try { sid = await sess.ensure(chat.id, model); } catch (e) { toast("No session: " + errText(e), true); }
   const req = create(GenerateRequestSchema, {
-    modelId: model,
+    ...(sid ? { sessionId: sid } : { modelId: model }),
     maxTokens: optNumber(settings.maxTokens) ?? 0,
     stop: parseStop(settings.stop),
     sampling: {
@@ -381,8 +420,11 @@ async function run() {
   }, 500);
   const meta: Meta = {};
   try {
+   for (let attempt = 0; ; attempt++) {
+    try {
     for await (const ev of infer.generate(req, { signal: busy.signal })) {
       if (ev.event.case === "started") {
+        meta.dev = ev.event.value.deviceBlocks; meta.host = ev.event.value.hostBlocks;
         live.last.prompt = ev.event.value.promptTokens;
         live.last.queued = Number(ev.event.value.queuedMillis);
       } else if (ev.event.case === "token") {
@@ -403,6 +445,16 @@ async function run() {
         });
       }
     }
+    break;
+    } catch (e) {
+      // A session the server no longer has (restarted, or its model unloaded): open a new one once.
+      const gone = e instanceof ConnectError && (e.code === Code.NotFound || e.code === Code.FailedPrecondition) && sid;
+      if (!gone || attempt > 0 || first) throw e;
+      sess.forget(chat.id);
+      sid = await sess.ensure(chat.id, model);
+      req.sessionId = sid;
+    }
+   }
   } catch (e) {
     if (busy?.signal.aborted || isCancel(e)) meta.stopped = true;
     else { meta.error = errText(e); if (isUnauth(e)) live.needKey = true; }
@@ -455,12 +507,13 @@ function palette() {
     ["Toggle engine panel", "alt+B", togglePanel],
     ["Toggle chat list", "alt+L", toggleChats],
     ["Larger or smaller text", "", () => { settings.bigText = !settings.bigText; saveSettings(); layout(); }],
-    ["Engine: throughput and blocks", "", () => { openPanel(); panel.showTab("engine"); }],
+    ["Engine: throughput and memory", "", () => { openPanel(); panel.showTab("engine"); }],
+    ["Placement: where the layers run", "", () => { openPanel(); panel.showTab("placement"); }],
     ["Devices and memory", "", () => { openPanel(); panel.showTab("devices"); }],
     ["Models: load and unload", "", () => { openPanel(); panel.showTab("models"); }],
     ["Sampling and system prompt", "", () => { openPanel(); panel.showTab("settings"); }],
     ["Keyboard shortcuts", "?", help],
-    ...loadedIds().map((id) => ({ modelId: id })).map((m) => ["Use model " + m.modelId, "", () => { settings.model = m.modelId; chat.model = m.modelId; saveSettings(); drawHeader(); changed(); }] as [string, string, () => void]),
+    ...loadedIds().map((id) => ["Run this chat on " + id, "", () => setChatModel(id)] as [string, string, () => void]),
     ...allChats().slice(0, 30).map((c) => ["Open chat: " + c.title, "", () => switchTo(c)] as [string, string, () => void]),
   ];
   const input = h("input", { class: "pin", placeholder: "Type a command…", autocomplete: "off" });
@@ -519,7 +572,12 @@ document.addEventListener("keydown", (e) => {
 function drawAll() {
   drawHeader(); drawChats(); drawLog(); drawComposer();
 }
-panel.mount($("panel"), { model: modelId, toast, setModel: (id) => { settings.model = id; chat.model = id; saveSettings(); drawHeader(); changed(); } });
+panel.mount($("panel"), {
+  chatModel, chatId: () => chat.id, toast,
+  chatSession: () => sess.sessionOf(chat.id, chatModel()),
+  ensureSession: () => sess.ensure(chat.id, chatModel()),
+  newChatOn: (model) => { if (busy) { toast("A reply is streaming: Esc stops it", true); return; } chat = chat.msgs.length === 0 ? chat : newChat(model); chat.model = model; saveChats(); panel.followChat(); drawAll(); ensureSession(); $("prompt")?.focus(); },
+});
 document.addEventListener("jitllm-settings", () => { drawHeader(); layout(); });
 layout();
 drawAll();
@@ -531,6 +589,7 @@ subscribe(() => {
     lastList = sig;
     drawHeader();
     drawKey();
+    ensureSession();
     if (!busy && chat.msgs.length === 0) drawLog();
   } else {
     const chip = header.querySelector(".rate");

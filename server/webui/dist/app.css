@@ -215,3 +215,13 @@ label.tog input{width:auto;margin:0;accent-color:var(--brand)}
 .filehead{display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem}.filehead .search{margin:0;flex:1}
 .logo{height:20px;width:auto;display:block;image-rendering:pixelated}
 .mark-img{height:clamp(44px,8vw,72px);width:auto;display:block;margin:0 auto}
+.viewer{display:flex;align-items:center;gap:.6rem;margin:0}.viewer select{margin:0;flex:1}
+.plain{margin:0 0 .6rem;font-size:13px;color:var(--text-2);line-height:1.45}
+.mchip{border:1px solid var(--line-strong);background:var(--surface);border-radius:8px;padding:.3rem .7rem;font:13px var(--mono);display:inline-flex;align-items:center;gap:.4rem}
+.mchip:hover{border-color:var(--brand)}.mchip.off{border-color:var(--orange);color:var(--orange)}
+.pills{display:flex;flex-wrap:wrap;gap:.5rem;justify-content:center;margin:0 0 1.4rem}
+.pill{border:1px solid var(--line-strong);background:var(--surface);border-radius:99px;padding:.35rem .9rem;font:13px var(--mono)}.pill.on{border-color:var(--brand);color:var(--brand);background:#202d1a}
+.menu{position:absolute;z-index:25;background:var(--surface-2);border:1px solid var(--line-strong);border-radius:10px;box-shadow:0 10px 30px #000a;padding:.3rem;min-width:14rem}
+.menu button{display:block;width:100%;text-align:left;border:0;background:none;padding:.4rem .7rem;border-radius:7px;font:13px var(--mono)}.menu button:hover{background:var(--surface-3)}
+.menu .cur{color:var(--brand)}
+.tab{padding:.45rem .6rem}.tabs{overflow-x:auto;scrollbar-width:none}

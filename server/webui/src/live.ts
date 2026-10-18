@@ -4,7 +4,6 @@ import type { ListModelsResponse } from "./gen/jitllm/v1/model_pb";
 import type { Device } from "./gen/jitllm/v1/device_pb";
 import type { GetStatsResponse, ServerInfo } from "./gen/jitllm/v1/telemetry_pb";
 import type { Placement } from "./gen/jitllm/v1/placement_pb";
-import type { Session } from "./gen/jitllm/v1/session_pb";
 import { models, devices, telemetry, placement, sessions, errText, isUnauth, isCancel } from "./api.ts";
 
 export class Series {
@@ -27,7 +26,8 @@ export const live = {
   stats: null as GetStatsResponse | null,
   info: null as ServerInfo | null,
   place: null as Placement | null,
-  session: null as Session | null,
+  placeFor: "",
+  sessDevs: [] as string[],
   decode: new Series(),
   // The last finished generation, as this page measured and the server reported it.
   last: { tps: 0, promptTps: 0, ttft: 0, bytesPerToken: 0, gbps: 0, prompt: 0, cached: 0, queued: 0, position: 0 },
@@ -94,13 +94,22 @@ async function watch() {
   }
 }
 
-export async function refreshPlacement(modelId: string) {
+// refreshPlacement reads where one session's layers are. An empty id clears it.
+export async function refreshPlacement(sessionId: string) {
+  if (!sessionId) { live.place = null; live.placeFor = ""; changed(); return; }
   try {
-    const ss = (await sessions.listSessions({})).sessions.filter((s) => s.modelId === modelId);
-    live.session = ss[0] ?? null;
-    live.place = live.session ? (await placement.getPlacement({ sessionId: live.session.sessionId })).placement ?? null : null;
+    const [pl, se] = await Promise.all([placement.getPlacement({ sessionId }), sessions.getSession({ sessionId })]);
+    live.place = pl.placement ?? null;
+    live.sessDevs = se.session?.deviceIds ?? [];
+    live.placeFor = sessionId;
     changed();
-  } catch { /* the Engine tab shows no map until a session exists */ }
+  } catch { live.place = null; live.placeFor = ""; changed(); }
+}
+
+// firstSessionOf finds any open session on a model, for looking at a model no
+// chat of this page is using.
+export async function firstSessionOf(modelId: string): Promise<string> {
+  try { return (await sessions.listSessions({})).sessions.find((s) => s.modelId === modelId)?.sessionId ?? ""; } catch { return ""; }
 }
 
 export async function start() {
