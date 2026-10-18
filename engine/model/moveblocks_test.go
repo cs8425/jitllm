@@ -521,7 +521,7 @@ func TestTwoModelsShareACardThroughTheRegistry(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer ma.Close()
-			mb, err := Open(graphModel(t, "Qwen3-0.6B-Q8_0"))
+			mb, err := Open(jlmOf(t, testmodels.Path("Qwen3-0.6B-Q8_0.gguf")))
 			if err != nil {
 				t.Fatal(err)
 			}

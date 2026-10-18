@@ -218,6 +218,8 @@ type Engine struct {
 	preempt preemptStats
 	// orch is the orchestrator's record of the moves it made.
 	orch orchestrator
+	// pools is the per-card budget every tier the engine opens shares.
+	pools *tier.PoolRegistry
 
 	// devices is the hardware probe, taken once. See devices.go for why it is
 	// not re-taken on every list.
@@ -240,6 +242,7 @@ func New(cfg Config) *Engine {
 	// One fetch bound for the whole server, shared by every surface.
 	cfg.Images = cfg.Images.ready()
 	return &Engine{
+		pools:    tier.NewPoolRegistry(),
 		cfg:      cfg,
 		started:  time.Now(),
 		models:   map[string]*LoadedModel{},
@@ -711,6 +714,9 @@ func (e *Engine) tierOptions(sessions int, tierConfig func(*tier.Config), hostBu
 		tier.WithTuneCache(e.cfg.TuneCache),
 		tier.WithLazyTune(e.cfg.TuneCache != ""),
 		tier.WithHostBudget(hostBudget),
+		// Every model's tier spends one card's memory once, so the room one
+		// model gives back is the next one's (orchestrate.go).
+		tier.WithPoolRegistry(e.pools),
 		tier.WithConfig(func(c *tier.Config) {
 			c.Sessions = sessions
 			// The step loop (newStepLoop) runs steps of up to MaxStepRows
