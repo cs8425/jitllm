@@ -3558,7 +3558,7 @@ func (s *State) ForwardSample(token int32, smp *Sampler) (int32, error) {
 		onDev, probe = choice.arm()
 		cs.mu.Unlock()
 	}
-	if onDev {
+	if onDev && smp.TopK > 0 && smp.TopK <= MaxTopK {
 		k := smp.TopK
 		s.sampleArgs = smp.DeviceArgs(s.sampleArgs)
 		s.sampleVals = grow32(s.sampleVals, k)
