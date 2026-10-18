@@ -70,7 +70,9 @@ func decideOn(t *testing.T, m *Model, dev nn.Device, n int, ok func(placed int) 
 			// not the engine's answer (pplx-decider's half and head on one
 			// 16 GB card).
 			if gpu != nil {
-				cardTooSmall(t, gpu.Err(), "%v", err)
+				// The decline's own account (the head's "needs N, M of L
+				// used") is the error; the tier's last error may be another's.
+				cardTooSmall(t, gpu.Err()+" "+err.Error(), "%v", err)
 			}
 			t.Fatal(err)
 		}
@@ -265,11 +267,13 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 							t.Errorf("the answers moved %.5f from the host's, past %.3f", worst, tol)
 						}
 						if c.kind == jlm.DecisionClef {
-							// The head ran on the device for every request, and
+							// The head ran on the device for every request (a
+							// card whose budget the blocks filled has no room for
+							// it: the gate skips, loudly, as for a block), and
 							// the same rows through the host's head answer within
 							// the band.
 							if picked != len(decisionRequests) {
-								t.Fatalf("Clef's head ran on %s for %d of %d requests", spec, picked, len(decisionRequests))
+								cardTooSmall(t, g.Err(), "Clef's head ran on %s for %d of %d requests", spec, picked, len(decisionRequests))
 							}
 							home, _, _, hp := decideOn(t, m, g, -1, all, "host-head")
 							if hp != 0 {
@@ -284,7 +288,7 @@ func TestDecisionOnEveryDevice(t *testing.T) {
 							// The head ran on the device for every question
 							// (a decline is an error, not a host run).
 							if picked == 0 {
-								t.Fatalf("Kev's head never ran on %s", spec)
+								cardTooSmall(t, g.Err(), "Kev's head never ran on %s", spec)
 							}
 						} else if !m.IsEncoder() {
 							// The labels' logits were picked on the device, and
