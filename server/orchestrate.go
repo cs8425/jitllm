@@ -2,6 +2,8 @@ package server
 
 import (
 	"sort"
+
+	v1 "github.com/jitllm/jitllm/server/gen/jitllm/v1"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -168,4 +170,18 @@ func (e *Engine) demote(v *Session, why string) bool {
 	e.orch.note(OrchMove{At: start, Session: v.id, Model: v.lm.id, Blocks: n, To: "host", Why: why,
 		Millis: float64(time.Since(start).Microseconds()) / 1000})
 	return true
+}
+
+// pbOrchestrator is the orchestrator's counters and recent moves for the
+// stats stream.
+func (e *Engine) pbOrchestrator() *v1.OrchestratorStats {
+	pro, dem, up, home := e.OrchCounts()
+	out := &v1.OrchestratorStats{Enabled: !e.cfg.NoOrchestrate, Promotions: pro, Demotions: dem, BlocksUp: up, BlocksHome: home}
+	for _, m := range e.OrchMoves() {
+		out.Moves = append(out.Moves, &v1.OrchestratorMove{
+			UnixMillis: m.At.UnixMilli(), SessionId: m.Session, ModelId: m.Model,
+			Blocks: int32(m.Blocks), To: m.To, Why: m.Why, Millis: m.Millis,
+		})
+	}
+	return out
 }

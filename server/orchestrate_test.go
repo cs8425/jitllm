@@ -128,6 +128,15 @@ func TestTheTalkingModelGetsTheCard(t *testing.T) {
 	if len(f.e.OrchMoves()) == 0 {
 		t.Fatalf("moves were made and none was recorded")
 	}
+	// The stats stream carries them.
+	st, err := f.c.telemetry.GetStats(f.ctx, req(&v1.GetStatsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := st.Msg.GetOrchestrator(); o.GetDemotions() != dem || len(o.GetMoves()) != len(f.e.OrchMoves()) {
+		t.Fatalf("the stats carry %d demotions and %d moves; the engine made %d and recorded %d",
+			o.GetDemotions(), len(o.GetMoves()), dem, len(f.e.OrchMoves()))
+	}
 }
 
 // TestAPinnedSessionIsNotMoved: a session the caller placed keeps its blocks

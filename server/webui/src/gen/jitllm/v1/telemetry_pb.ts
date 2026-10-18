@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file jitllm/v1/telemetry.proto.
  */
 export const file_jitllm_v1_telemetry: GenFile = /*@__PURE__*/
-  fileDesc("ChlqaXRsbG0vdjEvdGVsZW1ldHJ5LnByb3RvEglqaXRsbG0udjEi2AIKClNlcnZlckluZm8SDwoHdmVyc2lvbhgBIAEoCRIXCg9tb2RlbF9kaXJlY3RvcnkYAiABKAkSGwoTc3RhcnRlZF91bml4X21pbGxpcxgDIAEoAxIVCg11cHRpbWVfbWlsbGlzGAQgASgDEhoKEmF2YWlsYWJsZV9iYWNrZW5kcxgFIAMoCRIVCg1sb2FkZWRfbW9kZWxzGAYgASgFEhUKDW9wZW5fc2Vzc2lvbnMYByABKAUSEAoIcmV2aXNpb24YCCABKAkSEAoIbW9kaWZpZWQYCSABKAgSEwoLYXBpX3ZlcnNpb24YCiABKAUSCgoCb3MYCyABKAkSDAoEYXJjaBgMIAEoCRIiCgdkZXZpY2VzGA0gAygLMhEuaml0bGxtLnYxLkRldmljZRIZChFjYXBhYmlsaXRpZXNfanNvbhgOIAEoCRIQCghmZWF0dXJlcxgPIAMoCSJOCglQb29sU3RhdHMSGAoQcGFyYWxsZWxfcmVnaW9ucxgBIAEoAxIWCg5pbmxpbmVfcmVnaW9ucxgCIAEoAxIPCgd3b3JrZXJzGAMgASgFIn4KDE1peHR1cmVTdGF0cxIYChBiYXRjaGVkX2Rpc3BhdGNoGAEgASgDEhcKD2xvb3BlZF9kaXNwYXRjaBgCIAEoAxIdChViYXRjaGVkX2Rvd25fZGlzcGF0Y2gYAyABKAMSHAoUbG9vcGVkX2Rvd25fZGlzcGF0Y2gYBCABKAMiswEKCk1vZGVsU3RhdHMSEAoIbW9kZWxfaWQYASABKAkSJwoJcmVzaWRlbmN5GAIgASgLMhQuaml0bGxtLnYxLlJlc2lkZW5jeRIQCghzZXNzaW9ucxgDIAEoBRIYChB0b2tlbnNfZ2VuZXJhdGVkGAQgASgDEhgKEHRva2Vuc19wcmVmaWxsZWQYBSABKAMSJAoFYmF0Y2gYBiABKAsyFS5qaXRsbG0udjEuQmF0Y2hTdGF0cyKpAwoKQmF0Y2hTdGF0cxINCgV3aWR0aBgBIAEoBRIRCglsaXZlX3Jvd3MYAiABKAUSDwoHd2FpdGluZxgDIAEoBRINCgVzdGVwcxgEIAEoAxIUCgxyb3dzX3N0ZXBwZWQYBSABKAMSEwoLam9pbnRfc3RlcHMYBiABKAMSEgoKam9pbnRfcm93cxgHIAEoAxIRCglzb2xvX3Jvd3MYCCABKAMSGQoRbWF4X3Jvd3NfcGVyX3N0ZXAYCSABKAUSHQoVbWF4X3Nlc3Npb25zX3Blcl9zdGVwGBAgASgFEhUKDXByb21wdF9jaHVua3MYCiABKAMSFAoMcHJvbXB0X3N0ZXBzGAsgASgDEhIKCmFkbWlzc2lvbnMYDCABKAMSHQoVYWRtaXNzaW9uX3dhaXRfbWlsbGlzGA0gASgDEhYKDmpvaW50X3JlZnVzYWxzGA4gASgDEhQKDGxhc3RfcmVmdXNhbBgPIAEoCRIWCg5zZXBhcmF0ZV9zdGVwcxgRIAEoAxInCgdjaG9pY2VzGBIgAygLMhYuaml0bGxtLnYxLkpvaW50Q2hvaWNlIoQBCgtKb2ludENob2ljZRIMCgRyb3dzGAEgASgFEg8KB3NldHRsZWQYAiABKAgSDQoFam9pbnQYAyABKAgSGQoRam9pbnRfc3RlcF9taWxsaXMYBCABKAESHAoUc2VwYXJhdGVfc3RlcF9taWxsaXMYBSABKAESDgoGcHJvYmVzGAYgASgFIvQBCgxTZXNzaW9uU3RhdHMSEgoKc2Vzc2lvbl9pZBgBIAEoCRIQCghtb2RlbF9pZBgCIAEoCRIYChB0b2tlbnNfZ2VuZXJhdGVkGAMgASgDEhgKEHRva2Vuc19wcmVmaWxsZWQYBCABKAMSEAoIcG9zaXRpb24YBSABKAUSEgoKZ2VuZXJhdGluZxgGIAEoCBIWCg5xdWV1ZV9wb3NpdGlvbhgHIAEoBRIiCgRwb29sGAggASgLMhQuaml0bGxtLnYxLlBvb2xTdGF0cxIoCgdtaXh0dXJlGAkgASgLMhcuaml0bGxtLnYxLk1peHR1cmVTdGF0cyI3Cg9HZXRTdGF0c1JlcXVlc3QSEAoIbW9kZWxfaWQYASABKAkSEgoKc2Vzc2lvbl9pZBgCIAEoCSLCAQoQR2V0U3RhdHNSZXNwb25zZRITCgt1bml4X21pbGxpcxgBIAEoAxIlCgZtb2RlbHMYAiADKAsyFS5qaXRsbG0udjEuTW9kZWxTdGF0cxIpCghzZXNzaW9ucxgDIAMoCzIXLmppdGxsbS52MS5TZXNzaW9uU3RhdHMSIgoHZGV2aWNlcxgEIAMoCzIRLmppdGxsbS52MS5EZXZpY2USIwoEaG9zdBgFIAEoCzIVLmppdGxsbS52MS5Ib3N0TWVtb3J5IlIKEVdhdGNoU3RhdHNSZXF1ZXN0EhAKCG1vZGVsX2lkGAEgASgJEhIKCnNlc3Npb25faWQYAiABKAkSFwoPaW50ZXJ2YWxfbWlsbGlzGAMgASgFIhYKFEdldFNlcnZlckluZm9SZXF1ZXN0IjwKFUdldFNlcnZlckluZm9SZXNwb25zZRIjCgRpbmZvGAEgASgLMhUuaml0bGxtLnYxLlNlcnZlckluZm8y/AEKEFRlbGVtZXRyeVNlcnZpY2USRQoIR2V0U3RhdHMSGi5qaXRsbG0udjEuR2V0U3RhdHNSZXF1ZXN0Ghsuaml0bGxtLnYxLkdldFN0YXRzUmVzcG9uc2UiABJLCgpXYXRjaFN0YXRzEhwuaml0bGxtLnYxLldhdGNoU3RhdHNSZXF1ZXN0Ghsuaml0bGxtLnYxLkdldFN0YXRzUmVzcG9uc2UiADABElQKDUdldFNlcnZlckluZm8SHy5qaXRsbG0udjEuR2V0U2VydmVySW5mb1JlcXVlc3QaIC5qaXRsbG0udjEuR2V0U2VydmVySW5mb1Jlc3BvbnNlIgBCnAEKDWNvbS5qaXRsbG0udjFCDlRlbGVtZXRyeVByb3RvUAFaNmdpdGh1Yi5jb20vaml0bGxtL2ppdGxsbS9zZXJ2ZXIvZ2VuL2ppdGxsbS92MTtqaXRsbG12MaICA0pYWKoCCUppdGxsbS5WMcoCCUppdGxsbVxWMeICFUppdGxsbVxWMVxHUEJNZXRhZGF0YeoCCkppdGxsbTo6VjFiBnByb3RvMw", [file_jitllm_v1_device, file_jitllm_v1_placement]);
+  fileDesc("ChlqaXRsbG0vdjEvdGVsZW1ldHJ5LnByb3RvEglqaXRsbG0udjEi2AIKClNlcnZlckluZm8SDwoHdmVyc2lvbhgBIAEoCRIXCg9tb2RlbF9kaXJlY3RvcnkYAiABKAkSGwoTc3RhcnRlZF91bml4X21pbGxpcxgDIAEoAxIVCg11cHRpbWVfbWlsbGlzGAQgASgDEhoKEmF2YWlsYWJsZV9iYWNrZW5kcxgFIAMoCRIVCg1sb2FkZWRfbW9kZWxzGAYgASgFEhUKDW9wZW5fc2Vzc2lvbnMYByABKAUSEAoIcmV2aXNpb24YCCABKAkSEAoIbW9kaWZpZWQYCSABKAgSEwoLYXBpX3ZlcnNpb24YCiABKAUSCgoCb3MYCyABKAkSDAoEYXJjaBgMIAEoCRIiCgdkZXZpY2VzGA0gAygLMhEuaml0bGxtLnYxLkRldmljZRIZChFjYXBhYmlsaXRpZXNfanNvbhgOIAEoCRIQCghmZWF0dXJlcxgPIAMoCSJOCglQb29sU3RhdHMSGAoQcGFyYWxsZWxfcmVnaW9ucxgBIAEoAxIWCg5pbmxpbmVfcmVnaW9ucxgCIAEoAxIPCgd3b3JrZXJzGAMgASgFIn4KDE1peHR1cmVTdGF0cxIYChBiYXRjaGVkX2Rpc3BhdGNoGAEgASgDEhcKD2xvb3BlZF9kaXNwYXRjaBgCIAEoAxIdChViYXRjaGVkX2Rvd25fZGlzcGF0Y2gYAyABKAMSHAoUbG9vcGVkX2Rvd25fZGlzcGF0Y2gYBCABKAMiswEKCk1vZGVsU3RhdHMSEAoIbW9kZWxfaWQYASABKAkSJwoJcmVzaWRlbmN5GAIgASgLMhQuaml0bGxtLnYxLlJlc2lkZW5jeRIQCghzZXNzaW9ucxgDIAEoBRIYChB0b2tlbnNfZ2VuZXJhdGVkGAQgASgDEhgKEHRva2Vuc19wcmVmaWxsZWQYBSABKAMSJAoFYmF0Y2gYBiABKAsyFS5qaXRsbG0udjEuQmF0Y2hTdGF0cyKpAwoKQmF0Y2hTdGF0cxINCgV3aWR0aBgBIAEoBRIRCglsaXZlX3Jvd3MYAiABKAUSDwoHd2FpdGluZxgDIAEoBRINCgVzdGVwcxgEIAEoAxIUCgxyb3dzX3N0ZXBwZWQYBSABKAMSEwoLam9pbnRfc3RlcHMYBiABKAMSEgoKam9pbnRfcm93cxgHIAEoAxIRCglzb2xvX3Jvd3MYCCABKAMSGQoRbWF4X3Jvd3NfcGVyX3N0ZXAYCSABKAUSHQoVbWF4X3Nlc3Npb25zX3Blcl9zdGVwGBAgASgFEhUKDXByb21wdF9jaHVua3MYCiABKAMSFAoMcHJvbXB0X3N0ZXBzGAsgASgDEhIKCmFkbWlzc2lvbnMYDCABKAMSHQoVYWRtaXNzaW9uX3dhaXRfbWlsbGlzGA0gASgDEhYKDmpvaW50X3JlZnVzYWxzGA4gASgDEhQKDGxhc3RfcmVmdXNhbBgPIAEoCRIWCg5zZXBhcmF0ZV9zdGVwcxgRIAEoAxInCgdjaG9pY2VzGBIgAygLMhYuaml0bGxtLnYxLkpvaW50Q2hvaWNlIoQBCgtKb2ludENob2ljZRIMCgRyb3dzGAEgASgFEg8KB3NldHRsZWQYAiABKAgSDQoFam9pbnQYAyABKAgSGQoRam9pbnRfc3RlcF9taWxsaXMYBCABKAESHAoUc2VwYXJhdGVfc3RlcF9taWxsaXMYBSABKAESDgoGcHJvYmVzGAYgASgFIvQBCgxTZXNzaW9uU3RhdHMSEgoKc2Vzc2lvbl9pZBgBIAEoCRIQCghtb2RlbF9pZBgCIAEoCRIYChB0b2tlbnNfZ2VuZXJhdGVkGAMgASgDEhgKEHRva2Vuc19wcmVmaWxsZWQYBCABKAMSEAoIcG9zaXRpb24YBSABKAUSEgoKZ2VuZXJhdGluZxgGIAEoCBIWCg5xdWV1ZV9wb3NpdGlvbhgHIAEoBRIiCgRwb29sGAggASgLMhQuaml0bGxtLnYxLlBvb2xTdGF0cxIoCgdtaXh0dXJlGAkgASgLMhcuaml0bGxtLnYxLk1peHR1cmVTdGF0cyI3Cg9HZXRTdGF0c1JlcXVlc3QSEAoIbW9kZWxfaWQYASABKAkSEgoKc2Vzc2lvbl9pZBgCIAEoCSL2AQoQR2V0U3RhdHNSZXNwb25zZRITCgt1bml4X21pbGxpcxgBIAEoAxIlCgZtb2RlbHMYAiADKAsyFS5qaXRsbG0udjEuTW9kZWxTdGF0cxIpCghzZXNzaW9ucxgDIAMoCzIXLmppdGxsbS52MS5TZXNzaW9uU3RhdHMSIgoHZGV2aWNlcxgEIAMoCzIRLmppdGxsbS52MS5EZXZpY2USIwoEaG9zdBgFIAEoCzIVLmppdGxsbS52MS5Ib3N0TWVtb3J5EjIKDG9yY2hlc3RyYXRvchgGIAEoCzIcLmppdGxsbS52MS5PcmNoZXN0cmF0b3JTdGF0cyKfAQoRT3JjaGVzdHJhdG9yU3RhdHMSDwoHZW5hYmxlZBgBIAEoCBISCgpwcm9tb3Rpb25zGAIgASgDEhEKCWRlbW90aW9ucxgDIAEoAxIRCglibG9ja3NfdXAYBCABKAMSEwoLYmxvY2tzX2hvbWUYBSABKAMSKgoFbW92ZXMYBiADKAsyGy5qaXRsbG0udjEuT3JjaGVzdHJhdG9yTW92ZSKGAQoQT3JjaGVzdHJhdG9yTW92ZRITCgt1bml4X21pbGxpcxgBIAEoAxISCgpzZXNzaW9uX2lkGAIgASgJEhAKCG1vZGVsX2lkGAMgASgJEg4KBmJsb2NrcxgEIAEoBRIKCgJ0bxgFIAEoCRILCgN3aHkYBiABKAkSDgoGbWlsbGlzGAcgASgBIlIKEVdhdGNoU3RhdHNSZXF1ZXN0EhAKCG1vZGVsX2lkGAEgASgJEhIKCnNlc3Npb25faWQYAiABKAkSFwoPaW50ZXJ2YWxfbWlsbGlzGAMgASgFIhYKFEdldFNlcnZlckluZm9SZXF1ZXN0IjwKFUdldFNlcnZlckluZm9SZXNwb25zZRIjCgRpbmZvGAEgASgLMhUuaml0bGxtLnYxLlNlcnZlckluZm8y/AEKEFRlbGVtZXRyeVNlcnZpY2USRQoIR2V0U3RhdHMSGi5qaXRsbG0udjEuR2V0U3RhdHNSZXF1ZXN0Ghsuaml0bGxtLnYxLkdldFN0YXRzUmVzcG9uc2UiABJLCgpXYXRjaFN0YXRzEhwuaml0bGxtLnYxLldhdGNoU3RhdHNSZXF1ZXN0Ghsuaml0bGxtLnYxLkdldFN0YXRzUmVzcG9uc2UiADABElQKDUdldFNlcnZlckluZm8SHy5qaXRsbG0udjEuR2V0U2VydmVySW5mb1JlcXVlc3QaIC5qaXRsbG0udjEuR2V0U2VydmVySW5mb1Jlc3BvbnNlIgBCnAEKDWNvbS5qaXRsbG0udjFCDlRlbGVtZXRyeVByb3RvUAFaNmdpdGh1Yi5jb20vaml0bGxtL2ppdGxsbS9zZXJ2ZXIvZ2VuL2ppdGxsbS92MTtqaXRsbG12MaICA0pYWKoCCUppdGxsbS5WMcoCCUppdGxsbVxWMeICFUppdGxsbVxWMVxHUEJNZXRhZGF0YeoCCkppdGxsbTo6VjFiBnByb3RvMw", [file_jitllm_v1_device, file_jitllm_v1_placement]);
 
 /**
  * @generated from message jitllm.v1.ServerInfo
@@ -532,6 +532,14 @@ export type GetStatsResponse = Message<"jitllm.v1.GetStatsResponse"> & {
    * @generated from field: jitllm.v1.HostMemory host = 5;
    */
   host?: HostMemory | undefined;
+
+  /**
+   * What the orchestrator (docs/design/orchestrator.md) has done: its
+   * counters, and its most recent moves, oldest first.
+   *
+   * @generated from field: jitllm.v1.OrchestratorStats orchestrator = 6;
+   */
+  orchestrator?: OrchestratorStats | undefined;
 };
 
 /**
@@ -540,6 +548,105 @@ export type GetStatsResponse = Message<"jitllm.v1.GetStatsResponse"> & {
  */
 export const GetStatsResponseSchema: GenMessage<GetStatsResponse> = /*@__PURE__*/
   messageDesc(file_jitllm_v1_telemetry, 8);
+
+/**
+ * OrchestratorStats is the server moving blocks on its own initiative: a
+ * session that generates promoted onto the cards, idle ones demoted home to
+ * make room.
+ *
+ * @generated from message jitllm.v1.OrchestratorStats
+ */
+export type OrchestratorStats = Message<"jitllm.v1.OrchestratorStats"> & {
+  /**
+   * @generated from field: bool enabled = 1;
+   */
+  enabled: boolean;
+
+  /**
+   * @generated from field: int64 promotions = 2;
+   */
+  promotions: bigint;
+
+  /**
+   * @generated from field: int64 demotions = 3;
+   */
+  demotions: bigint;
+
+  /**
+   * @generated from field: int64 blocks_up = 4;
+   */
+  blocksUp: bigint;
+
+  /**
+   * @generated from field: int64 blocks_home = 5;
+   */
+  blocksHome: bigint;
+
+  /**
+   * @generated from field: repeated jitllm.v1.OrchestratorMove moves = 6;
+   */
+  moves: OrchestratorMove[];
+};
+
+/**
+ * Describes the message jitllm.v1.OrchestratorStats.
+ * Use `create(OrchestratorStatsSchema)` to create a new message.
+ */
+export const OrchestratorStatsSchema: GenMessage<OrchestratorStats> = /*@__PURE__*/
+  messageDesc(file_jitllm_v1_telemetry, 9);
+
+/**
+ * OrchestratorMove is one move the orchestrator made.
+ *
+ * @generated from message jitllm.v1.OrchestratorMove
+ */
+export type OrchestratorMove = Message<"jitllm.v1.OrchestratorMove"> & {
+  /**
+   * @generated from field: int64 unix_millis = 1;
+   */
+  unixMillis: bigint;
+
+  /**
+   * @generated from field: string session_id = 2;
+   */
+  sessionId: string;
+
+  /**
+   * @generated from field: string model_id = 3;
+   */
+  modelId: string;
+
+  /**
+   * @generated from field: int32 blocks = 4;
+   */
+  blocks: number;
+
+  /**
+   * "device" or "host".
+   *
+   * @generated from field: string to = 5;
+   */
+  to: string;
+
+  /**
+   * Why, in words: "promote: generating", "make room for <session>".
+   *
+   * @generated from field: string why = 6;
+   */
+  why: string;
+
+  /**
+   * @generated from field: double millis = 7;
+   */
+  millis: number;
+};
+
+/**
+ * Describes the message jitllm.v1.OrchestratorMove.
+ * Use `create(OrchestratorMoveSchema)` to create a new message.
+ */
+export const OrchestratorMoveSchema: GenMessage<OrchestratorMove> = /*@__PURE__*/
+  messageDesc(file_jitllm_v1_telemetry, 10);
 
 /**
  * @generated from message jitllm.v1.WatchStatsRequest
@@ -568,7 +675,7 @@ export type WatchStatsRequest = Message<"jitllm.v1.WatchStatsRequest"> & {
  * Use `create(WatchStatsRequestSchema)` to create a new message.
  */
 export const WatchStatsRequestSchema: GenMessage<WatchStatsRequest> = /*@__PURE__*/
-  messageDesc(file_jitllm_v1_telemetry, 9);
+  messageDesc(file_jitllm_v1_telemetry, 11);
 
 /**
  * @generated from message jitllm.v1.GetServerInfoRequest
@@ -581,7 +688,7 @@ export type GetServerInfoRequest = Message<"jitllm.v1.GetServerInfoRequest"> & {
  * Use `create(GetServerInfoRequestSchema)` to create a new message.
  */
 export const GetServerInfoRequestSchema: GenMessage<GetServerInfoRequest> = /*@__PURE__*/
-  messageDesc(file_jitllm_v1_telemetry, 10);
+  messageDesc(file_jitllm_v1_telemetry, 12);
 
 /**
  * @generated from message jitllm.v1.GetServerInfoResponse
@@ -598,7 +705,7 @@ export type GetServerInfoResponse = Message<"jitllm.v1.GetServerInfoResponse"> &
  * Use `create(GetServerInfoResponseSchema)` to create a new message.
  */
 export const GetServerInfoResponseSchema: GenMessage<GetServerInfoResponse> = /*@__PURE__*/
-  messageDesc(file_jitllm_v1_telemetry, 11);
+  messageDesc(file_jitllm_v1_telemetry, 13);
 
 /**
  * @generated from service jitllm.v1.TelemetryService

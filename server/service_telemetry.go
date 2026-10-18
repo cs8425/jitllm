@@ -103,6 +103,7 @@ func (s *TelemetryService) snapshot(modelID, sessionID string) *v1.GetStatsRespo
 	}
 	host := s.E.Host()
 	out.Host = pbHost(host)
+	out.Orchestrator = s.E.pbOrchestrator()
 	return out
 }
 

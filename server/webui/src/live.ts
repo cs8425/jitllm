@@ -83,7 +83,11 @@ async function watch() {
   for (;;) {
     try {
       for await (const s of telemetry.watchStats({ intervalMillis: 1000 })) {
+        const moved = (s.orchestrator?.moves.length ?? 0) !== (live.stats?.orchestrator?.moves.length ?? 0) ||
+          s.orchestrator?.moves.at(-1)?.unixMillis !== live.stats?.orchestrator?.moves.at(-1)?.unixMillis;
         live.stats = s;
+        // The server moved layers: the map on screen is stale.
+        if (moved && live.placeFor) refreshPlacement(live.placeFor);
         if (live.list && s.models.map((m) => m.modelId).join() !== live.list.loaded.map((m) => m.modelId).join()) refreshLists();
         if (s.devices.length) live.devs = s.devices;
         live.connected = true;
