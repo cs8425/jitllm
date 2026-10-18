@@ -1,7 +1,7 @@
 // The side panel: the engine's live numbers, the devices, the models and the
 // sampling settings. Nothing here talks to the page's chat; it reads `live`.
 import { h, svg, clear } from "./dom.ts";
-import { live, subscribe, refreshLists, refreshPlacement, changed, Series } from "./live.ts";
+import { live, subscribe, refreshLists, refreshFiles, refreshPlacement, changed, Series } from "./live.ts";
 import { models, placement, sessions, errText } from "./api.ts";
 import { BlockLocation, BlockKind, DeviceKind, ExecutionMode } from "./gen/jitllm/v1/common_pb";
 import type { Device } from "./gen/jitllm/v1/device_pb";
@@ -63,14 +63,14 @@ export function mount(el: HTMLElement, c: Ctx) {
   body = h("div", { class: "pbody" });
   const draw = () => {
     clear(bar);
-    for (const [id, label] of TABS) bar.append(h("button", { class: "tab" + (id === tab ? " on" : ""), text: label, attrs: { role: "tab", "aria-selected": String(id === tab) }, on: { click: () => { tab = id; settings.tab = id; saveSettings(); modelsSig = ""; draw(); render(true); } } }));
+    for (const [id, label] of TABS) bar.append(h("button", { class: "tab" + (id === tab ? " on" : ""), text: label, attrs: { role: "tab", "aria-selected": String(id === tab) }, on: { click: () => { tab = id; settings.tab = id; saveSettings(); modelsSig = ""; draw(); if (id === "models") refreshFiles(); render(true); } } }));
   };
   el.append(bar, body);
   draw();
   subscribe(() => render(false));
   render(true);
 }
-export function showTab(id: string) { tab = id; settings.tab = id; saveSettings(); modelsSig = ""; root.querySelectorAll(".tab").forEach((b, i) => b.classList.toggle("on", TABS[i][0] === id)); render(true); }
+export function showTab(id: string) { if (id === "models") refreshFiles(); tab = id; settings.tab = id; saveSettings(); modelsSig = ""; root.querySelectorAll(".tab").forEach((b, i) => b.classList.toggle("on", TABS[i][0] === id)); render(true); }
 
 function render(force: boolean) {
   if (tab === "engine") engine(force);
@@ -95,7 +95,7 @@ function engine(force: boolean) {
     engineBuilt = true;
     refreshPlacement(ctx.model());
     clearInterval(placeTimer);
-    placeTimer = window.setInterval(() => { if (tab === "engine") refreshPlacement(ctx.model()); }, 2500);
+    placeTimer = window.setInterval(() => { if (tab === "engine") refreshPlacement(ctx.model()); }, 10000);
   }
   const id = ctx.model();
   const ms = live.stats?.models.find((m) => m.modelId === id);
@@ -229,21 +229,21 @@ let filter = "";
 let loadOpts = { device: "", budgetGiB: "", maxBlocks: "" };
 
 function modelsTab(force: boolean) {
-  const m = live.list;
-  const sig = JSON.stringify([m?.loaded.map((x) => x.modelId), m?.files.map((f) => [f.path, f.modelId, f.isContainer]), live.devs.map((d) => d.ref?.id), [...conv.entries()], ctx.model()]);
+  const m = live.files;
+  const sig = JSON.stringify([live.scanning, live.list?.loaded.map((x) => x.modelId), m?.files.map((f) => [f.path, f.modelId, f.isContainer]), live.devs.map((d) => d.ref?.id), [...conv.entries()], ctx.model()]);
   if (!force && sig === modelsSig) return;
   if (!force && body.contains(document.activeElement) && document.activeElement instanceof HTMLInputElement) return; // do not rebuild under typing
   modelsSig = sig;
   clear(body);
-  if (!m) { body.append(h("p", { class: "dim pad", text: "Reading the model folder (this can take a moment on a busy machine)…" })); return; }
+  if (!m) { body.append(h("p", { class: "dim pad", text: live.scanning ? "Reading the model folder (this can take a moment on a busy machine)…" : "The model folder has not been read yet." }), h("button", { class: "btn", text: "Read it", on: { click: () => refreshFiles() } })); return; }
   const act = async (b: HTMLButtonElement, label: string, run: () => Promise<unknown>) => {
     b.disabled = true; b.textContent = label;
     try { await run(); } catch (e) { ctx.toast(errText(e), true); }
-    await refreshLists();
+    await refreshFiles();
     modelsSig = "";
     render(true);
   };
-  const loaded = m.loaded.map((x) => {
+  const loaded = (live.list?.loaded ?? m.loaded).map((x) => {
     const on = x.modelId === ctx.model();
     const un = h("button", { class: "btn sm ghost", text: "Unload" });
     un.addEventListener("click", () => act(un, "Unloading", () => models.unloadModel({ modelId: x.modelId })));
@@ -268,7 +268,7 @@ function modelsTab(force: boolean) {
         for await (const r of models.convert({ sourcePath: f.path, outputPath: out })) { conv.set(f.path, `${r.phase} ${Math.round(r.fraction * 100)}%`); modelsSig = ""; render(true); }
         ctx.toast("Converted " + f.name);
       } catch (e) { ctx.toast(errText(e), true); }
-      conv.delete(f.path); await refreshLists(); modelsSig = ""; render(true);
+      conv.delete(f.path); await refreshFiles(); modelsSig = ""; render(true);
     });
     return h("div", { class: "row" }, h("div", { class: "grow" }, h("div", { class: "fname", text: f.name }), h("div", { class: "dim small", text: [f.size?.human, f.isContainer ? "container" : "source: converts first"].filter(Boolean).join(" · ") })),
       prog ? h("span", { class: "chip", text: prog }) : b);
@@ -284,7 +284,7 @@ function modelsTab(force: boolean) {
         h("label", {}, "Page budget (GiB)", h("input", { value: loadOpts.budgetGiB, placeholder: "auto", inputMode: "decimal", on: { input: (e: any) => (loadOpts.budgetGiB = e.target.value) } })),
         h("label", {}, "Device blocks", h("input", { value: loadOpts.maxBlocks, placeholder: "auto", inputMode: "numeric", on: { input: (e: any) => (loadOpts.maxBlocks = e.target.value) } }))),
       h("p", { class: "dim small", text: "Applied to the next load. Leave blank to let the engine place and budget itself." })),
-    card("Model files", h("input", { class: "search", placeholder: "Filter", value: filter, on: { input: (e: any) => { filter = e.target.value; modelsSig = ""; render(true); (body.querySelector(".search") as HTMLInputElement)?.focus(); } } }),
+    card("Model files", h("div", { class: "filehead" }, h("input", { class: "search", placeholder: "Filter", value: filter, on: { input: (e: any) => { filter = e.target.value; modelsSig = ""; render(true); (body.querySelector(".search") as HTMLInputElement)?.focus(); } } }), h("button", { class: "btn sm", text: live.scanning ? "Reading…" : "Refresh", title: "Read the model folder again", disabled: live.scanning, on: { click: () => refreshFiles() } })),
       ...(rows.length ? rows : [h("p", { class: "dim small", text: "No files here. " + (m.directory ? "Folder: " + m.directory : "") })]))));
 }
 

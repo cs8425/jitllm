@@ -20,7 +20,9 @@ export const live = {
   connected: false,
   error: "",
   needKey: false,
-  list: null as ListModelsResponse | null,
+  list: null as ListModelsResponse | null, // the loaded models, and the files once a scan has run
+  files: null as ListModelsResponse | null, // the last full scan of the model folder
+  scanning: false,
   devs: [] as Device[],
   stats: null as GetStatsResponse | null,
   info: null as ServerInfo | null,
@@ -55,11 +57,23 @@ function fail(e: unknown) {
 }
 
 let polling = false;
+// Listing the model folder walks every file and can take seconds, so a full
+// scan runs only when the Models tab opens, on its Refresh button, and after a
+// load, unload or conversion. Everything else uses the cheap loaded-only call.
+export async function refreshFiles() {
+  if (live.scanning) return;
+  live.scanning = true; changed();
+  try {
+    const m = await models.listModels({});
+    live.files = m; live.list = m; live.connected = true; live.error = "";
+  } catch (e) { fail(e); } finally { live.scanning = false; changed(); }
+}
+
 export async function refreshLists() {
   if (polling) return; // a slow server must not collect a queue of polls
   polling = true;
   try {
-    const [m, d] = await Promise.all([models.listModels({}), devices.listDevices({})]);
+    const [m, d] = await Promise.all([models.listModels({ loadedOnly: true }), devices.listDevices({})]);
     live.list = m; live.devs = d.devices; live.connected = true; live.error = ""; live.needKey = false;
     changed();
   } catch (e) { fail(e); } finally { polling = false; }
@@ -91,7 +105,6 @@ export async function refreshPlacement(modelId: string) {
 
 export async function start() {
   refreshLists();
-  setInterval(refreshLists, 15000);
   watch();
   try { live.info = (await telemetry.getServerInfo({})).info ?? null; changed(); } catch { /* shown when the server answers */ }
 }

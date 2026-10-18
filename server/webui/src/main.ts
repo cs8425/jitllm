@@ -43,7 +43,7 @@ function drawHeader() {
   const rate = live.streaming ? live.decode.last : live.last.tps;
   header.replaceChildren(
     h("button", { class: "icon only-narrow", title: "Conversations (alt+L)", text: "☰", on: { click: () => drawer("chats") } }),
-    h("div", { class: "brand", text: "jitllm" }),
+    h("img", { class: "logo", src: "wordmark.svg", alt: "jitllm", title: "jitllm" }),
     sel,
     h("div", { class: "seg", attrs: { role: "group", "aria-label": "Prompt mode" } },
       h("button", { class: settings.chat ? "on" : "", text: "Chat", title: "Apply the chat template", on: { click: () => setChat(true) } }),
@@ -143,7 +143,7 @@ function emptyState(): HTMLElement {
   const ok = !!modelId();
   const sug = ["Explain how a KV cache speeds up decoding.", "Write a Go function that merges two sorted slices.", "Summarise the tradeoffs of paging model weights from disk.", "Give me a haiku about a warm laptop fan."];
   return h("div", { class: "empty" },
-    h("div", { class: "mark", text: "jitllm" }),
+    h("img", { class: "mark-img", src: "wordmark.svg", alt: "jitllm" }),
     h("p", { class: "tag", text: "Every kernel generated for the machine in front of it." }),
     ok ? h("div", { class: "sug" }, ...sug.map((s) => h("button", { class: "sugg", text: s, on: { click: () => { const p = $<HTMLTextAreaElement>("prompt"); p.value = s; send(); } } })))
       : h("div", { class: "noload" }, h("p", { text: live.list || live.stats ? "No model is loaded." : "Connecting to the server…" }),

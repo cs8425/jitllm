@@ -207,8 +207,11 @@ label.tog input{width:auto;margin:0;accent-color:var(--brand)}
   .only-narrow{display:inline-block}
 }
 @media (max-width:700px){
-  #top{gap:.4rem;padding:.5rem}.brand,.status,.toggle,.seg{display:none}
+  #top{gap:.4rem;padding:.5rem}.status,.toggle,.seg{display:none}
   .sug{grid-template-columns:1fr}.thread{padding:1rem .8rem}.m.user{max-width:94%}#composer{padding:.2rem .6rem .7rem}.foot span:last-child{display:none}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 #chats .search{width:calc(100% - 1.4rem);margin:0 .7rem .5rem}
+.filehead{display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem}.filehead .search{margin:0;flex:1}
+.logo{height:20px;width:auto;display:block;image-rendering:pixelated}
+.mark-img{height:clamp(44px,8vw,72px);width:auto;display:block;margin:0 auto}
